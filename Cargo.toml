@@ -1,0 +1,90 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/client-core",
+    "crates/ui",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Matrix protocol
+matrix-sdk = { version = "0.13", default-features = false, features = [
+    "sqlite",
+    "e2e-encryption",
+    "sso-login",
+    "markdown",
+    "rustls-tls",
+    "automatic-room-key-forwarding",
+] }
+matrix-sdk-ui = { version = "0.13", default-features = false, features = ["rustls-tls"] }
+matrix-sdk-sqlite = { version = "0.13", features = ["state-store", "crypto-store", "event-cache", "bundled"] }
+
+# GUI
+iced = { version = "0.13", features = ["tokio", "image", "svg", "advanced", "lazy", "markdown"] }
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+tokio-stream = "0.1"
+
+# Windows platform integration
+keyring = { version = "3", features = ["windows-native"] }
+tray-icon = "0.19"
+windows = { version = "0.58", features = [
+    "UI_Notifications",
+    "Data_Xml_Dom",
+    "Win32_System_Registry",
+    "UI_ViewManagement",
+] }
+rfd = "0.15"
+
+# Calls
+webrtc = "0.13"
+
+# Media / content rendering
+image = { version = "0.25", features = ["png", "jpeg", "gif", "webp"] }
+# Embedded YouTube playback: hosts the iframe player in a WebView2 child
+# window over the iced surface (Windows ships the WebView2 runtime).
+wry = "0.55"
+raw-window-handle = "0.6"
+pulldown-cmark = "0.12"
+linkify = "0.10"
+emojis = "0.6"
+
+# Utility
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+thiserror = "1"
+anyhow = "1"
+zeroize = { version = "1", features = ["derive"] }
+qrcode = "0.14"
+open = "5"
+uuid = { version = "1", features = ["v4"] }
+
+client-core = { path = "crates/client-core" }
+ui = { path = "crates/ui" }
+
+[profile.dev]
+# matrix-sdk's crypto deps are slow to build unoptimized; keep dev builds usable
+opt-level = 0
+# Disk space is tight in this environment; full debug info roughly doubles
+# target/ size (large .pdb files) for no benefit since we aren't attaching a
+# debugger. Drop it — panics still show file:line via the `RUST_BACKTRACE`
+# unwind machinery, just not a full symbol table.
+debug = false
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

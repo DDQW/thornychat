@@ -1,0 +1,4 @@
+/target
+.vs/
+*.pdb
+.claude/settings.local.json

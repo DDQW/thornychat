@@ -1,0 +1,27 @@
+[package]
+name = "client-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+matrix-sdk = { workspace = true }
+matrix-sdk-ui = { workspace = true }
+matrix-sdk-sqlite = { workspace = true }
+
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+
+keyring = { workspace = true }
+
+directories = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+zeroize = { workspace = true }
+open = { workspace = true }
+uuid = { workspace = true }
+url = "2"
+mime = "0.3"
