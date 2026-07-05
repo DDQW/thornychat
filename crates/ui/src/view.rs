@@ -10,6 +10,11 @@ use crate::screens;
 use crate::state::{App, Route};
 
 pub fn view(app: &App) -> Element<'_, Message> {
+    // `corner_radius` has no slot in iced's `Theme`, so it's synced through
+    // a small global once per frame here, ahead of anything that reads it
+    // (`ghost_button`/`overlay_button`/`selected_ghost_button`).
+    crate::theme::sync_corner_radius(app.theme.corner_radius);
+
     match app.route {
         Route::Login => screens::login::view(&app.login).map(Message::Login),
         Route::Main => {
@@ -22,6 +27,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
             }
             if let Some(player) = &app.video_player {
                 layers = layers.push(video_overlay(player));
+            }
+            if app.show_settings {
+                layers = layers.push(settings_overlay(app));
             }
             layers.into()
         }
@@ -138,6 +146,36 @@ fn video_overlay(player: &crate::state::VideoPlayer) -> Element<'_, Message> {
     )
 }
 
+/// Settings dialog: dimmed backdrop, centered panel with the tab strip and
+/// the active tab's content. Same nesting as `lightbox`/`video_overlay` —
+/// the panel's own buttons/inputs sit inside the backdrop's `mouse_area`,
+/// and iced only bubbles a click through to the backdrop's `on_press` if
+/// nothing inside consumed it first (already relied on above for the video
+/// overlay's header buttons).
+fn settings_overlay(app: &App) -> Element<'_, Message> {
+    let backdrop = |_theme: &iced::Theme| iced::widget::container::Style {
+        background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.5).into()),
+        ..iced::widget::container::Style::default()
+    };
+
+    let header = row![
+        text("Settings").size(16).font(crate::theme::SEMIBOLD_FONT).width(Length::Fill),
+        button(text(crate::theme::icon::CLOSE).font(crate::theme::ICON_FONT).size(12))
+            .on_press(Message::ToggleSettings)
+            .style(crate::theme::ghost_button)
+            .padding([4, 8]),
+    ]
+    .align_y(iced::Center);
+
+    let body = screens::settings::view(&app.settings, &app.theme).map(Message::Settings);
+
+    let card = container(column![header, body].spacing(16).width(Length::Fixed(520.0)))
+        .padding(20)
+        .style(crate::theme::panel);
+
+    opaque(mouse_area(center(card).style(backdrop)).on_press(Message::ToggleSettings))
+}
+
 fn main_shell(app: &App) -> Element<'_, Message> {
     let status = match &app.sync_state {
         SyncState::Connecting => "Connecting...".to_string(),
@@ -210,8 +248,8 @@ fn top_bar<'a>(app: &'a App, status: String) -> Element<'a, Message> {
             .padding([4, 8]),
     );
     bar = bar.push(
-        button(text(if app.dark_mode { "Light" } else { "Dark" }).size(12))
-            .on_press(Message::ToggleDarkMode)
+        button(text(crate::theme::icon::SETTINGS).font(crate::theme::ICON_FONT).size(14))
+            .on_press(Message::ToggleSettings)
             .style(crate::theme::ghost_button)
             .padding([4, 8]),
     );

@@ -20,8 +20,21 @@ fn main() -> iced::Result {
 
     let boot_profile = profile.clone();
 
+    // Loaded synchronously, before the window opens — the only exception to
+    // this app's usual "defer I/O to async tasks" rule, because the font
+    // family has to reach `.default_font()` below, which iced only accepts
+    // as a static builder-time setting (not a reactive per-frame closure
+    // like `.theme()`/`.scale_factor()`).
+    let theme = ui::theme_config::ThemeConfig::load_or_default();
+    let default_font = match &theme.font_family {
+        Some(name) => iced::Font::with_name(Box::leak(name.clone().into_boxed_str())),
+        None => iced::Font::DEFAULT,
+    };
+
     iced::application("Synapse", ui::update, ui::view)
         .subscription(ui::subscription)
-        .theme(|state: &ui::App| ui::theme::windows_theme(state.dark_mode, ui::theme::default_accent()))
-        .run_with(move || ui::boot(boot_profile.clone()))
+        .theme(|state: &ui::App| state.theme.to_iced_theme())
+        .scale_factor(|state: &ui::App| state.theme.ui_scale as f64)
+        .default_font(default_font)
+        .run_with(move || ui::boot(boot_profile.clone(), theme))
 }
