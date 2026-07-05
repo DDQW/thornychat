@@ -1,0 +1,44 @@
+[package]
+name = "ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+client-core = { workspace = true }
+matrix-sdk = { workspace = true }
+
+iced = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+
+pulldown-cmark = { workspace = true }
+linkify = { workspace = true }
+emojis = { workspace = true }
+image = { workspace = true }
+chrono = { workspace = true }
+
+rfd = { workspace = true }
+windows = { workspace = true }
+tray-icon = { workspace = true }
+wry = { workspace = true }
+raw-window-handle = { workspace = true }
+
+tracing = { workspace = true }
+zeroize = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+mime_guess = "2"
+open = { workspace = true }
+
+# Twemoji SVGs are fetched from a public CDN (not Matrix media), cached to
+# disk — reqwest is already in the dependency tree transitively via
+# matrix-sdk, so this doesn't add a new crate to the build, just a new
+# direct edge to one already being compiled.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# Animated GIF widget (iced core's image widget renders only the first
+# frame) — used for animated custom emotes and GIF image messages.
+iced_gif = { version = "0.13", default-features = false, features = ["tokio"] }
