@@ -58,7 +58,10 @@ pub struct App {
     pub keyword_highlights: Vec<String>,
     pub keyword_draft: String,
     pub show_keyword_panel: bool,
-    pub dark_mode: bool,
+    /// Active color/typography/density theme — persisted globally (across
+    /// all profiles) and editable from the Appearance settings tab.
+    pub theme: crate::theme_config::ThemeConfig,
+    pub show_settings: bool,
     /// `mxc://` URL of the image currently open in the fullscreen lightbox.
     pub zoomed_image: Option<String>,
     /// Present while the in-app video player overlay is open (the native
@@ -104,7 +107,7 @@ fn load_emoji_usage(profile: &str) -> std::collections::HashMap<String, u32> {
 }
 
 impl App {
-    pub fn new(profile: String) -> Self {
+    pub fn new(profile: String, theme: crate::theme_config::ThemeConfig) -> Self {
         let emoji_usage = load_emoji_usage(&profile);
         Self {
             route: Route::Login,
@@ -117,7 +120,7 @@ impl App {
             room_list: screens::room_list::State::default(),
             timeline: screens::timeline::State::default(),
             verification: screens::verification::State::default(),
-            settings: screens::settings::State,
+            settings: screens::settings::State::new(&theme),
             call: screens::call::State::default(),
             media: crate::media_cache::State::default(),
             emoji_packs: Vec::new(),
@@ -125,7 +128,8 @@ impl App {
             keyword_highlights: Vec::new(),
             keyword_draft: String::new(),
             show_keyword_panel: false,
-            dark_mode: true,
+            theme,
+            show_settings: false,
             zoomed_image: None,
             video_player: None,
             url_previews: std::collections::HashMap::new(),
@@ -145,8 +149,10 @@ impl App {
 
 /// Boots the app: kicks off an async attempt to restore a previously saved
 /// session before the login screen is shown, so a returning user doesn't
-/// see a login form flash before landing in their rooms.
-pub fn boot(profile: String) -> (App, iced::Task<Message>) {
+/// see a login form flash before landing in their rooms. `theme` is loaded
+/// synchronously by the caller (`main.rs`) before this runs, since it also
+/// feeds the `iced::application` builder's static `.default_font()`.
+pub fn boot(profile: String, theme: crate::theme_config::ThemeConfig) -> (App, iced::Task<Message>) {
     let restore_profile = profile.clone();
     let task = iced::Task::perform(
         async move {
@@ -159,5 +165,5 @@ pub fn boot(profile: String) -> (App, iced::Task<Message>) {
         },
         Message::RestoreResult,
     );
-    (App::new(profile), task)
+    (App::new(profile, theme), task)
 }
