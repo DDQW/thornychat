@@ -10,6 +10,7 @@ pub mod state;
 pub mod steam;
 pub mod subscriptions;
 pub mod theme;
+pub mod theme_config;
 pub mod tweets;
 pub mod twemoji;
 pub mod update;

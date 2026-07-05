@@ -3,8 +3,9 @@
 //! (Mica/acrylic), so this only tunes flat colors to sit close to Windows'
 //! light/dark surface and accent conventions.
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use iced::border;
-use iced::theme::{Custom, Palette};
 use iced::widget::{button, container};
 use iced::{Color, Element, Font, Theme};
 
@@ -37,41 +38,25 @@ pub mod icon {
     pub const CLOSE: &str = "\u{E8BB}";
     /// U+E717 Phone — call banner / start-call button.
     pub const CALL: &str = "\u{E717}";
+    /// U+E713 Settings (gear) — opens the appearance/settings overlay.
+    pub const SETTINGS: &str = "\u{E713}";
 }
 
-/// Builds a theme using the given accent color (ideally read from
-/// `windows::UI::ViewManagement::UISettings::GetColorValue` at startup so
-/// the app matches the user's actual system accent — Phase 7 polish; a
-/// static fallback accent is used until then).
-pub fn windows_theme(dark: bool, accent: Color) -> Theme {
-    let palette = if dark {
-        Palette {
-            background: Color::from_rgb8(0x20, 0x20, 0x20),
-            text: Color::from_rgb8(0xF3, 0xF3, 0xF3),
-            primary: accent,
-            success: Color::from_rgb8(0x0F, 0x7B, 0x0F),
-            danger: Color::from_rgb8(0xC4, 0x2B, 0x1C),
-        }
-    } else {
-        Palette {
-            background: Color::from_rgb8(0xF3, 0xF3, 0xF3),
-            text: Color::from_rgb8(0x20, 0x20, 0x20),
-            primary: accent,
-            success: Color::from_rgb8(0x0F, 0x7B, 0x0F),
-            danger: Color::from_rgb8(0xC4, 0x2B, 0x1C),
-        }
-    };
+/// Corner radius for `ghost_button`/`overlay_button`/`selected_ghost_button`,
+/// synced once per frame from `view()` via `sync_corner_radius`. iced's
+/// `Palette`/`Extended` have no "radius" slot to piggyback on the way colors
+/// do, and these functions are referenced as bare function pointers
+/// (`.style(theme::ghost_button)`) at many call sites across the app — a
+/// signature change would mean touching every one of those for a single
+/// float, so this is synced through a small global instead.
+static CORNER_RADIUS_BITS: AtomicU32 = AtomicU32::new(6.0f32.to_bits());
 
-    Theme::Custom(std::sync::Arc::new(Custom::new(
-        if dark { "Synapse Dark".into() } else { "Synapse Light".into() },
-        palette,
-    )))
+pub fn sync_corner_radius(radius: f32) {
+    CORNER_RADIUS_BITS.store(radius.to_bits(), Ordering::Relaxed);
 }
 
-pub fn default_accent() -> Color {
-    // Windows' default accent blue; overridden by the real system accent in
-    // Phase 7 via `windows::UI::ViewManagement::UISettings`.
-    Color::from_rgb8(0x00, 0x78, 0xD4)
+fn corner_radius() -> f32 {
+    f32::from_bits(CORNER_RADIUS_BITS.load(Ordering::Relaxed))
 }
 
 /// Quiet button: no chrome at rest, soft rounded highlight on hover.
@@ -81,7 +66,7 @@ pub fn ghost_button(theme: &Theme, status: button::Status) -> button::Style {
     let palette = theme.extended_palette();
     let base = button::Style {
         text_color: palette.background.base.text,
-        border: border::rounded(6),
+        border: border::rounded(corner_radius()),
         ..button::Style::default()
     };
     match status {
@@ -103,7 +88,7 @@ pub fn ghost_button(theme: &Theme, status: button::Status) -> button::Style {
 pub fn overlay_button(_theme: &Theme, status: button::Status) -> button::Style {
     let base = button::Style {
         text_color: Color::WHITE,
-        border: border::rounded(6),
+        border: border::rounded(corner_radius()),
         ..button::Style::default()
     };
     match status {
@@ -126,7 +111,7 @@ pub fn selected_ghost_button(theme: &Theme, _status: button::Status) -> button::
     button::Style {
         text_color: palette.primary.weak.text,
         background: Some(palette.primary.weak.color.into()),
-        border: border::rounded(6),
+        border: border::rounded(corner_radius()),
         ..button::Style::default()
     }
 }

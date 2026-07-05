@@ -104,7 +104,7 @@ pub enum Message {
     OpenVideoInBrowser,
 
     // --- top-bar controls (owned by the root shell, not any one screen) ---
-    ToggleDarkMode,
+    ToggleSettings,
     ToggleKeywordPanel,
     KeywordDraftChanged(String),
     AddKeywordClicked,

@@ -234,8 +234,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             close_native_player()
         }
 
-        Message::ToggleDarkMode => {
-            app.dark_mode = !app.dark_mode;
+        Message::ToggleSettings => {
+            app.show_settings = !app.show_settings;
             Task::none()
         }
         Message::ToggleKeywordPanel => {
@@ -259,7 +259,11 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
 
-        Message::Settings(_) | Message::Noop => Task::none(),
+        Message::Settings(msg) => {
+            screens::settings::update(&mut app.settings, &mut app.theme, msg).map(Message::Settings)
+        }
+
+        Message::Noop => Task::none(),
     }
 }
 
@@ -1008,7 +1012,14 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                     members.iter().enumerate().map(|(i, m)| (m.user_id.clone(), i)).collect();
                 app.timeline.composer.member_candidates_lower =
                     members.iter().map(|m| m.display_name.to_lowercase()).collect();
+                let avatar_urls: Vec<String> = members
+                    .iter()
+                    .filter_map(|m| m.avatar_url.as_deref())
+                    .filter(|url| !app.media.is_known(url))
+                    .map(str::to_owned)
+                    .collect();
                 app.timeline.composer.member_candidates = members;
+                ensure_media_fetched(app, avatar_urls);
             }
         }
         ClientEvent::TypingUpdated { room_id, user_ids } => {
