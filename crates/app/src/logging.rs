@@ -1,5 +1,5 @@
 //! Structured logging: console output plus rotated files under
-//! `%APPDATA%\Synapse\<profile>\logs`. Returns a guard that must be kept
+//! `%APPDATA%\ThornyChat\ThornyChat\data\<profile>\logs`. Returns a guard that must be kept
 //! alive for the process lifetime (dropping it stops the non-blocking
 //! writer from flushing).
 
@@ -23,10 +23,18 @@ pub fn init(profile: &str) -> Option<WorkerGuard> {
         return None;
     }
 
-    let file_appender = tracing_appender::rolling::daily(&logs_dir, "synapse.log");
+    let file_appender = tracing_appender::rolling::daily(&logs_dir, "thornychat.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Default to `info`, but silence one specific WARN that matrix-sdk-crypto
+    // emits on *every* sync when the account has server-side key backup enabled
+    // while this device holds no backup key: "Trying to backup room keys but no
+    // backup key was found". It fires every few seconds and buries the logs
+    // (tens of thousands of lines a day). Dropping just that target to `error`
+    // keeps genuine backup failures visible. A caller-set RUST_LOG still
+    // overrides all of this via the env path above.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,matrix_sdk_crypto::backups=error"));
 
     tracing_subscriber::registry()
         .with(EnvFilter::clone(&filter))

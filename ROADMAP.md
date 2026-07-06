@@ -1,9 +1,9 @@
-# Synapse (Matrix client, Rust + iced) — Remaining Work
+# ThornyChat (Matrix client, Rust + iced) — Remaining Work
 
-Windows-first Matrix client at `C:\Users\Office\synapse`. Workspace: `client-core`
+Windows-first Matrix client at `C:\Users\Office\thornychat`. Workspace: `client-core`
 (matrix-sdk 0.13 wrapper, no iced), `ui` (iced 0.13 views, no matrix-sdk types),
 `app` (binary). Tested against a real account on `matrix.org` (SSO login).
-Release builds: `cargo build --release` → `target/x86_64-pc-windows-msvc/release/synapse.exe`.
+Release builds: `cargo build --release` → `target/x86_64-pc-windows-msvc/release/thornychat.exe`.
 
 ## Done (phases 0–4.5)
 Auth (password + browser SSO w/ server discovery), session restore via Windows
@@ -59,16 +59,22 @@ Remaining (media):
   UI while they'd do nothing).
 
 ## Phase 6 — Admin, spaces, room management
-- Spaces: hierarchy tree in sidebar (client-core `rooms/spaces.rs` is a stub;
-  `RoomSummary.parent_space_id` never populated; space rooms currently appear
-  as plain rooms in the list — filter them out or nest under parents).
+- Spaces — explorer done: sidebar "Spaces" section (spaces no longer pose as
+  plain rooms); clicking a space opens the explore overlay (hierarchy API via
+  `rooms/spaces.rs`, depth-1 pages + load-more, drill into subspaces w/ back
+  stack, Join with via servers — `JoinRoom` command now implemented — open
+  joined rooms, join-rule labels for knock/invite-only). Remaining: nest
+  joined rooms under their parent space in the sidebar
+  (`RoomSummary.parent_space_id` still never populated); knock flow (knock
+  rooms are listed as "By request", no button).
 - Room settings dialog: name/topic/avatar, join rules, history visibility,
   encryption toggle.
 - Member management: invite / kick / ban, power-level editor (incl. writing
   MSC3949 tags), per-member profile popover (avatar, id, PL) instead of
   click=DM only.
 - Room creation wizard; invite accept/reject with room preview; join by
-  id/alias (command exists: `JoinRoom`, no UI).
+  *typed* id/alias (`JoinRoom` is implemented and used by the space
+  explorer, but there's no free-text "join room" input anywhere).
 - Leave/forget room.
 
 ## Phase 7 — Windows platform polish & packaging
@@ -88,12 +94,12 @@ Remaining (media):
   keyword panel, etc. (small JSON like emoji usage.json).
 - No logout button / account menu (LoggedOut event is handled, nothing sends it).
 - Threads: only reply-count badges; no thread panel view.
-- Encrypted-room media: images/files degrade to text placeholder
+- Encrypted-room media: images/files/stickers degrade to text placeholder
   (MediaSource::Encrypted unsupported in the media cache path).
 - File messages: "[file: name]" only — no download/save/open.
 - HTML `formatted_body` not rendered (plain body only): no mention pills,
   colored text, spoilers, code blocks from other clients; no "(edited)" tag.
-- Stickers and polls render as placeholders.
+- Polls render as placeholders.
 - Server-side `/search` (local filter only today).
 - Account-wide default notification mode UI (per-room + keywords exist).
 - Animated WebP/APNG emotes render as stills (GIF only).
@@ -109,11 +115,12 @@ Remaining (media):
 
 ## Environment notes for a fresh chat
 - rustup toolchain, target `x86_64-pc-windows-msvc`; build logs pattern:
-  `cargo build --release 2>&1 | Out-File $env:TEMP\synapse_build.log`.
-- App data: `%APPDATA%\Synapse\Synapse\data\<profile>\` (store, logs,
-  emoji-cache incl. usage.json).
+  `cargo build --release 2>&1 | Out-File $env:TEMP\thornychat_build.log`.
+- App data: `%APPDATA%\ThornyChat\ThornyChat\data\<profile>\` (store, logs,
+  emoji-cache incl. usage.json). Pre-rename installs are migrated from
+  `%APPDATA%\Synapse\Synapse` on first launch (see `client-core/src/store.rs`).
 - Debug an issue: `$env:RUST_LOG="info,client_core=debug"` then read
-  `...\data\default\logs\synapse.log.<date>`.
+  `...\data\default\logs\thornychat.log.<date>`.
 - Custom state events (emoji packs, power tags) must be fetched via
   `client.send(get_state_events_for_key)` — sliding sync's required_state
   never includes them; same pattern for any future MSC state.

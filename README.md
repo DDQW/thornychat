@@ -1,4 +1,4 @@
-# Synapse
+# ThornyChat
 
 A desktop-first, Windows-first Matrix client built in Rust with [iced](https://github.com/iced-rs/iced) and [matrix-rust-sdk](https://github.com/matrix-org/matrix-rust-sdk).
 
@@ -19,6 +19,6 @@ cargo build
 cargo run
 ```
 
-Session data and logs are stored under `%APPDATA%\Synapse\<profile>` (profile defaults to `default`; pass a profile name as the first CLI argument to run multiple accounts side by side).
+Session data and logs are stored under `%APPDATA%\ThornyChat\ThornyChat\data\<profile>` (profile defaults to `default`; pass a profile name as the first CLI argument to run multiple accounts side by side). Installs that predate the rename to ThornyChat are migrated from `%APPDATA%\Synapse` automatically on first launch.
 
 Note: this scaffold was written without a local Rust toolchain to compile against, so `matrix-sdk`/`matrix-sdk-ui`/`iced` API surface (login builder methods, `SyncService` state enum, `iced::application` builder methods) may need small adjustments to match the exact versions `cargo` resolves on first build — the files most likely to need reconciliation are called out in comments (`session.rs`, `sync.rs`, `main.rs`).

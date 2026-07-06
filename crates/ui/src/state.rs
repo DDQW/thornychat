@@ -19,6 +19,36 @@ pub struct VideoPlayer {
     pub error: Option<String>,
 }
 
+/// An open "leave or forget this room?" confirmation prompt, raised by
+/// right-clicking a room in the sidebar. Carries the display name so the
+/// modal can name the room without re-looking it up.
+#[derive(Debug, Clone)]
+pub struct RoomActionPrompt {
+    pub room_id: String,
+    pub room_name: String,
+    /// True for a direct message (the modal wording differs slightly).
+    pub is_dm: bool,
+}
+
+/// Default and minimum size of the Settings panel — resizable by the user
+/// via the bottom-right grip (see `view::settings_overlay`). Not persisted:
+/// resets to the default each launch, same scope as the rest of the panel's
+/// transient UI state.
+pub const DEFAULT_SETTINGS_SIZE: iced::Size = iced::Size { width: 760.0, height: 640.0 };
+pub const MIN_SETTINGS_WIDTH: f32 = 480.0;
+pub const MIN_SETTINGS_HEIGHT: f32 = 360.0;
+
+/// An in-progress drag of the Settings panel's resize grip.
+#[derive(Debug, Clone, Copy)]
+pub struct ResizeDrag {
+    pub size_at_start: iced::Size,
+    /// Cursor position the drag delta is measured from. `None` until the
+    /// first `CursorMoved` after the press — `mouse_area::on_press` doesn't
+    /// hand back a position, so the first move establishes the anchor
+    /// instead of jumping the panel size on press.
+    pub anchor: Option<iced::Point>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
     /// No session yet; showing the login screen.
@@ -55,18 +85,55 @@ pub struct App {
     /// notification watcher (including changes made from other devices).
     pub notification_modes:
         std::collections::HashMap<String, client_core::events::NotificationMode>,
+    /// Account-wide defaults (direct messages, group chats) that a room
+    /// follows when it has no entry in `notification_modes`. Kept fresh by
+    /// the same client-core watcher, including changes from other devices.
+    pub default_notification_modes:
+        (client_core::events::NotificationMode, client_core::events::NotificationMode),
     pub keyword_highlights: Vec<String>,
     pub keyword_draft: String,
     pub show_keyword_panel: bool,
     /// Active color/typography/density theme — persisted globally (across
     /// all profiles) and editable from the Appearance settings tab.
     pub theme: crate::theme_config::ThemeConfig,
+    /// `theme` pre-built into an `iced::Theme`, rebuilt only when `theme`
+    /// changes (in the `Settings` update arm). iced's `.theme()` closure is
+    /// called on every update cycle with no dirty-check, and
+    /// `to_iced_theme()` regenerates the whole extended palette + allocates —
+    /// far too heavy to run per composer keystroke / sync tick. Cloning this
+    /// is a cheap `Arc` refcount bump (`Theme::Custom` is `Arc`-backed).
+    pub built_theme: iced::Theme,
+    /// Privacy preferences (read receipts, typing, link previews) — persisted
+    /// globally and editable from the Privacy settings tab. Gates the
+    /// activity-sharing commands dispatched in `update.rs`. Defaults to the
+    /// most private stance on a fresh install.
+    pub privacy: crate::privacy_config::PrivacyConfig,
+    /// Whether new DMs/rooms this client creates turn on encryption — both
+    /// default off. Persisted globally; read when building create commands.
+    pub encryption: crate::encryption_config::EncryptionConfig,
+    /// Composer spell-check / autocorrect preferences — persisted globally and
+    /// editable from the General settings tab. Read by the composer on every
+    /// keystroke (the Windows speller itself lives in `crate::spellcheck`).
+    pub spellcheck: crate::spellcheck_config::SpellcheckConfig,
     pub show_settings: bool,
+    /// Current size of the Settings panel, user-resizable via its
+    /// bottom-right grip.
+    pub settings_panel_size: iced::Size,
+    /// Present while the user is actively dragging the resize grip — also
+    /// what gates the mouse-tracking subscription in `subscriptions.rs`.
+    pub settings_resize_drag: Option<ResizeDrag>,
     /// `mxc://` URL of the image currently open in the fullscreen lightbox.
     pub zoomed_image: Option<String>,
     /// Present while the in-app video player overlay is open (the native
     /// webview itself lives on the event-loop thread — see `video_player`).
     pub video_player: Option<VideoPlayer>,
+    /// Present while the leave/forget confirmation modal is open (raised by
+    /// right-clicking a room in the sidebar).
+    pub pending_room_action: Option<RoomActionPrompt>,
+    /// Present while the space explorer overlay is open (browsing a
+    /// space's rooms via the hierarchy API; opened by clicking a space in
+    /// the sidebar).
+    pub space_explorer: Option<screens::space_explorer::State>,
     /// Link-preview cache, keyed by URL. `None` = requested (or failed) —
     /// either way, don't re-request; `Some` = OpenGraph data to render.
     pub url_previews:
@@ -89,6 +156,24 @@ pub struct App {
     /// frame.
     pub emoji_shortcode_index:
         std::collections::HashMap<String, client_core::events::CustomEmoji>,
+    /// Stickers seen in rooms (and ones the user picks) — the grow-with-use
+    /// collection shown in the sticker picker. Most-recent first, deduped by
+    /// `url`, capped at [`MAX_COLLECTED_STICKERS`]. Loaded from and persisted
+    /// to a small per-profile JSON file, exactly like `emoji_usage`.
+    pub sticker_collection: Vec<CollectedSticker>,
+}
+
+/// One sticker remembered for reuse — harvested from an `m.sticker` event
+/// seen in a room, or picked from a pack. Persisted per-profile so the
+/// collection survives restarts and grows with use. Deduped by `url`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CollectedSticker {
+    /// `mxc://` URL of the sticker image.
+    pub url: String,
+    /// Alt text / shortcode, reused as the event `body` when resending.
+    pub body: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
 }
 
 /// Where the usage history lives (inside the profile's emoji cache dir —
@@ -106,9 +191,31 @@ fn load_emoji_usage(profile: &str) -> std::collections::HashMap<String, u32> {
         .unwrap_or_default()
 }
 
+/// Cap on the grow-with-use sticker collection: most-recent kept, oldest
+/// dropped past this. Big enough to be useful, bounded so the picker grid and
+/// the JSON file stay small.
+pub const MAX_COLLECTED_STICKERS: usize = 120;
+
+/// Where the harvested sticker collection lives (next to the emoji usage
+/// history, in the profile's emoji cache dir).
+pub fn sticker_collection_path(profile: &str) -> Option<std::path::PathBuf> {
+    client_core::store::AppPaths::for_profile(profile)
+        .ok()
+        .map(|paths| paths.emoji_cache_dir().join("stickers.json"))
+}
+
+fn load_sticker_collection(profile: &str) -> Vec<CollectedSticker> {
+    sticker_collection_path(profile)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|contents| serde_json::from_str(&contents).ok())
+        .unwrap_or_default()
+}
+
 impl App {
     pub fn new(profile: String, theme: crate::theme_config::ThemeConfig) -> Self {
         let emoji_usage = load_emoji_usage(&profile);
+        let sticker_collection = load_sticker_collection(&profile);
+        let built_theme = theme.to_iced_theme();
         Self {
             route: Route::Login,
             profile,
@@ -125,18 +232,31 @@ impl App {
             media: crate::media_cache::State::default(),
             emoji_packs: Vec::new(),
             notification_modes: std::collections::HashMap::new(),
+            default_notification_modes: (
+                client_core::events::NotificationMode::AllMessages,
+                client_core::events::NotificationMode::AllMessages,
+            ),
             keyword_highlights: Vec::new(),
             keyword_draft: String::new(),
             show_keyword_panel: false,
             theme,
+            built_theme,
+            privacy: crate::privacy_config::PrivacyConfig::load_or_default(),
+            encryption: crate::encryption_config::EncryptionConfig::load_or_default(),
+            spellcheck: crate::spellcheck_config::SpellcheckConfig::load_or_default(),
             show_settings: false,
+            settings_panel_size: DEFAULT_SETTINGS_SIZE,
+            settings_resize_drag: None,
             zoomed_image: None,
             video_player: None,
+            pending_room_action: None,
+            space_explorer: None,
             url_previews: std::collections::HashMap::new(),
             tweet_previews: std::collections::HashMap::new(),
             steam_previews: std::collections::HashMap::new(),
             emoji_usage,
             emoji_shortcode_index: std::collections::HashMap::new(),
+            sticker_collection,
         }
     }
 
@@ -152,9 +272,16 @@ impl App {
 /// see a login form flash before landing in their rooms. `theme` is loaded
 /// synchronously by the caller (`main.rs`) before this runs, since it also
 /// feeds the `iced::application` builder's static `.default_font()`.
-pub fn boot(profile: String, theme: crate::theme_config::ThemeConfig) -> (App, iced::Task<Message>) {
+/// `start_minimized` comes from the `--minimized` launch flag (autostart);
+/// minimizing is queued independently of the restore task so it doesn't wait
+/// on a slow network round trip before hiding the window.
+pub fn boot(
+    profile: String,
+    theme: crate::theme_config::ThemeConfig,
+    start_minimized: bool,
+) -> (App, iced::Task<Message>) {
     let restore_profile = profile.clone();
-    let task = iced::Task::perform(
+    let restore_task = iced::Task::perform(
         async move {
             let paths = client_core::store::AppPaths::for_profile(&restore_profile)
                 .map_err(|e| e.to_string())?;
@@ -165,5 +292,11 @@ pub fn boot(profile: String, theme: crate::theme_config::ThemeConfig) -> (App, i
         },
         Message::RestoreResult,
     );
-    (App::new(profile, theme), task)
+
+    let mut tasks = vec![restore_task];
+    if start_minimized {
+        tasks.push(iced::window::get_latest().and_then(|id| iced::window::minimize(id, true)));
+    }
+
+    (App::new(profile, theme), iced::Task::batch(tasks))
 }

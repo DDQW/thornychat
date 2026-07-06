@@ -1,11 +1,11 @@
 [package]
-name = "synapse"
+name = "thornychat"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "synapse"
+name = "thornychat"
 path = "src/main.rs"
 
 [dependencies]

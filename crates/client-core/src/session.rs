@@ -22,8 +22,11 @@ use zeroize::Zeroizing;
 use crate::error::{CoreError, CoreResult};
 use crate::store::AppPaths;
 
-const KEYRING_SERVICE: &str = "Synapse Matrix Client";
-const DEVICE_DISPLAY_NAME: &str = "Synapse (Windows)";
+const KEYRING_SERVICE: &str = "ThornyChat Matrix Client";
+/// Service name tokens were stored under before the rename to ThornyChat;
+/// still read (and migrated forward) so an existing login survives.
+const LEGACY_KEYRING_SERVICE: &str = "Synapse Matrix Client";
+const DEVICE_DISPLAY_NAME: &str = "ThornyChat (Windows)";
 
 /// Non-secret session metadata cached on disk so we know whether a saved
 /// login exists without touching the keyring or network.
@@ -133,14 +136,18 @@ pub async fn try_restore(paths: &AppPaths) -> CoreResult<Option<RestoredSession>
     let entry = keyring::Entry::new(KEYRING_SERVICE, &meta.user_id)?;
     let tokens_json = match entry.get_password() {
         Ok(pw) => pw,
-        Err(keyring::Error::NoEntry) => {
-            // Tokens are gone: the store's crypto account is bound to the dead
-            // device id, and a fresh login on top of it fails with
-            // MismatchedAccount (orphaning a new server-side device per retry).
-            let _ = std::fs::remove_file(&meta_path);
-            discard_state_store(paths);
-            return Ok(None);
-        }
+        Err(keyring::Error::NoEntry) => match migrate_legacy_keyring_entry(&entry, &meta.user_id)
+        {
+            Some(pw) => pw,
+            None => {
+                // Tokens are gone: the store's crypto account is bound to the dead
+                // device id, and a fresh login on top of it fails with
+                // MismatchedAccount (orphaning a new server-side device per retry).
+                let _ = std::fs::remove_file(&meta_path);
+                discard_state_store(paths);
+                return Ok(None);
+            }
+        },
         Err(e) => return Err(e.into()),
     };
     let tokens: SessionTokens = match serde_json::from_str(&tokens_json) {
@@ -297,6 +304,20 @@ pub async fn logout(paths: &AppPaths, client: &Client) -> CoreResult<()> {
     discard_state_store(paths);
 
     Ok(())
+}
+
+/// Tokens saved before the rename to ThornyChat live under the old keyring
+/// service name. On a miss under the new name, copy them across (deleting
+/// the old entry only once the copy is confirmed written, so a failed write
+/// retries next launch instead of losing the session).
+fn migrate_legacy_keyring_entry(new_entry: &keyring::Entry, user_id: &str) -> Option<String> {
+    let old_entry = keyring::Entry::new(LEGACY_KEYRING_SERVICE, user_id).ok()?;
+    let tokens = old_entry.get_password().ok()?;
+    if new_entry.set_password(&tokens).is_ok() {
+        let _ = old_entry.delete_credential();
+        tracing::info!("migrated session tokens from legacy Synapse keyring entry");
+    }
+    Some(tokens)
 }
 
 /// Removes the on-disk state/crypto store. Called whenever the saved session

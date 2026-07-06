@@ -1,5 +1,5 @@
-//! Markdown composer: live-preview toggle, @mention autocomplete, emoji
-//! picker (unicode + custom emoji packs), and attachment picking. This
+//! Message composer: @mention autocomplete, emoji picker (unicode + custom
+//! emoji packs), and attachment picking. This
 //! module never talks to `client_core::sync`/`mpsc` directly — it only
 //! produces `Effect`s, which the root dispatcher (`ui::update`) turns into
 //! actual `ClientCommand` sends, generating and tracking the `request_id`
@@ -7,18 +7,29 @@
 //! `ClientEvent::CommandSucceeded`/`CommandFailed`.
 
 use std::collections::HashMap;
+use std::ops::Range;
 
 use client_core::commands::RequestId;
 use client_core::events::{EmojiPack, ReplyPreview, RoomMember};
-use iced::widget::{button, column, container, markdown, row, text, text_input};
+use iced::widget::{button, column, container, row, text, text_input};
 use iced::{Element, Length, Task};
+
+use crate::spellcheck_config::SpellcheckConfig;
+
+/// Which tab the composer's picker shows while open. Set by whichever button
+/// opened it (emoji vs sticker) and by the in-panel tab bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PickerTab {
+    #[default]
+    Emoji,
+    Sticker,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct State {
     pub body: String,
-    pub preview_items: Vec<markdown::Item>,
-    pub show_preview: bool,
     pub show_emoji_picker: bool,
+    pub picker_tab: PickerTab,
     pub member_candidates: Vec<RoomMember>,
     /// Lowercased display names, index-parallel to `member_candidates`
     /// (built once per roster update) — the mention filter runs on every
@@ -36,21 +47,121 @@ pub struct State {
     /// it shared `pending_request`, an attachment's CommandSucceeded would
     /// run the SendSucceeded reset and wipe a typed-but-unsent draft.
     pub pending_attachment_request: Option<RequestId>,
+    /// In-flight sticker send. A separate slot (like attachments) so a sticker
+    /// send never runs the text-draft reset that a `SendSucceeded` would.
+    pub pending_sticker_request: Option<RequestId>,
     pub error: Option<String>,
+    /// Spell-check suggestion bar + autocorrect bookkeeping (all plain data;
+    /// the Windows speller is only touched in `update`).
+    pub spell: SpellState,
+}
+
+/// Spell-check state for the composer, recomputed on every edit. Holds only
+/// the speller's plain-data verdict so `view` never has to talk to COM.
+#[derive(Debug, Clone, Default)]
+pub struct SpellState {
+    /// The flagged word the suggestion bar targets, or `None`.
+    pub flagged: Option<Flagged>,
+    /// Set for exactly one edit after an autocorrect: if the next edit is the
+    /// Backspace that would delete the space we just added, we restore the
+    /// original word instead ("undo autocorrect", like a phone keyboard).
+    pending_revert: Option<Revert>,
+    /// Memo of the speller's verdict for the last word checked, so the
+    /// synchronous COM call isn't repeated on every keystroke while the
+    /// draft ends in whitespace and the trailing word hasn't changed.
+    /// Keyed by the word (not its range — edits earlier in the body shift
+    /// the range without changing the word).
+    last_checked: Option<(String, crate::spellcheck::Analysis)>,
+}
+
+/// A misspelled word the suggestion bar is offering fixes for.
+#[derive(Debug, Clone)]
+pub struct Flagged {
+    /// Byte range of the word within `State::body`.
+    pub range: Range<usize>,
+    pub word: String,
+    pub suggestions: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct Revert {
+    /// Body value a single Backspace produces (corrected text minus the
+    /// trailing space) — the trigger that means "undo the autocorrect".
+    undo_trigger: String,
+    /// Body to restore on undo (the user's original word, no trailing space).
+    reverted: String,
+}
+
+impl SpellState {
+    /// Re-runs the speller on the last completed word of `body` and updates
+    /// the suggestion bar. Clears the bar (a no-op otherwise) when spell check
+    /// is disabled, or the trailing word is still being typed / isn't prose.
+    fn recompute(&mut self, body: &str, cfg: &SpellcheckConfig) {
+        self.recompute_cached(body, cfg, None);
+    }
+
+    /// Like [`Self::recompute`], but reuses `cached` (an analysis of the
+    /// trailing word computed this same edit, e.g. by autocorrect) instead of
+    /// asking the speller again. Also memoizes per word so repeated calls
+    /// while the trailing word is unchanged (every keystroke of a mid-body
+    /// edit while the draft ends in whitespace) skip the COM round trip.
+    fn recompute_cached(
+        &mut self,
+        body: &str,
+        cfg: &SpellcheckConfig,
+        cached: Option<crate::spellcheck::Analysis>,
+    ) {
+        self.flagged = None;
+        if !cfg.enabled {
+            return;
+        }
+        let Some((range, word, raw)) = last_completed_word(body) else {
+            return;
+        };
+        if !is_checkable(&raw) {
+            return;
+        }
+        let analysis = if let Some(analysis) = cached {
+            // Fresh from this same edit (autocorrect ran the speller and
+            // left the body untouched) — reuse it and refresh the memo.
+            self.last_checked = Some((word.clone(), analysis.clone()));
+            analysis
+        } else {
+            match &self.last_checked {
+                Some((checked, verdict)) if *checked == word => verdict.clone(),
+                _ => {
+                    let fresh = crate::spellcheck::analyze(&word);
+                    self.last_checked = Some((word.clone(), fresh.clone()));
+                    fresh
+                }
+            }
+        };
+        if analysis.misspelled && !analysis.suggestions.is_empty() {
+            self.flagged = Some(Flagged { range, word, suggestions: analysis.suggestions });
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     BodyChanged(String),
-    TogglePreview(bool),
     Send,
     ToggleEmojiPicker,
+    ToggleStickerPicker,
+    SelectPickerTab(PickerTab),
     EmojiPicked(&'static str),
     CustomEmojiPicked { shortcode: String, mxc_url: String },
+    /// A sticker was picked from the sticker tab — sent immediately as an
+    /// `m.sticker` (the picker stays open so several can go out in a row).
+    StickerPicked { url: String, body: String, width: Option<u32>, height: Option<u32> },
     MentionCandidateClicked(String, String),
     PickAttachment,
     AttachmentPicked(Result<(String, Vec<u8>), String>),
-    LinkClicked(markdown::Url),
+
+    /// A suggestion-bar button was clicked — replace the flagged word with it.
+    SpellSuggestionPicked(String),
+    /// "Add to dictionary" was clicked for the flagged word.
+    SpellAddToDictionary,
 
     CancelReply,
 
@@ -66,26 +177,54 @@ pub enum Effect {
     SendAttachment { filename: String, bytes: Vec<u8>, mime: String },
     Typing(bool),
     EnsureEmojiFetched(Vec<String>),
+    /// The sticker tab was opened/selected — the root dispatcher ensures the
+    /// collected stickers' images are fetched (pack images are already
+    /// fetched when packs load).
+    EnsureStickersFetched,
+    /// A sticker was picked — post it as an `m.sticker` event.
+    SendSticker { url: String, body: String, width: Option<u32>, height: Option<u32> },
     /// An emoji was used — the root dispatcher bumps the usage history
     /// that feeds the picker's "Frequently used" section. Key: the glyph
     /// for unicode, the `mxc://` URL for custom emoji.
     EmojiUsed(String),
 }
 
-pub fn update(state: &mut State, message: Message) -> (Task<Message>, Effect) {
+pub fn update(
+    state: &mut State,
+    message: Message,
+    spell: &SpellcheckConfig,
+) -> (Task<Message>, Effect) {
     match message {
         Message::BodyChanged(body) => {
             let typing = Effect::Typing(!body.trim().is_empty());
-            state.body = body;
+            let previous = std::mem::replace(&mut state.body, body);
             // A stale send/attach error shouldn't pin itself above the
             // composer once the user has moved on.
             state.error = None;
-            recompute_preview(state);
+
+            // Backspace immediately after an autocorrect undoes it (restores
+            // the original word) instead of just deleting the space.
+            if let Some(revert) = state.spell.pending_revert.take() {
+                if state.body == revert.undo_trigger {
+                    state.body = revert.reverted;
+                    state.spell.recompute(&state.body, spell);
+                    return (Task::none(), typing);
+                }
+            }
+
+            // Autocorrect only fires on the "typed a space at the end" edit —
+            // the one shape we can locate the finished word in without a
+            // cursor position from the text input. When it ran the speller
+            // and left the body untouched, its analysis is handed straight
+            // to recompute so the word isn't analyzed twice per space.
+            let cached = if spell.autocorrect && typed_trailing_boundary(&previous, &state.body) {
+                maybe_autocorrect(state)
+            } else {
+                None
+            };
+
+            state.spell.recompute_cached(&state.body, spell, cached);
             (Task::none(), typing)
-        }
-        Message::TogglePreview(show) => {
-            state.show_preview = show;
-            (Task::none(), Effect::None)
         }
         Message::Send => {
             // In-flight guard: a second Enter (or Enter + Send click) before
@@ -110,22 +249,53 @@ pub fn update(state: &mut State, message: Message) -> (Task<Message>, Effect) {
             (Task::none(), Effect::None)
         }
         Message::ToggleEmojiPicker => {
-            state.show_emoji_picker = !state.show_emoji_picker;
-            let effect = if state.show_emoji_picker {
-                Effect::EnsureEmojiFetched(crate::emoji_picker::all_unicode_glyphs())
-            } else {
-                Effect::None
+            // Close if it's already on the emoji tab; otherwise open it (or
+            // switch to the emoji tab if the sticker tab was showing).
+            if state.show_emoji_picker && state.picker_tab == PickerTab::Emoji {
+                state.show_emoji_picker = false;
+                return (Task::none(), Effect::None);
+            }
+            state.show_emoji_picker = true;
+            state.picker_tab = PickerTab::Emoji;
+            (Task::none(), Effect::EnsureEmojiFetched(crate::emoji_picker::all_unicode_glyphs()))
+        }
+        Message::ToggleStickerPicker => {
+            if state.show_emoji_picker && state.picker_tab == PickerTab::Sticker {
+                state.show_emoji_picker = false;
+                return (Task::none(), Effect::None);
+            }
+            state.show_emoji_picker = true;
+            state.picker_tab = PickerTab::Sticker;
+            (Task::none(), Effect::EnsureStickersFetched)
+        }
+        Message::SelectPickerTab(tab) => {
+            state.picker_tab = tab;
+            let effect = match tab {
+                PickerTab::Emoji => {
+                    Effect::EnsureEmojiFetched(crate::emoji_picker::all_unicode_glyphs())
+                }
+                PickerTab::Sticker => Effect::EnsureStickersFetched,
             };
             (Task::none(), effect)
         }
+        Message::StickerPicked { url, body, width, height } => {
+            // Fire-and-forget, like a reaction: the picker stays open so a
+            // few stickers can go out in a row.
+            (Task::none(), Effect::SendSticker { url, body, width, height })
+        }
         Message::EmojiPicked(glyph) => {
             state.body.push_str(glyph);
-            recompute_preview(state);
+            // The body changed by insertion, not by the undo-trigger
+            // Backspace — a stale revert would misfire on a later deletion
+            // and rewrite text the user didn't ask to restore.
+            state.spell.pending_revert = None;
+            state.spell.recompute(&state.body, spell);
             (Task::none(), Effect::EmojiUsed(glyph.to_string()))
         }
         Message::CustomEmojiPicked { shortcode, mxc_url } => {
             state.body.push_str(&format!(":{shortcode}: "));
-            recompute_preview(state);
+            state.spell.pending_revert = None;
+            state.spell.recompute(&state.body, spell);
             (Task::none(), Effect::EmojiUsed(mxc_url))
         }
         Message::MentionCandidateClicked(user_id, display_name) => {
@@ -138,7 +308,12 @@ pub fn update(state: &mut State, message: Message) -> (Task<Message>, Effect) {
             if !state.mentioned.iter().any(|(id, _)| *id == user_id) {
                 state.mentioned.push((user_id, display_name));
             }
-            recompute_preview(state);
+            state.spell.pending_revert = None;
+            // A just-picked mention is never a typo — don't spell-flag the
+            // tail of a multi-word display name ("@John Smyth" → "Smyth"
+            // would pop "Did you mean: Smith", and clicking it would corrupt
+            // the mention text). Any later edit recomputes via BodyChanged.
+            state.spell.flagged = None;
             (Task::none(), Effect::None)
         }
         Message::PickAttachment => (Task::none(), Effect::PickAttachment),
@@ -156,17 +331,36 @@ pub fn update(state: &mut State, message: Message) -> (Task<Message>, Effect) {
             state.error = Some(reason);
             (Task::none(), Effect::None)
         }
-        Message::LinkClicked(url) => {
-            let _ = open::that(url.as_str());
+        Message::SpellSuggestionPicked(replacement) => {
+            if let Some(flagged) = state.spell.flagged.take() {
+                // Defensive: only replace if the range still holds the exact
+                // word we flagged, so a body edited out from under the bar is
+                // never corrupted.
+                if state.body.get(flagged.range.clone()) == Some(flagged.word.as_str()) {
+                    state.body.replace_range(flagged.range, &replacement);
+                }
+            }
+            state.spell.pending_revert = None;
+            state.spell.recompute(&state.body, spell);
+            (Task::none(), Effect::None)
+        }
+        Message::SpellAddToDictionary => {
+            if let Some(flagged) = state.spell.flagged.take() {
+                crate::spellcheck::add_to_dictionary(&flagged.word);
+            }
+            // The dictionary just changed — the memoized verdict for this
+            // word is stale (it would keep flagging the word just added).
+            state.spell.last_checked = None;
+            state.spell.recompute(&state.body, spell);
             (Task::none(), Effect::None)
         }
         Message::SendSucceeded => {
             state.body.clear();
             state.mentioned.clear();
-            state.preview_items.clear();
             state.replying_to = None;
             state.pending_request = None;
             state.error = None;
+            state.spell = SpellState::default();
             (Task::none(), Effect::Typing(false))
         }
         Message::SendFailed(reason) => {
@@ -175,10 +369,6 @@ pub fn update(state: &mut State, message: Message) -> (Task<Message>, Effect) {
             (Task::none(), Effect::None)
         }
     }
-}
-
-fn recompute_preview(state: &mut State) {
-    state.preview_items = markdown::parse(&state.body).collect();
 }
 
 /// The `@partial` word currently being typed at the end of the composer, if
@@ -190,11 +380,145 @@ fn active_mention_query(body: &str) -> Option<&str> {
     last_word.strip_prefix('@')
 }
 
+/// Applies the speller's high-confidence replacement to the just-finished
+/// word, if it offers one, and records how to undo it on the next Backspace.
+/// Called only after `typed_trailing_boundary`, so the finished word is the
+/// last completed word of `body`.
+///
+/// Returns the analysis when the speller ran AND the body was left untouched
+/// — the caller hands it to `recompute_cached` so the same word isn't
+/// analyzed twice per space. Returns `None` when the speller never ran or
+/// the body was rewritten (the analysis would describe the old word).
+fn maybe_autocorrect(state: &mut State) -> Option<crate::spellcheck::Analysis> {
+    let (range, word, raw) = last_completed_word(&state.body)?;
+    // Don't silently rewrite mentions/URLs/code, and leave leading-capital
+    // words (names, sentence starts) alone — the suggestion bar still offers
+    // those, but autocorrect shouldn't touch them.
+    if !is_checkable(&raw) || !starts_lowercase(&word) {
+        return None;
+    }
+    let analysis = crate::spellcheck::analyze(&word);
+    let Some(replacement) = analysis.replacement.clone() else {
+        return Some(analysis);
+    };
+    if replacement == word {
+        return Some(analysis);
+    }
+    // The last char of the body is the boundary (space) the user just typed;
+    // both the undo trigger and the restore target drop it.
+    let Some(boundary) = state.body.chars().next_back() else {
+        return Some(analysis);
+    };
+    let boundary_len = boundary.len_utf8();
+
+    let original_body = state.body.clone();
+    state.body.replace_range(range, &replacement);
+
+    let undo_trigger = state.body[..state.body.len() - boundary_len].to_string();
+    let reverted = original_body[..original_body.len() - boundary_len].to_string();
+    state.spell.pending_revert = Some(Revert { undo_trigger, reverted });
+    None
+}
+
+/// The last whitespace-completed word in `body`: its byte range, the cleaned
+/// word (surrounding punctuation stripped), and the raw whitespace-delimited
+/// token it came from (used for the skip decisions in [`is_checkable`]).
+/// `None` while the user is still typing the final word — i.e. `body` doesn't
+/// end in whitespace — so a half-typed word is never flagged or corrected.
+fn last_completed_word(body: &str) -> Option<(Range<usize>, String, String)> {
+    if !body.chars().next_back()?.is_whitespace() {
+        return None;
+    }
+    // End of the token: just past the last non-whitespace char.
+    let token_end = body
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !c.is_whitespace())
+        .map(|(i, c)| i + c.len_utf8())?;
+    // Start of the token: just past the previous whitespace (or the start).
+    let token_start = body[..token_end]
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    let raw = &body[token_start..token_end];
+
+    // Trim to the alphanumeric core so the range we'd replace excludes
+    // surrounding punctuation ("helo," → correct just "helo").
+    let core_start = raw.char_indices().find(|(_, c)| c.is_alphanumeric()).map(|(i, _)| i)?;
+    let core_end = raw
+        .char_indices()
+        .rev()
+        .find(|(_, c)| c.is_alphanumeric())
+        .map(|(i, c)| i + c.len_utf8())?;
+    let range = (token_start + core_start)..(token_start + core_end);
+    let word = body[range.clone()].to_string();
+    Some((range, word, raw.to_string()))
+}
+
+/// Whether a raw token is ordinary prose worth spell-checking — filters out
+/// the things chat is full of that a dictionary would wrongly flag: mentions,
+/// emoji shortcodes, URLs/paths, code-ish identifiers, acronyms, and anything
+/// carrying a digit.
+fn is_checkable(raw: &str) -> bool {
+    // Needs at least two letters to be a word worth checking.
+    if raw.chars().filter(|c| c.is_alphabetic()).count() < 2 {
+        return false;
+    }
+    // Mentions and emoji shortcodes.
+    if raw.starts_with('@') || raw.starts_with(':') || raw.contains('@') {
+        return false;
+    }
+    // URLs / paths / snake_case identifiers.
+    if raw.contains("://")
+        || raw.contains('/')
+        || raw.contains('\\')
+        || raw.contains('_')
+        || raw.starts_with("www.")
+    {
+        return false;
+    }
+    // Versions, IDs, l33t — anything with a digit.
+    if raw.chars().any(|c| c.is_numeric()) {
+        return false;
+    }
+    // ALL-CAPS acronyms (GG, LOL) and MixedCase code identifiers (camelCase,
+    // PascalCase): flag neither. A plain Capitalized first letter is fine —
+    // autocorrect guards proper nouns separately (see `starts_lowercase`).
+    let letters: Vec<char> = raw.chars().filter(|c| c.is_alphabetic()).collect();
+    let all_upper = letters.iter().all(|c| c.is_uppercase());
+    let internal_upper = letters.iter().skip(1).any(|c| c.is_uppercase());
+    !(all_upper || internal_upper)
+}
+
+/// Autocorrect only rewrites words that start lowercase — a leading capital
+/// usually marks a name or sentence-start proper noun we shouldn't touch.
+fn starts_lowercase(word: &str) -> bool {
+    word.chars().next().is_some_and(|c| c.is_lowercase())
+}
+
+/// True when `current` is `previous` with exactly one trailing whitespace
+/// char appended — the "typed a space at the very end" edit. Restricting
+/// autocorrect to this shape avoids mangling mid-string edits or pastes,
+/// which we can't locate without a cursor position.
+fn typed_trailing_boundary(previous: &str, current: &str) -> bool {
+    match current.strip_prefix(previous) {
+        Some(added) => {
+            let mut chars = added.chars();
+            chars.next().is_some_and(|c| c.is_whitespace()) && chars.next().is_none()
+        }
+        None => false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn view<'a>(
     state: &'a State,
     emoji_usage: &'a HashMap<String, u32>,
     media: &'a crate::media_cache::State,
     packs: &'a [EmojiPack],
+    stickers: &'a [crate::state::CollectedSticker],
     typing: Element<'a, Message>,
     followers: Element<'a, Message>,
 ) -> Element<'a, Message> {
@@ -209,7 +533,8 @@ pub fn view<'a>(
     let reply_slot = crate::theme::slot(state.replying_to.as_ref().map(|reply| {
         let mut banner = row![].spacing(8).align_y(iced::Center);
         banner = banner
-            .push(text(format!("↩ Replying to {}", reply.sender)).size(12).style(text::primary));
+            .push(text(crate::theme::icon::REPLY).size(12).font(crate::theme::ICON_FONT).style(text::primary))
+            .push(text(format!("Replying to {}", reply.sender)).size(12).style(text::primary));
         if let Some(thumb) = reply
             .image_url
             .as_deref()
@@ -257,76 +582,213 @@ pub fn view<'a>(
         Some(container(list).padding(4).into())
     }));
 
-    let picker_slot = crate::theme::slot(
-        state
-            .show_emoji_picker
-            .then(|| emoji_picker(emoji_usage, media, packs)),
-    );
+    // Spell-check suggestions for the word just finished. A slot like the
+    // rest, so it never reshapes the tree under the input (which would drop
+    // focus mid-typing). Non-destructive: tapping a button rewrites the word,
+    // otherwise it's ignorable.
+    let spell_slot = crate::theme::slot(state.spell.flagged.as_ref().map(|flagged| {
+        let mut bar = row![text("Did you mean").size(12).style(text::secondary)]
+            .spacing(6)
+            .align_y(iced::Center);
+        for suggestion in &flagged.suggestions {
+            bar = bar.push(
+                button(text(suggestion.clone()).size(13))
+                    .on_press(Message::SpellSuggestionPicked(suggestion.clone()))
+                    .style(crate::theme::ghost_button)
+                    .padding([2, 8]),
+            );
+        }
+        bar = bar.push(
+            button(text("Add to dictionary").size(12))
+                .on_press(Message::SpellAddToDictionary)
+                .style(button::text)
+                .padding([2, 8]),
+        );
+        container(bar).padding([2, 4]).into()
+    }));
 
-    let mut col = column![error_slot, reply_slot, mention_slot, picker_slot].spacing(6);
+    // Right-aligned so the panel opens under the emoji/sticker buttons, which
+    // now sit at the right end of the input row (not the left). Same
+    // Fill+align_x(Right)-inside-a-slot trick the notification menu uses.
+    let picker_slot = crate::theme::slot(state.show_emoji_picker.then(|| {
+        container(picker_panel(state, emoji_usage, media, packs, stickers))
+            .width(Length::Fill)
+            .align_x(iced::Right)
+            .into()
+    }));
 
-    let input: Element<'_, Message> = if state.show_preview {
-        container(
-            markdown::view(
-                &state.preview_items,
-                markdown::Settings::default(),
-                markdown::Style::from_palette(iced::Theme::Light.palette()),
-            )
-            .map(Message::LinkClicked),
-        )
-        .padding(8)
-        .width(Length::Fill)
-        .into()
-    } else {
+    let mut col =
+        column![error_slot, reply_slot, mention_slot, spell_slot, picker_slot].spacing(4);
+
+    // One compact row (Cinny-style): attachment on the left, the input
+    // filling the middle, then the emoji/sticker pickers and Send clustered on
+    // the right. Icon-only (Windows Fluent glyphs).
+    let input: Element<'_, Message> =
         text_input("Message... (@mention, markdown supported)", &state.body)
             .on_input(Message::BodyChanged)
             .on_submit(Message::Send)
-            .padding(8)
-            .into()
-    };
+            .padding(6)
+            .width(Length::Fill)
+            .into();
 
-    // Send is the one primary action; everything else stays quiet. The
-    // typing indicator and follower avatars share this row, clustered on
-    // the right next to Send.
-    let toolbar = row![
-        button(text(if state.show_preview { "Edit" } else { "Preview" }).size(13))
-            .on_press(Message::TogglePreview(!state.show_preview))
-            .style(crate::theme::ghost_button)
-            .padding(6),
-        button(text("Emoji").size(13))
-            .on_press(Message::ToggleEmojiPicker)
-            .style(crate::theme::ghost_button)
-            .padding(6),
-        button(text("Attach").size(13))
+    let input_row = row![
+        button(crate::theme::icon_text(crate::theme::icon::ATTACH, 15))
             .on_press(Message::PickAttachment)
             .style(crate::theme::ghost_button)
             .padding(6),
-        container(typing).width(Length::Fill).align_x(iced::Right),
-        followers,
-        button(text("Send").size(13)).on_press(Message::Send).padding([6, 14]),
+        input,
+        button(crate::theme::icon_text(crate::theme::icon::REACT, 15))
+            .on_press(Message::ToggleEmojiPicker)
+            .style(crate::theme::ghost_button)
+            .padding(6),
+        button(crate::theme::icon_text(crate::theme::icon::STICKER, 15))
+            .on_press(Message::ToggleStickerPicker)
+            .style(crate::theme::ghost_button)
+            .padding(6),
+        button(crate::theme::icon_text(crate::theme::icon::SEND, 15))
+            .on_press(Message::Send)
+            .padding([6, 12]),
     ]
-    .spacing(6)
+    .spacing(4)
     .align_y(iced::Center);
 
-    col = col.push(input);
-    col = col.push(toolbar);
+    // A thin status line under the input: "X is typing…" on the left, the
+    // read-receipt follower avatars ("who's caught up") on the right — the
+    // Cinny layout. Always present (never a slot) so it can't reshape the tree
+    // and drop the input's focus as it fills or empties.
+    let status_line = row![container(typing).width(Length::Fill), followers]
+        .spacing(6)
+        .align_y(iced::Center)
+        .padding([0, 4]);
 
-    container(col).padding(8).width(Length::Fill).into()
+    col = col.push(input_row);
+    col = col.push(status_line);
+
+    container(col).padding([6, 8]).width(Length::Fill).into()
 }
 
-fn emoji_picker<'a>(
+/// The composer's picker panel: a Sticker | Emoji tab bar over either the
+/// sticker grid or the emoji list. (The timeline's reaction picker calls
+/// `emoji_picker::view` directly and stays emoji-only — you react with emoji,
+/// not stickers.)
+fn picker_panel<'a>(
+    state: &'a State,
     emoji_usage: &'a HashMap<String, u32>,
     media: &'a crate::media_cache::State,
     packs: &'a [EmojiPack],
+    stickers: &'a [crate::state::CollectedSticker],
 ) -> Element<'a, Message> {
-    crate::emoji_picker::view(
-        emoji_usage,
-        media,
-        packs,
-        Message::EmojiPicked,
-        |emoji| Message::CustomEmojiPicked {
-            shortcode: emoji.shortcode.clone(),
-            mxc_url: emoji.mxc_url.clone(),
-        },
-    )
+    let tab = |label: &'a str, this: PickerTab| {
+        let style = if state.picker_tab == this {
+            crate::theme::selected_ghost_button
+        } else {
+            crate::theme::ghost_button
+        };
+        button(text(label).size(13))
+            .on_press(Message::SelectPickerTab(this))
+            .style(style)
+            .padding([4, 10])
+    };
+    let tabs =
+        row![tab("Sticker", PickerTab::Sticker), tab("Emoji", PickerTab::Emoji)].spacing(4);
+
+    let content: Element<'a, Message> = match state.picker_tab {
+        PickerTab::Sticker => crate::emoji_picker::sticker_view(
+            media,
+            packs,
+            stickers,
+            |url, body, width, height| Message::StickerPicked {
+                url: url.to_string(),
+                body: body.to_string(),
+                width,
+                height,
+            },
+        ),
+        PickerTab::Emoji => crate::emoji_picker::view(
+            emoji_usage,
+            media,
+            packs,
+            Message::EmojiPicked,
+            |emoji| Message::CustomEmojiPicked {
+                shortcode: emoji.shortcode.clone(),
+                mxc_url: emoji.mxc_url.clone(),
+            },
+        ),
+    };
+
+    column![tabs, content].spacing(4).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_completed_word_while_typing() {
+        // No trailing whitespace → the final word is still being typed.
+        assert_eq!(last_completed_word("teh"), None);
+        assert_eq!(last_completed_word(""), None);
+        assert_eq!(last_completed_word("   "), None);
+    }
+
+    #[test]
+    fn completed_word_is_the_last_before_trailing_space() {
+        let (range, word, raw) = last_completed_word("teh ").unwrap();
+        assert_eq!((range, word.as_str(), raw.as_str()), (0..3, "teh", "teh"));
+
+        let (range, word, _) = last_completed_word("hello world ").unwrap();
+        assert_eq!(&"hello world "[range.clone()], "world");
+        assert_eq!((range, word.as_str()), (6..11, "world"));
+    }
+
+    #[test]
+    fn surrounding_punctuation_is_trimmed_but_kept_in_raw() {
+        // The replace range excludes the comma; the raw token keeps it so
+        // skip heuristics still see the full token.
+        let (range, word, raw) = last_completed_word("wat, ").unwrap();
+        assert_eq!((range, word.as_str(), raw.as_str()), (0..3, "wat", "wat,"));
+    }
+
+    #[test]
+    fn ranges_are_utf8_byte_offsets() {
+        // 'é' is two bytes — the range must land on char boundaries.
+        let body = "café ";
+        let (range, word, _) = last_completed_word(body).unwrap();
+        assert_eq!(range, 0..5);
+        assert_eq!(word, "café");
+        assert_eq!(&body[range], "café");
+    }
+
+    #[test]
+    fn checkable_accepts_prose_rejects_chat_tokens() {
+        assert!(is_checkable("teh"));
+        assert!(is_checkable("hello"));
+        assert!(is_checkable("Hello")); // capitalized is fine for the bar
+
+        assert!(!is_checkable("a")); // needs 2+ letters
+        assert!(!is_checkable("GG")); // acronym
+        assert!(!is_checkable("camelCase")); // code
+        assert!(!is_checkable("v2")); // has a digit
+        assert!(!is_checkable("@bob")); // mention
+        assert!(!is_checkable(":smile:")); // emoji shortcode
+        assert!(!is_checkable("http://x.com")); // url
+        assert!(!is_checkable("a/b")); // path
+        assert!(!is_checkable("co_op")); // identifier
+    }
+
+    #[test]
+    fn trailing_boundary_is_a_single_appended_space() {
+        assert!(typed_trailing_boundary("teh", "teh "));
+        assert!(!typed_trailing_boundary("teh", "teh x")); // more than a space
+        assert!(!typed_trailing_boundary("teh ", "teh")); // a deletion
+        assert!(!typed_trailing_boundary("teh", "teh  ")); // two spaces (paste)
+        assert!(!typed_trailing_boundary("teh", "xteh ")); // not an append
+    }
+
+    #[test]
+    fn autocorrect_skips_leading_capital() {
+        assert!(starts_lowercase("teh"));
+        assert!(!starts_lowercase("Teh"));
+        assert!(!starts_lowercase(""));
+    }
 }

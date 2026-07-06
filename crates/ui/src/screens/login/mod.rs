@@ -146,7 +146,7 @@ fn status_text(status: &Status) -> Element<'_, Message> {
 
 fn view_enter_homeserver(state: &State) -> Element<'_, Message> {
     let form = column![
-        text("Synapse").size(28),
+        text("ThornyChat").size(28),
         text("Enter your homeserver to sign in").size(14),
         text_input("Homeserver (e.g. matrix.org)", &state.homeserver)
             .on_input(Message::HomeserverChanged)
@@ -168,7 +168,7 @@ fn view_enter_homeserver(state: &State) -> Element<'_, Message> {
 
 fn view_choose_method<'a>(state: &'a State, flows: &'a LoginFlows) -> Element<'a, Message> {
     let mut form = column![
-        text("Synapse").size(28),
+        text("ThornyChat").size(28),
         text(state.homeserver.clone()).size(14),
     ]
     .spacing(12)

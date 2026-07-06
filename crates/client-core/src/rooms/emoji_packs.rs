@@ -26,6 +26,19 @@ use crate::events::{CustomEmoji, EmojiPack};
 #[derive(Debug, Deserialize)]
 struct PackImage {
     url: String,
+    /// MSC2545 per-image usage (`["emoticon"]`, `["sticker"]`, or both).
+    /// Overrides the pack-level usage; absent (or empty) means "inherit".
+    usage: Option<Vec<String>>,
+    /// Optional per-image `info` block (dimensions etc.).
+    info: Option<PackImageInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PackImageInfo {
+    #[serde(rename = "w")]
+    width: Option<u32>,
+    #[serde(rename = "h")]
+    height: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -39,6 +52,21 @@ struct PackContent {
 #[derive(Debug, Deserialize, Default)]
 struct PackInfo {
     display_name: Option<String>,
+    /// MSC2545 pack-level usage, the default for every image that doesn't set
+    /// its own. Absent (or empty) means images are usable as both.
+    usage: Option<Vec<String>>,
+}
+
+/// Resolves an MSC2545 usage list to `(is_emoticon, is_sticker)`. Absent or
+/// empty ⇒ both (the spec's default), otherwise exactly what's listed.
+fn resolve_usage(usage: Option<&Vec<String>>) -> (bool, bool) {
+    match usage {
+        Some(list) if !list.is_empty() => (
+            list.iter().any(|u| u == "emoticon"),
+            list.iter().any(|u| u == "sticker"),
+        ),
+        _ => (true, true),
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -52,11 +80,25 @@ fn pack_content_to_emoji_pack(fallback_name: String, content: PackContent) -> Op
         tracing::debug!(pack = %fallback_name, "pack content had no images");
         return None;
     }
-    let name = content.pack.and_then(|p| p.display_name).unwrap_or(fallback_name);
-    let emojis: Vec<CustomEmoji> = content
-        .images
+    let PackContent { images, pack } = content;
+    // Pack-level usage is the per-image default; read it before `pack` is
+    // consumed for the display name.
+    let pack_usage = pack.as_ref().and_then(|p| p.usage.clone());
+    let name = pack.and_then(|p| p.display_name).unwrap_or(fallback_name);
+    let emojis: Vec<CustomEmoji> = images
         .into_iter()
-        .map(|(shortcode, image)| CustomEmoji { shortcode, mxc_url: image.url })
+        .map(|(shortcode, image)| {
+            // A non-empty image-level usage overrides the pack default; an
+            // absent/empty one inherits it.
+            let usage = match image.usage.as_ref() {
+                Some(list) if !list.is_empty() => Some(list),
+                _ => pack_usage.as_ref(),
+            };
+            let (is_emoticon, is_sticker) = resolve_usage(usage);
+            let (width, height) =
+                image.info.map(|i| (i.width, i.height)).unwrap_or((None, None));
+            CustomEmoji { shortcode, mxc_url: image.url, is_emoticon, is_sticker, width, height }
+        })
         .collect();
     tracing::info!(pack = %name, count = emojis.len(), "resolved custom emoji pack");
     Some(EmojiPack { name, emojis })

@@ -3,9 +3,13 @@
 //! `client_core::events`/`client_core::commands`.
 
 pub mod emoji_picker;
+pub mod encryption_config;
 pub mod media_cache;
 pub mod message;
+pub mod privacy_config;
 pub mod screens;
+pub mod spellcheck;
+pub mod spellcheck_config;
 pub mod state;
 pub mod steam;
 pub mod subscriptions;

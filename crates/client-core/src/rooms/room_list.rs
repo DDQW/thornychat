@@ -5,6 +5,9 @@
 //! snapshot + diff-as-wakeup is simpler and correct. Revisit if/when
 //! filtering, sorting, or very large account sizes need it.
 
+use std::collections::HashSet;
+
+use matrix_sdk::ruma::OwnedRoomId;
 use matrix_sdk::{Client, Room, RoomMemberships};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -12,21 +15,40 @@ use tokio_stream::StreamExt;
 
 use crate::events::{ClientEvent, RoomMember, RoomSummary};
 
-pub fn to_summary(room: &Room) -> RoomSummary {
+pub fn to_summary(room: &Room, dm_rooms: &HashSet<OwnedRoomId>) -> RoomSummary {
     let room_id = room.room_id().to_string();
+    // Classify DMs from the account's global `m.direct` set: on sliding sync
+    // the per-room `direct_targets()` is frequently empty even for real DMs
+    // (the account-data → per-room propagation lags), so a DM would otherwise
+    // show up as a plain room. Keep `direct_targets()` as a secondary signal.
+    let is_dm = dm_rooms.contains(room.room_id()) || room.direct_targets_length() != 0;
     RoomSummary {
         name: display_name(room).unwrap_or_else(|| room_id.clone()),
         room_id,
         topic: room.topic(),
-        avatar_url: room.avatar_url().map(|url| url.to_string()),
+        avatar_url: avatar_url(room, is_dm),
         unread_count: room.num_unread_messages(),
         is_encrypted: room.encryption_state().is_encrypted(),
         is_space: room.is_space(),
-        // direct_targets() clones the whole target set; only the count matters.
-        is_dm: room.direct_targets_length() != 0,
+        is_dm,
         // Populated once space hierarchy tracking lands.
         parent_space_id: None,
         last_message_preview: None,
+    }
+}
+
+/// Every room id the account marks as a direct message, from the global
+/// `m.direct` account data. More reliable than per-room `direct_targets()`,
+/// which sliding sync doesn't consistently populate. Empty if the account
+/// data hasn't synced yet.
+pub async fn direct_room_ids(client: &Client) -> HashSet<OwnedRoomId> {
+    use matrix_sdk::ruma::events::direct::DirectEventContent;
+    match client.account().account_data::<DirectEventContent>().await {
+        Ok(Some(raw)) => match raw.deserialize() {
+            Ok(content) => content.0.into_values().flatten().collect(),
+            Err(_) => HashSet::new(),
+        },
+        _ => HashSet::new(),
     }
 }
 
@@ -39,9 +61,43 @@ pub fn to_summary(room: &Room) -> RoomSummary {
 /// and let the next room-list emission correct it.
 fn display_name(room: &Room) -> Option<String> {
     match room.cached_display_name() {
-        Some(matrix_sdk::RoomDisplayName::Empty) | None => room.name(),
+        Some(matrix_sdk::RoomDisplayName::Empty) | None => {
+            // No SDK-computed name yet (e.g. a just-created DM before its
+            // first sync): prefer an explicit room name, then the Matrix
+            // "heroes" — the other participants — so a DM shows the person's
+            // name and initials instead of flashing the raw room id.
+            room.name().or_else(|| hero_names(room))
+        }
         Some(name) => Some(name.to_string()),
     }
+}
+
+/// Comma-joined hero display names (falling back to a hero's user id), the
+/// standard Matrix mechanism for naming DMs and unnamed rooms after their
+/// members. `None` when the room has no heroes cached yet.
+fn hero_names(room: &Room) -> Option<String> {
+    let names: Vec<String> = room
+        .heroes()
+        .into_iter()
+        .map(|hero| hero.display_name.unwrap_or_else(|| hero.user_id.to_string()))
+        .collect();
+    (!names.is_empty()).then(|| names.join(", "))
+}
+
+/// The room's own `m.room.avatar` if set. For DMs *only*, fall back to a
+/// hero's avatar — a 1:1 (or small direct) chat with no room avatar should
+/// show the other participant's picture, the way Element does. Group rooms
+/// deliberately get no fallback: an unset room avatar means initials, not a
+/// borrowed member face (a group with no logo showing some random member's
+/// photo as its icon is wrong, not a missing-avatar bug).
+fn avatar_url(room: &Room, is_dm: bool) -> Option<String> {
+    if let Some(url) = room.avatar_url() {
+        return Some(url.to_string());
+    }
+    if is_dm {
+        return room.heroes().into_iter().find_map(|hero| hero.avatar_url.map(|url| url.to_string()));
+    }
+    None
 }
 
 /// Lists a room's joined members (member list panel, @mention
@@ -82,10 +138,11 @@ pub fn spawn_forwarder(
         // Invited rooms can join the list once an invite accept/reject UI
         // exists (phase 6).
         let (initial, mut diffs) = client.rooms_stream();
+        let dm_rooms = direct_room_ids(&client).await;
         let summaries: Vec<RoomSummary> = initial
             .iter()
             .filter(|room| room.state() == matrix_sdk::RoomState::Joined)
-            .map(to_summary)
+            .map(|room| to_summary(room, &dm_rooms))
             .collect();
         if event_tx.send(ClientEvent::RoomListUpdated(summaries)).is_err() {
             return;
@@ -98,11 +155,14 @@ pub fn spawn_forwarder(
             while let Ok(Some(_)) =
                 tokio::time::timeout(std::time::Duration::ZERO, diffs.next()).await
             {}
+            // Re-read `m.direct` each rebuild so a DM created/marked after
+            // startup starts classifying correctly.
+            let dm_rooms = direct_room_ids(&client).await;
             let summaries: Vec<RoomSummary> = client
                 .rooms()
                 .iter()
                 .filter(|room| room.state() == matrix_sdk::RoomState::Joined)
-                .map(to_summary)
+                .map(|room| to_summary(room, &dm_rooms))
                 .collect();
             if event_tx.send(ClientEvent::RoomListUpdated(summaries)).is_err() {
                 break;

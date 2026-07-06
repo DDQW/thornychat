@@ -61,13 +61,52 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
         Message::RoomList(screens::room_list::Message::RoomClicked(room_id)) => {
             select_room(app, room_id)
         }
+        Message::RoomList(screens::room_list::Message::SpaceClicked(space_id)) => {
+            let name = app
+                .room_list
+                .rooms
+                .iter()
+                .find(|r| r.room_id == space_id)
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| space_id.clone());
+            let request_id = Uuid::new_v4();
+            app.space_explorer =
+                Some(screens::space_explorer::State::open(space_id.clone(), name, request_id));
+            send_cmd(app, ClientCommand::FetchSpaceHierarchy { space_id, from: None, request_id });
+            Task::none()
+        }
+        Message::RoomList(screens::room_list::Message::RoomRightClicked(room_id)) => {
+            if let Some(room) = app.room_list.rooms.iter().find(|r| r.room_id == room_id) {
+                app.pending_room_action = Some(crate::state::RoomActionPrompt {
+                    room_id: room.room_id.clone(),
+                    room_name: room.name.clone(),
+                    is_dm: room.is_dm,
+                });
+            }
+            Task::none()
+        }
         Message::RoomList(screens::room_list::Message::FilterChanged(filter)) => {
             app.room_list.filter = filter;
             Task::none()
         }
 
+        Message::ConfirmLeaveRoom(room_id) => {
+            app.pending_room_action = None;
+            send_cmd(app, ClientCommand::LeaveRoom { room_id: room_id.clone(), request_id: Uuid::new_v4() });
+            forget_open_room(app, &room_id)
+        }
+        Message::ConfirmForgetRoom(room_id) => {
+            app.pending_room_action = None;
+            send_cmd(app, ClientCommand::ForgetRoom { room_id: room_id.clone(), request_id: Uuid::new_v4() });
+            forget_open_room(app, &room_id)
+        }
+        Message::CancelRoomAction => {
+            app.pending_room_action = None;
+            Task::none()
+        }
+
         Message::Timeline(msg) => {
-            let (task, effect) = screens::timeline::update(&mut app.timeline, msg);
+            let (task, effect) = screens::timeline::update(&mut app.timeline, msg, &app.spellcheck);
             let task = task.map(Message::Timeline);
             let effect_task = apply_timeline_effect(app, effect);
             Task::batch([task, effect_task])
@@ -77,6 +116,8 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             let effect = screens::verification::update(&mut app.verification, msg);
             apply_verification_effect(app, effect)
         }
+
+        Message::SpaceExplorer(msg) => update_space_explorer(app, msg),
 
         Message::EmojiSvgFetched(emoji, result) => {
             app.media.emoji_pending.remove(&emoji);
@@ -236,6 +277,14 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 
         Message::ToggleSettings => {
             app.show_settings = !app.show_settings;
+            // Re-read the autostart registry state each time the panel opens
+            // so the toggle reflects reality even if an uninstaller or the
+            // user cleared the Run key since launch. Only the General tab is
+            // rebuilt — leaving the Appearance tab's in-progress hex drafts
+            // (and the active tab) untouched.
+            if app.show_settings {
+                app.settings.general = screens::settings::general::State::new();
+            }
             Task::none()
         }
         Message::ToggleKeywordPanel => {
@@ -259,8 +308,54 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
 
+        Message::SettingsResizeStarted => {
+            app.settings_resize_drag = Some(crate::state::ResizeDrag {
+                size_at_start: app.settings_panel_size,
+                anchor: None,
+            });
+            Task::none()
+        }
+        Message::SettingsResizeDragged(cursor) => {
+            let mut new_size = None;
+            if let Some(drag) = &mut app.settings_resize_drag {
+                match drag.anchor {
+                    None => drag.anchor = Some(cursor),
+                    Some(anchor) => {
+                        new_size = Some(iced::Size {
+                            width: (drag.size_at_start.width + (cursor.x - anchor.x))
+                                .max(crate::state::MIN_SETTINGS_WIDTH),
+                            height: (drag.size_at_start.height + (cursor.y - anchor.y))
+                                .max(crate::state::MIN_SETTINGS_HEIGHT),
+                        });
+                    }
+                }
+            }
+            if let Some(size) = new_size {
+                app.settings_panel_size = size;
+            }
+            Task::none()
+        }
+        Message::SettingsResizeReleased => {
+            app.settings_resize_drag = None;
+            Task::none()
+        }
+
         Message::Settings(msg) => {
-            screens::settings::update(&mut app.settings, &mut app.theme, msg).map(Message::Settings)
+            let (task, effect) = screens::settings::update(
+                &mut app.settings,
+                &mut app.theme,
+                &mut app.privacy,
+                &mut app.encryption,
+                &mut app.spellcheck,
+                msg,
+            );
+            // Settings is the only place `theme` changes; rebuild the cached
+            // iced::Theme here so the per-frame `.theme()` closure just clones
+            // it instead of regenerating the palette every update cycle.
+            app.built_theme = app.theme.to_iced_theme();
+            let task = task.map(Message::Settings);
+            let effect_task = apply_settings_effect(app, effect);
+            Task::batch([task, effect_task])
         }
 
         Message::Noop => Task::none(),
@@ -292,6 +387,17 @@ fn apply_verification_effect(app: &mut App, effect: screens::verification::Effec
             );
         }
         Effect::StartVerification { user_id } => {
+            // Blank input = "verify this device" (the form's placeholder
+            // promises it): map it to the account's own user id, which the
+            // worker treats as self-verification.
+            let user_id = if user_id.is_empty() {
+                match &app.own_user_id {
+                    Some(id) => id.clone(),
+                    None => return Task::none(),
+                }
+            } else {
+                user_id
+            };
             send_cmd(app, ClientCommand::StartVerification { user_id });
         }
         Effect::AcceptVerificationRequest => send_cmd(app, ClientCommand::AcceptVerificationRequest),
@@ -306,6 +412,107 @@ fn send_cmd(app: &App, cmd: ClientCommand) {
     if let Some(tx) = &app.cmd_tx {
         let _ = tx.send(cmd);
     }
+}
+
+/// Space-explorer overlay actions. Handled at the app level (no screen
+/// `update` of its own) because everything it does — fetching hierarchy
+/// pages, joining, opening a room — goes through the command channel or
+/// `select_room`.
+fn update_space_explorer(app: &mut App, msg: screens::space_explorer::Message) -> Task<Message> {
+    use screens::space_explorer::Message as Msg;
+    match msg {
+        Msg::Close => {
+            app.space_explorer = None;
+            Task::none()
+        }
+        Msg::Back => {
+            if let Some(explorer) = &mut app.space_explorer {
+                explorer.stack.pop();
+                if explorer.stack.is_empty() {
+                    app.space_explorer = None;
+                }
+            }
+            Task::none()
+        }
+        Msg::EnterSpace { space_id, name } => {
+            let request_id = Uuid::new_v4();
+            let Some(explorer) = &mut app.space_explorer else { return Task::none() };
+            explorer.stack.push(screens::space_explorer::Level::loading(
+                space_id.clone(),
+                name,
+                request_id,
+            ));
+            send_cmd(app, ClientCommand::FetchSpaceHierarchy { space_id, from: None, request_id });
+            Task::none()
+        }
+        Msg::Join { room_id, via } => {
+            let request_id = Uuid::new_v4();
+            let Some(explorer) = &mut app.space_explorer else { return Task::none() };
+            // One join at a time — rows render their button inert while
+            // one is pending, but a stale press could still race in.
+            if explorer.pending_join.is_some() {
+                return Task::none();
+            }
+            explorer.pending_join = Some((request_id, room_id.clone()));
+            explorer.join_error = None;
+            send_cmd(app, ClientCommand::JoinRoom { room_id_or_alias: room_id, via, request_id });
+            Task::none()
+        }
+        Msg::Open(room_id) => {
+            app.space_explorer = None;
+            select_room(app, room_id)
+        }
+        Msg::LoadMore => {
+            let Some(explorer) = &mut app.space_explorer else { return Task::none() };
+            let Some(level) = explorer.stack.last_mut() else { return Task::none() };
+            if level.pending_request.is_some() {
+                return Task::none();
+            }
+            let Some(from) = level.next_batch.clone() else { return Task::none() };
+            let request_id = Uuid::new_v4();
+            level.pending_request = Some(request_id);
+            let space_id = level.space_id.clone();
+            send_cmd(
+                app,
+                ClientCommand::FetchSpaceHierarchy { space_id, from: Some(from), request_id },
+            );
+            Task::none()
+        }
+        Msg::Retry => {
+            let Some(explorer) = &mut app.space_explorer else { return Task::none() };
+            let Some(level) = explorer.stack.last_mut() else { return Task::none() };
+            // Back to a fresh page 1 — a failed load-more can't resume from
+            // its token (the failure may have invalidated it server-side).
+            let request_id = Uuid::new_v4();
+            level.children.clear();
+            level.next_batch = None;
+            level.error = None;
+            level.pending_request = Some(request_id);
+            let space_id = level.space_id.clone();
+            send_cmd(app, ClientCommand::FetchSpaceHierarchy { space_id, from: None, request_id });
+            Task::none()
+        }
+    }
+}
+
+fn apply_settings_effect(app: &mut App, effect: screens::settings::Effect) -> Task<Message> {
+    match effect {
+        screens::settings::Effect::None => {}
+        screens::settings::Effect::Logout => send_cmd(app, ClientCommand::Logout),
+        screens::settings::Effect::SetDefaultNotificationMode { scope, mode } => {
+            send_cmd(
+                app,
+                ClientCommand::SetDefaultNotificationMode { scope, mode, request_id: Uuid::new_v4() },
+            );
+        }
+        // The Security tab hosts the verification module's recovery UI; run
+        // its message through that module's own update + effect handler.
+        screens::settings::Effect::Verification(msg) => {
+            let effect = screens::verification::update(&mut app.verification, msg);
+            return apply_verification_effect(app, effect);
+        }
+    }
+    Task::none()
 }
 
 fn apply_timeline_effect(app: &mut App, effect: screens::timeline::Effect) -> Task<Message> {
@@ -358,7 +565,34 @@ fn apply_timeline_effect(app: &mut App, effect: screens::timeline::Effect) -> Ta
             Task::none()
         }
         screens::timeline::Effect::OpenDirectMessage(user_id) => {
-            send_cmd(app, ClientCommand::OpenDirectMessage { user_id, request_id: Uuid::new_v4() });
+            send_cmd(
+                app,
+                ClientCommand::OpenDirectMessage {
+                    user_id,
+                    encrypted: app.encryption.encrypt_direct_messages,
+                    request_id: Uuid::new_v4(),
+                },
+            );
+            Task::none()
+        }
+        screens::timeline::Effect::CreateRoomWith(user_id) => {
+            send_cmd(
+                app,
+                ClientCommand::CreateRoomWith {
+                    user_id,
+                    encrypted: app.encryption.encrypt_rooms,
+                    request_id: Uuid::new_v4(),
+                },
+            );
+            Task::none()
+        }
+        screens::timeline::Effect::InviteToRoom(user_id) => {
+            if let Some(room_id) = app.timeline.room_id.clone() {
+                send_cmd(
+                    app,
+                    ClientCommand::InviteUser { room_id, user_id, request_id: Uuid::new_v4() },
+                );
+            }
             Task::none()
         }
         screens::timeline::Effect::PlayVideo { video, title } => {
@@ -453,7 +687,16 @@ fn close_native_player() -> Task<Message> {
 
 fn mark_open_room_read(app: &mut App) {
     if let Some(room_id) = app.timeline.room_id.clone() {
-        send_cmd(app, ClientCommand::MarkRoomRead { room_id });
+        // Privacy: when read receipts are off, the worker sends a private
+        // receipt instead of the federated public one — your unread state
+        // still clears locally, but others don't see what you've read.
+        send_cmd(
+            app,
+            ClientCommand::MarkRoomRead {
+                room_id,
+                public_receipt: app.privacy.send_read_receipts,
+            },
+        );
         // The user is caught up as of this instant — hide the unread
         // divider locally rather than waiting for the server's fully-read
         // echo (which observably never arrives on this homeserver).
@@ -482,6 +725,18 @@ fn apply_composer_effect(app: &mut App, effect: screens::timeline::composer::Eff
             Task::none()
         }
         ComposerEffect::EnsureEmojiFetched(emojis) => ensure_emoji_fetched(app, emojis),
+        ComposerEffect::EnsureStickersFetched => {
+            // Pack sticker images are already fetched on pack load; the
+            // collected ones (loaded from disk) may not be yet.
+            let urls: Vec<String> =
+                app.sticker_collection.iter().map(|s| s.url.clone()).collect();
+            ensure_media_fetched(app, urls);
+            Task::none()
+        }
+        ComposerEffect::SendSticker { url, body, width, height } => {
+            send_sticker(app, url, body, width, height);
+            Task::none()
+        }
         ComposerEffect::EmojiUsed(key) => record_emoji_use(app, key),
     }
 }
@@ -578,6 +833,77 @@ fn send_attachment(app: &mut App, filename: String, bytes: Vec<u8>, mime: String
     let _ = cmd_tx.send(ClientCommand::SendAttachment { room_id, filename, bytes, mime, request_id });
 }
 
+fn send_sticker(app: &mut App, url: String, body: String, width: Option<u32>, height: Option<u32>) {
+    let Some(room_id) = app.timeline.room_id.clone() else { return };
+    let Some(cmd_tx) = &app.cmd_tx else { return };
+    let request_id = Uuid::new_v4();
+    // Separate slot, like attachments: a sticker send must never trigger the
+    // text-draft reset a `SendSucceeded` runs. `mimetype` is left to the
+    // homeserver — the media is already hosted and clients sniff it.
+    app.timeline.composer.pending_sticker_request = Some(request_id);
+    let _ = cmd_tx.send(ClientCommand::SendSticker {
+        room_id,
+        url,
+        body,
+        width,
+        height,
+        mimetype: None,
+        request_id,
+    });
+}
+
+/// Adds any `m.sticker` items in a fresh timeline snapshot to the
+/// grow-with-use collection — newly-seen ones prepended (most-recent first),
+/// deduped by url, capped at [`crate::state::MAX_COLLECTED_STICKERS`].
+/// Returns whether the collection changed, so the caller only rewrites the
+/// on-disk file when it did (snapshots arrive on every sync tick).
+fn harvest_stickers(app: &mut App, items: &[client_core::events::TimelineItem]) -> bool {
+    use client_core::events::TimelineItemContent;
+    let mut fresh: Vec<crate::state::CollectedSticker> = Vec::new();
+    for item in items {
+        if let TimelineItemContent::Sticker { url, body, width, height } = &item.content {
+            let known = app.sticker_collection.iter().any(|s| &s.url == url)
+                || fresh.iter().any(|s| &s.url == url);
+            if !known {
+                fresh.push(crate::state::CollectedSticker {
+                    url: url.clone(),
+                    body: body.clone(),
+                    width: *width,
+                    height: *height,
+                });
+            }
+        }
+    }
+    if fresh.is_empty() {
+        return false;
+    }
+    // Items run oldest→newest; reverse so the newest lands at the front.
+    fresh.reverse();
+    for sticker in fresh {
+        app.sticker_collection.insert(0, sticker);
+    }
+    app.sticker_collection.truncate(crate::state::MAX_COLLECTED_STICKERS);
+    true
+}
+
+/// Persists the sticker collection off-thread (same fire-and-forget shape as
+/// [`record_emoji_use`]).
+fn persist_sticker_collection(app: &App) -> Task<Message> {
+    let Some(path) = crate::state::sticker_collection_path(&app.profile) else {
+        return Task::none();
+    };
+    let Ok(contents) = serde_json::to_string(&app.sticker_collection) else {
+        return Task::none();
+    };
+    Task::future(async move {
+        if let Some(parent) = path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let _ = tokio::fs::write(path, contents).await;
+        Message::Noop
+    })
+}
+
 fn send_edit(app: &mut App, event_id: String, new_body: String) {
     let Some(room_id) = app.timeline.room_id.clone() else { return };
     let Some(cmd_tx) = &app.cmd_tx else { return };
@@ -595,6 +921,13 @@ fn send_redact(app: &mut App, event_id: String) {
 }
 
 fn set_typing(app: &App, typing: bool) {
+    // Privacy: with typing notifications disabled we broadcast nothing at all
+    // — not even a "stopped typing" — so the setting is a clean off switch.
+    // (The rare stuck-indicator case, toggling this off mid-compose, self-
+    // heals via the server-side typing timeout and on message send.)
+    if !app.privacy.send_typing_notifications {
+        return;
+    }
     let Some(room_id) = app.timeline.room_id.clone() else { return };
     let Some(cmd_tx) = &app.cmd_tx else { return };
     let _ = cmd_tx.send(ClientCommand::SetTyping { room_id, typing });
@@ -637,7 +970,8 @@ fn image_urls_in_timeline(
         .iter()
         .flat_map(|item| {
             let content_url = match &item.content {
-                client_core::events::TimelineItemContent::Image { url, .. } => Some(url.as_str()),
+                client_core::events::TimelineItemContent::Image { url, .. }
+                | client_core::events::TimelineItemContent::Sticker { url, .. } => Some(url.as_str()),
                 _ => None,
             };
             let reaction_urls =
@@ -691,6 +1025,14 @@ fn request_url_previews(
             _ => None,
         })
         .collect();
+
+    // Privacy: link previews contact the homeserver's OG proxy and, for
+    // tweets/Steam links, third-party APIs directly (leaking your IP and what
+    // you're reading). When disabled we still compute `first_urls` — so link
+    // rendering and a later opt-in both work — but fetch nothing.
+    if !app.privacy.enable_link_previews {
+        return (Task::none(), first_urls);
+    }
 
     let mut tasks = Vec::new();
     for url in first_urls.iter().flatten() {
@@ -763,6 +1105,26 @@ fn unicode_reaction_keys(
         .collect()
 }
 
+/// Unicode emoji typed directly into message text (as opposed to sent as a
+/// reaction) need the same Twemoji fetch — otherwise `render_text_body`
+/// only ever shows the font-fallback glyph for them, never the SVG every
+/// other emoji surface in the app renders.
+fn unicode_body_emojis(
+    items: &[client_core::events::TimelineItem],
+    media: &crate::media_cache::State,
+) -> Vec<String> {
+    items
+        .iter()
+        .filter_map(|item| match &item.content {
+            client_core::events::TimelineItemContent::Text(body) => Some(body.as_str()),
+            _ => None,
+        })
+        .flat_map(screens::timeline::unicode_emojis_in)
+        .filter(|emoji| !media.is_emoji_known(emoji))
+        .map(str::to_owned)
+        .collect()
+}
+
 fn pick_attachment_task(room_id: String) -> Task<Message> {
     Task::perform(
         async {
@@ -791,6 +1153,11 @@ fn pick_attachment_task(room_id: String) -> Task<Message> {
 /// timeline pane immediately so stale messages don't flash while the new
 /// room's snapshot is in flight.
 fn select_room(app: &mut App, room_id: String) -> Task<Message> {
+    // Clicking the already-open room must be a no-op — the reset below
+    // would wipe a typed-but-unsent draft and reload the whole timeline.
+    if app.room_list.selected_room_id.as_deref() == Some(room_id.as_str()) {
+        return Task::none();
+    }
     let previous = app.room_list.selected_room_id.replace(room_id.clone());
 
     app.timeline.room_id = Some(room_id.clone());
@@ -822,12 +1189,18 @@ fn select_room(app: &mut App, room_id: String) -> Task<Message> {
     // scrolled to wherever you happened to leave the last one.
     app.timeline.at_bottom = true;
     app.timeline.highlighted_event_id = None;
+    // A jump deferred in the previous room must not fire in this one.
+    app.timeline.pending_jump = None;
     app.timeline.scroll_anchor = None;
     app.timeline.last_content_height = 0.0;
     app.timeline.last_from_bottom = 0.0;
     app.timeline.last_seen_newest = None;
     app.timeline.suppress_unread_divider = false;
     app.timeline.power_tags.clear();
+    // Roster selection / message highlight / open member menu are per-room.
+    app.timeline.selected_member = None;
+    app.timeline.highlighted_member = None;
+    app.timeline.member_menu = None;
     app.zoomed_image = None;
 
     let reset_scroll = iced::widget::scrollable::scroll_to(
@@ -844,6 +1217,27 @@ fn select_room(app: &mut App, room_id: String) -> Task<Message> {
     }
     let _ = cmd_tx.send(ClientCommand::OpenRoom { room_id });
     reset_scroll
+}
+
+/// When a room the user just left/forgot is the one on screen, clear the
+/// timeline pane and deselect it so the "Select a room" placeholder shows
+/// (the sidebar entry itself drops on the next `RoomListUpdated`). No-op when
+/// a different room was open.
+fn forget_open_room(app: &mut App, room_id: &str) -> Task<Message> {
+    if app.room_list.selected_room_id.as_deref() != Some(room_id) {
+        return Task::none();
+    }
+    app.room_list.selected_room_id = None;
+    app.timeline.room_id = None;
+    app.timeline.items.clear();
+    app.timeline.first_urls.clear();
+    app.timeline.composer = screens::timeline::composer::State::default();
+    app.timeline.member_index.clear();
+    app.timeline.selected_member = None;
+    app.timeline.highlighted_member = None;
+    app.timeline.member_menu = None;
+    send_cmd(app, ClientCommand::CloseRoom { room_id: room_id.to_string() });
+    Task::none()
 }
 
 /// A single `ClientEvent` can affect multiple screens at once (unread
@@ -875,12 +1269,16 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
             app.emoji_packs.clear();
             app.emoji_shortcode_index.clear();
             app.zoomed_image = None;
+            app.space_explorer = None;
             app.route = crate::state::Route::Login;
             if app.video_player.take().is_some() {
                 return close_native_player();
             }
         }
         ClientEvent::DirectMessageReady { room_id } => {
+            return select_room(app, room_id);
+        }
+        ClientEvent::RoomCreated { room_id } => {
             return select_room(app, room_id);
         }
         ClientEvent::PowerLevelTagsUpdated { room_id, tags } => {
@@ -918,8 +1316,9 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
         ClientEvent::TimelineUpdated { room_id, items } => {
             if app.timeline.room_id.as_deref() == Some(room_id.as_str()) {
                 let urls = image_urls_in_timeline(&items, &app.media);
-                let candidate_emojis =
+                let mut candidate_emojis =
                     unicode_reaction_keys(&items, &app.emoji_packs, &app.media);
+                candidate_emojis.extend(unicode_body_emojis(&items, &app.media));
 
                 // A sync gap makes the SDK clear and re-seed the timeline:
                 // the previous window is gone wholesale (its first event no
@@ -940,6 +1339,9 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                     }
                 };
 
+                // Grow the sticker collection with anything new in this
+                // snapshot (before `items` is moved into state below).
+                let stickers_changed = harvest_stickers(app, &items);
                 let (preview_task, first_urls) = request_url_previews(app, &items);
                 app.timeline.items = items;
                 // Index-parallel to items — set only here and cleared in
@@ -998,7 +1400,9 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                 if app.timeline.at_bottom {
                     mark_open_room_read(app);
                 }
-                return Task::batch([preview_task, reset_task, emoji_task]);
+                let sticker_task =
+                    if stickers_changed { persist_sticker_collection(app) } else { Task::none() };
+                return Task::batch([preview_task, reset_task, emoji_task, sticker_task]);
             }
         }
         ClientEvent::RoomMembersUpdated { room_id, members } => {
@@ -1032,12 +1436,18 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                 let (_, effect) = screens::timeline::composer::update(
                     &mut app.timeline.composer,
                     screens::timeline::composer::Message::SendSucceeded,
+                    &app.spellcheck,
                 );
                 return apply_composer_effect(app, effect);
             } else if app.timeline.composer.pending_attachment_request == Some(request_id) {
                 // Attachment done — clear only the upload tracking; the
                 // typed draft (if any) is untouched.
                 app.timeline.composer.pending_attachment_request = None;
+                app.timeline.composer.error = None;
+            } else if app.timeline.composer.pending_sticker_request == Some(request_id) {
+                // Sticker posted — the echo lands in the timeline (and gets
+                // harvested); nothing here touches the text draft.
+                app.timeline.composer.pending_sticker_request = None;
                 app.timeline.composer.error = None;
             } else if app.timeline.pending_edit_request == Some(request_id) {
                 app.timeline.editing = None;
@@ -1052,6 +1462,14 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                 // The optimistic CallStateUpdated already flipped the
                 // banner; this just re-arms the buttons.
                 app.call.pending = None;
+            } else if app
+                .space_explorer
+                .as_mut()
+                .is_some_and(|explorer| explorer.handle_success(request_id))
+            {
+                // A join finished — the explorer flipped that row to
+                // "Joined"; the sidebar picks the room up on the next
+                // room-list emission.
             }
         }
         ClientEvent::CommandFailed { request_id, error } => {
@@ -1059,10 +1477,14 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                 let (_, effect) = screens::timeline::composer::update(
                     &mut app.timeline.composer,
                     screens::timeline::composer::Message::SendFailed(error),
+                    &app.spellcheck,
                 );
                 return apply_composer_effect(app, effect);
             } else if app.timeline.composer.pending_attachment_request == Some(request_id) {
                 app.timeline.composer.pending_attachment_request = None;
+                app.timeline.composer.error = Some(error);
+            } else if app.timeline.composer.pending_sticker_request == Some(request_id) {
+                app.timeline.composer.pending_sticker_request = None;
                 app.timeline.composer.error = Some(error);
             } else if app.timeline.pending_edit_request == Some(request_id) {
                 app.timeline.pending_edit_request = None;
@@ -1080,6 +1502,13 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                 if let Some((_, room_id, _)) = app.call.pending.take() {
                     app.call.error = Some((room_id, error));
                 }
+            } else if app
+                .space_explorer
+                .as_mut()
+                .is_some_and(|explorer| explorer.handle_failure(request_id, &error))
+            {
+                // Routed into the explorer (failed page fetch → level error
+                // with Retry; failed join → error line in that room's row).
             }
         }
         ClientEvent::CrossSigningBootstrapNeedsFallback { url } => {
@@ -1109,6 +1538,9 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
             app.verification.recovery_setup_needed = false;
             app.verification.recovery_enable_stage = None;
             app.verification.recovery_key_to_confirm = Some(recovery_key);
+            // A failure card from an earlier attempt shouldn't outlive the
+            // success it was retried into.
+            app.verification.recovery_error = None;
         }
         ClientEvent::RecoveryEnableFailed { reason } => {
             app.verification.recovery_enable_stage = None;
@@ -1117,6 +1549,9 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
         ClientEvent::KeyBackupRestored => {
             app.verification.recovery_needs_key = false;
             app.verification.recovery_key_input.clear();
+            // Typo-then-correct-key: the stale failure card must not stay
+            // up next to the success state.
+            app.verification.recovery_error = None;
         }
         ClientEvent::KeyBackupFailed { reason } => {
             app.verification.recovery_error = Some(reason);
@@ -1152,16 +1587,25 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                         },
                         move |result| Message::GifDecoded(url.clone(), result),
                     );
+                } else if crate::media_cache::looks_like_unsupported_container(&bytes) {
+                    // Fetched fine, but our raster decoder can't read AVIF/HEIC —
+                    // iced's renderer would otherwise swallow the decode error
+                    // and leave a permanently blank, unexplained gap. Fail it
+                    // the same way a failed fetch would, so the caller falls
+                    // back to the initials avatar instead.
+                    tracing::warn!(url, "media is AVIF/HEIC — no decoder compiled in, falling back");
+                    app.media.failed_mxc.insert(url);
                 } else {
                     app.media.images.insert(url, iced::widget::image::Handle::from_bytes(bytes));
                 }
             }
         }
-        ClientEvent::MediaFetchFailed { request_id, .. } => {
+        ClientEvent::MediaFetchFailed { request_id, reason } => {
             // Negative-cache the URL — without this, the very next timeline
             // or room-list update re-requests it, once per sync tick, forever.
             if let Some(url) = app.media.pending.remove(&request_id) {
                 app.media.pending_urls.remove(&url);
+                tracing::warn!(url, reason, "media fetch failed, blacklisting for this session");
                 app.media.failed_mxc.insert(url);
             }
         }
@@ -1193,8 +1637,23 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
         ClientEvent::KeywordHighlightsUpdated(keywords) => {
             app.keyword_highlights = keywords;
         }
+        ClientEvent::DefaultNotificationModesUpdated { direct_messages, group_chats } => {
+            app.default_notification_modes = (direct_messages, group_chats);
+        }
         ClientEvent::CallStateUpdated(call_state) => {
             app.call.calls.insert(call_state.room_id.clone(), call_state);
+        }
+        ClientEvent::SpaceHierarchyFetched { request_id, space_id, children, next_batch } => {
+            let avatar_urls: Vec<String> = children
+                .iter()
+                .filter_map(|c| c.avatar_url.as_deref())
+                .filter(|url| !app.media.is_known(url))
+                .map(str::to_owned)
+                .collect();
+            if let Some(explorer) = &mut app.space_explorer {
+                explorer.apply_page(request_id, &space_id, children, next_batch);
+            }
+            ensure_media_fetched(app, avatar_urls);
         }
         _ => {}
     }

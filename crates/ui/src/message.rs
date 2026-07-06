@@ -62,6 +62,7 @@ pub enum Message {
     Timeline(screens::timeline::Message),
     Verification(screens::verification::Message),
     Settings(screens::settings::Message),
+    SpaceExplorer(screens::space_explorer::Message),
 
     /// Result of fetching a Twemoji SVG for a unicode emoji grapheme
     /// cluster (see `twemoji.rs`) — a pure UI-side fetch, not routed
@@ -103,12 +104,28 @@ pub enum Message {
     /// "Watch on YouTube": open the watch page externally and dismiss.
     OpenVideoInBrowser,
 
+    // --- room leave/forget confirmation (sidebar right-click) ---
+    /// Leave the room, then dismiss the prompt.
+    ConfirmLeaveRoom(String),
+    /// Leave (if needed) and forget the room, then dismiss the prompt.
+    ConfirmForgetRoom(String),
+    /// Dismiss the leave/forget prompt without doing anything.
+    CancelRoomAction,
+
     // --- top-bar controls (owned by the root shell, not any one screen) ---
     ToggleSettings,
     ToggleKeywordPanel,
     KeywordDraftChanged(String),
     AddKeywordClicked,
     RemoveKeywordClicked(String),
+
+    // --- Settings panel resize (drag handle, bottom-right corner) ---
+    /// Press on the grip: arms a drag, but the panel's size doesn't change
+    /// until the first `SettingsResizeDragged` establishes the cursor anchor
+    /// (`on_press` has no position to seed it with).
+    SettingsResizeStarted,
+    SettingsResizeDragged(iced::Point),
+    SettingsResizeReleased,
 
     Noop,
 }

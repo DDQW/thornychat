@@ -15,7 +15,7 @@ use client_core::events::{
     TrustShield, UrlPreview,
 };
 use iced::widget::{
-    button, column, container, image, pick_list, row, scrollable, text, text_input, tooltip,
+    button, column, container, image, row, scrollable, text, text_input, tooltip,
 };
 use iced::{Element, Length};
 
@@ -96,6 +96,9 @@ pub struct State {
     pub reacting_to: Option<String>,
     pub search_open: bool,
     pub search_query: String,
+    /// Whether the room notification-mode menu (opened from the header bell)
+    /// is showing.
+    pub notify_menu_open: bool,
     pub reached_start: bool,
     pub loading_older: bool,
     pub pending_paginate_request: Option<RequestId>,
@@ -104,6 +107,27 @@ pub struct State {
     /// MSC3949 member groups for the open room ("Red team", ...), highest
     /// power level first; empty = fall back to Admin/Mod/Member.
     pub power_tags: Vec<client_core::events::PowerLevelTag>,
+    /// Member left-clicked in the roster — highlighted in the list only, no
+    /// side effect. Cleared on room switch.
+    pub selected_member: Option<String>,
+    /// Member whose messages are tinted in the timeline ("highlight in chat",
+    /// toggled from the member context menu). Cleared on room switch.
+    pub highlighted_member: Option<String>,
+    /// User id whose right-click actions menu is open. `None` = closed. The
+    /// menu renders as a flyout to the left of the roster, anchored at
+    /// `member_menu_anchor_y`.
+    pub member_menu: Option<String>,
+    /// Y (in roster-local coordinates, which line up with the timeline stack)
+    /// where the open member flyout is pinned — frozen from `member_cursor`
+    /// at right-click time so the menu doesn't chase the mouse.
+    pub member_menu_anchor_y: f32,
+    /// Live cursor position while hovering the roster (roster-local), used to
+    /// anchor the flyout at the right-clicked row's height.
+    pub member_cursor: Option<iced::Point>,
+    /// Last roster left-click (user id + when), used to detect a double-click
+    /// on the same member — which opens an unencrypted DM instead of just
+    /// toggling the highlight.
+    pub last_member_click: Option<(String, std::time::Instant)>,
     /// Whether the view is scrolled to (or near) the newest message. This is
     /// the sole gate for read receipts: while it's true the room is marked
     /// read the instant anything arrives (IRC-style, focus irrelevant);
@@ -113,6 +137,12 @@ pub struct State {
     /// Message tinted after a quote-jump so the eye lands on it (the jump
     /// scroll is index-estimated, not pixel-exact).
     pub highlighted_event_id: Option<String>,
+    /// A quote-jump deferred one frame: jumping while a search was open
+    /// must wait for the close-search reflow to publish fresh scroll
+    /// geometry (scroll_task multiplies by the last measured content
+    /// height, which still describes the filtered list). Consumed by the
+    /// next `Scrolled`.
+    pub pending_jump: Option<String>,
     /// Message under the mouse — its floating action bar is showing.
     pub hovered_event_id: Option<String>,
     /// Diagnostic: newest event id seen by the last applied snapshot, so
@@ -218,7 +248,19 @@ pub enum Message {
     ItemUnhovered(String),
     ToggleSearch,
     ToggleMembers,
+    ToggleNotifyMenu,
+    /// Left-click on a roster member: highlight it in the list (toggle), no
+    /// DM. Right-click opens the actions menu instead.
     MemberClicked(String),
+    MemberRightClicked(String),
+    /// Cursor moved over the roster (roster-local coords) — tracked so the
+    /// right-click flyout can anchor at the pointed-at row's height.
+    MemberCursorMoved(iced::Point),
+    MemberMenuDirectMessage(String),
+    MemberMenuNewRoom(String),
+    MemberMenuInvite(String),
+    /// Toggle tinting this member's messages in the open timeline.
+    MemberMenuHighlight(String),
     SearchQueryChanged(String),
     NotificationModeSelected(NotifyChoice),
     LoadOlder,
@@ -257,8 +299,13 @@ pub enum Effect {
     SetNotificationMode(Option<NotificationMode>),
     PaginateBackwards,
     ZoomImage(String),
-    /// Open (or create) a DM with this user and switch to it.
+    /// Open (or create) a DM with this user and switch to it. Whether a
+    /// newly created DM is encrypted follows the user's encryption setting.
     OpenDirectMessage(String),
+    /// Create a fresh private room with this user and switch to it.
+    CreateRoomWith(String),
+    /// Invite this user to the currently-open room.
+    InviteToRoom(String),
     /// Start the embedded player overlay for this video.
     PlayVideo { video: crate::video_player::EmbedVideo, title: Option<String> },
     /// The user scrolled — if that landed them back at the newest message,
@@ -300,6 +347,24 @@ fn image_display_size(width: Option<u32>, height: Option<u32>) -> (u16, u16) {
             )
         }
         _ => (240, 180),
+    }
+}
+
+/// Display box for a sticker: aspect-true from the sender-declared dimensions
+/// (capped at 160×160), a 128×128 box when the event carries none. Never
+/// upscales — small stickers stay small. Deterministic before the bytes
+/// arrive, like [`image_display_size`].
+fn sticker_display_size(width: Option<u32>, height: Option<u32>) -> (u16, u16) {
+    const MAX: f32 = 160.0;
+    match (width, height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => {
+            let scale = (MAX / w as f32).min(MAX / h as f32).min(1.0);
+            (
+                ((w as f32 * scale).round() as u16).max(24),
+                ((h as f32 * scale).round() as u16).max(24),
+            )
+        }
+        _ => (128, 128),
     }
 }
 
@@ -437,10 +502,18 @@ fn scroll_task(state: &State, relative_y: f32) -> iced::Task<Message> {
     )
 }
 
-pub fn update(state: &mut State, message: Message) -> (iced::Task<Message>, Effect) {
+/// Window within which two clicks on the same roster member count as a
+/// double-click (opening an unencrypted DM).
+const MEMBER_DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
+
+pub fn update(
+    state: &mut State,
+    message: Message,
+    spell: &crate::spellcheck_config::SpellcheckConfig,
+) -> (iced::Task<Message>, Effect) {
     match message {
         Message::Composer(msg) => {
-            let (task, effect) = composer::update(&mut state.composer, msg);
+            let (task, effect) = composer::update(&mut state.composer, msg, spell);
             (task.map(Message::Composer), Effect::Composer(effect))
         }
         Message::StartEdit { event_id, current_body } => {
@@ -521,8 +594,73 @@ pub fn update(state: &mut State, message: Message) -> (iced::Task<Message>, Effe
             }
             (iced::Task::none(), Effect::None)
         }
+        Message::ToggleNotifyMenu => {
+            state.notify_menu_open = !state.notify_menu_open;
+            (iced::Task::none(), Effect::None)
+        }
         Message::MemberClicked(user_id) => {
+            state.member_menu = None;
+            // Double-click (same member, in quick succession) opens an
+            // unencrypted DM. A single click only toggles the roster
+            // highlight — it deliberately no longer opens a room.
+            let is_double = state
+                .last_member_click
+                .as_ref()
+                .is_some_and(|(prev, at)| {
+                    prev == &user_id && at.elapsed() < MEMBER_DOUBLE_CLICK
+                });
+            if is_double {
+                state.last_member_click = None;
+                return (iced::Task::none(), Effect::OpenDirectMessage(user_id));
+            }
+            state.last_member_click = Some((user_id.clone(), std::time::Instant::now()));
+            state.selected_member =
+                if state.selected_member.as_deref() == Some(user_id.as_str()) {
+                    None
+                } else {
+                    Some(user_id)
+                };
+            (iced::Task::none(), Effect::None)
+        }
+        Message::MemberRightClicked(user_id) => {
+            // Toggle: right-clicking the member whose menu is already open
+            // closes it (the flyout has no dismiss backdrop).
+            if state.member_menu.as_deref() == Some(user_id.as_str()) {
+                state.member_menu = None;
+            } else {
+                state.selected_member = Some(user_id.clone());
+                state.member_menu = Some(user_id);
+                // Pin the flyout at the row we're pointing at (frozen so it
+                // doesn't follow the mouse once open).
+                state.member_menu_anchor_y = state.member_cursor.map(|p| p.y).unwrap_or(0.0);
+            }
+            (iced::Task::none(), Effect::None)
+        }
+        Message::MemberCursorMoved(point) => {
+            state.member_cursor = Some(point);
+            (iced::Task::none(), Effect::None)
+        }
+        Message::MemberMenuDirectMessage(user_id) => {
+            state.member_menu = None;
             (iced::Task::none(), Effect::OpenDirectMessage(user_id))
+        }
+        Message::MemberMenuNewRoom(user_id) => {
+            state.member_menu = None;
+            (iced::Task::none(), Effect::CreateRoomWith(user_id))
+        }
+        Message::MemberMenuInvite(user_id) => {
+            state.member_menu = None;
+            (iced::Task::none(), Effect::InviteToRoom(user_id))
+        }
+        Message::MemberMenuHighlight(user_id) => {
+            state.member_menu = None;
+            state.highlighted_member =
+                if state.highlighted_member.as_deref() == Some(user_id.as_str()) {
+                    None
+                } else {
+                    Some(user_id)
+                };
+            (iced::Task::none(), Effect::None)
         }
         Message::SearchQueryChanged(query) => {
             state.search_query = query;
@@ -532,6 +670,7 @@ pub fn update(state: &mut State, message: Message) -> (iced::Task<Message>, Effe
             (iced::Task::none(), Effect::None)
         }
         Message::NotificationModeSelected(choice) => {
+            state.notify_menu_open = false;
             (iced::Task::none(), Effect::SetNotificationMode(choice.to_mode()))
         }
         Message::LoadOlder => {
@@ -569,6 +708,17 @@ pub fn update(state: &mut State, message: Message) -> (iced::Task<Message>, Effe
             state.last_bounds_height = viewport.bounds().height;
             state.viewport_top = viewport.bounds().y;
             state.viewport_center = viewport.bounds().y + viewport.bounds().height * 0.5;
+
+            // A quote-jump deferred by JumpToEvent (search was open, so the
+            // geometry was stale): the fields above are fresh now — scroll.
+            if let Some(event_id) = state.pending_jump.take() {
+                if let Some(index) =
+                    state.items.iter().position(|i| i.event_id.as_deref() == Some(&event_id))
+                {
+                    let target = relative_offset_for_index(index, state.items.len());
+                    return (scroll_task(state, target), Effect::None);
+                }
+            }
 
             // `at_bottom` is pure geometry and gates read receipts — it
             // must reflect every event, whatever caused it. (It went stale
@@ -863,6 +1013,7 @@ pub fn update(state: &mut State, message: Message) -> (iced::Task<Message>, Effe
             // land somewhere arbitrary, and a non-matching target wouldn't
             // even be rendered. Close the search first (as ToggleSearch
             // would) so the target is always visible.
+            let was_searching = state.search_open;
             if state.search_open {
                 state.search_open = false;
                 state.search_query.clear();
@@ -877,8 +1028,16 @@ pub fn update(state: &mut State, message: Message) -> (iced::Task<Message>, Effe
                     // and 1.0 = oldest (top). Variable item heights make
                     // this approximate — the highlight marks the exact
                     // message once it's on screen.
+                    state.highlighted_event_id = Some(event_id.clone());
+                    if was_searching {
+                        // The geometry fields still describe the FILTERED
+                        // list; closing the search reflows it and iced
+                        // publishes a fresh Scrolled on the next redraw —
+                        // defer the jump one frame and scroll there.
+                        state.pending_jump = Some(event_id);
+                        return (iced::Task::none(), Effect::None);
+                    }
                     let from_bottom = relative_offset_for_index(index, state.items.len());
-                    state.highlighted_event_id = Some(event_id);
                     (scroll_task(state, from_bottom), Effect::None)
                 }
                 // The quoted message is older than what's loaded — pull
@@ -914,6 +1073,7 @@ pub fn view<'a>(
     emoji_usage: &'a HashMap<String, u32>,
     media: &'a crate::media_cache::State,
     packs: &'a [EmojiPack],
+    stickers: &'a [crate::state::CollectedSticker],
     shortcode_index: &'a HashMap<String, client_core::events::CustomEmoji>,
     url_previews: &'a HashMap<String, Option<UrlPreview>>,
     tweet_previews: &'a HashMap<String, Option<crate::tweets::TweetData>>,
@@ -985,8 +1145,10 @@ pub fn view<'a>(
             &state.editing,
             &state.confirm_delete,
             state.highlighted_event_id.as_deref(),
+            state.highlighted_member.as_deref(),
             &state.composer.member_candidates,
             &state.member_index,
+            &state.power_tags,
             media,
             shortcode_index,
             url_previews,
@@ -1030,7 +1192,7 @@ pub fn view<'a>(
     );
     let bottom = column![
         error_slot,
-        composer::view(&state.composer, emoji_usage, media, packs, typing, followers)
+        composer::view(&state.composer, emoji_usage, media, packs, stickers, typing, followers)
             .map(Message::Composer),
     ]
     .spacing(4);
@@ -1054,6 +1216,29 @@ pub fn view<'a>(
         container(search_row).padding([4, 12]).into()
     }));
 
+    // Notification-mode menu, opened from the header bell. A slot (like
+    // search) so toggling it never reshapes the tree under the composer. The
+    // options right-align under the bell that opened them.
+    let notify_slot = crate::theme::slot(state.notify_menu_open.then(|| {
+        let current = NotifyChoice::from_mode(notification_mode);
+        let mut choices =
+            row![text("Notify").size(12).style(text::secondary)].spacing(6).align_y(iced::Center);
+        for choice in NOTIFY_CHOICES {
+            let style = if choice == current {
+                crate::theme::selected_ghost_button
+            } else {
+                crate::theme::ghost_button
+            };
+            choices = choices.push(
+                button(text(choice.to_string()).size(12))
+                    .on_press(Message::NotificationModeSelected(choice))
+                    .style(style)
+                    .padding([4, 8]),
+            );
+        }
+        container(choices).width(Length::Fill).align_x(iced::Right).padding([4, 12]).into()
+    }));
+
     // Below the header, above search/messages. Always a slot so the
     // composer doesn't lose focus when a call starts or ends.
     let call_banner = crate::theme::slot(crate::screens::call::banner(
@@ -1070,6 +1255,7 @@ pub fn view<'a>(
     let main: Element<'a, Message> = column![
         header(state, room, notification_mode, calls, open_room_id),
         call_banner,
+        notify_slot,
         search_slot,
         scrollable(list)
             .id(timeline_scroll_id())
@@ -1100,10 +1286,15 @@ pub fn view<'a>(
     .width(Length::Fill)
     .into();
 
+    let members_shown = !state.hide_members && !state.composer.member_candidates.is_empty();
     let mut layout = row![main];
-    if !state.hide_members && !state.composer.member_candidates.is_empty() {
-        layout =
-            layout.push(member_panel(&state.composer.member_candidates, &state.power_tags, media));
+    if members_shown {
+        layout = layout.push(member_panel(
+            &state.composer.member_candidates,
+            &state.power_tags,
+            state.selected_member.as_deref(),
+            media,
+        ));
     }
 
     // The reaction picker floats as a centered overlay: expanding it
@@ -1135,28 +1326,100 @@ pub fn view<'a>(
                 .on_press(close),
         )
     });
+    // The member actions menu is a flyout pinned just to the LEFT of the
+    // roster, at the height of the right-clicked row (`member_menu_anchor_y`,
+    // frozen at click time). Positioned with a top spacer + right-alignment
+    // rather than absolute coords, which iced doesn't expose. The surrounding
+    // area is inert (empty padding/space), so clicks off the menu fall through
+    // to the timeline and roster below.
+    let member_flyout = state.member_menu.as_deref().filter(|_| members_shown).map(|user_id| {
+        // Keep the menu from spilling off the bottom: clamp its top so a
+        // ~4-row menu still fits in the visible height.
+        let max_y = (state.last_bounds_height - 140.0).max(0.0);
+        let anchor_y = state.member_menu_anchor_y.clamp(0.0, max_y);
+        let menu = member_menu_actions(user_id, state.highlighted_member.as_deref());
+        let positioned = column![iced::widget::Space::with_height(Length::Fixed(anchor_y)), menu];
+        container(positioned)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::Right)
+            // Right inset = roster width (200) + its 6px padding, so the menu's
+            // right edge lands just left of the list.
+            .padding(iced::Padding { top: 0.0, right: 206.0, bottom: 0.0, left: 0.0 })
+    });
     iced::widget::stack![layout.height(Length::Fill)]
         .push_maybe(picker_overlay)
+        .push_maybe(member_flyout)
+        .into()
+}
+
+/// The member actions menu, rendered as a floating flyout to the left of the
+/// roster at the right-clicked row's height (positioned in `view`). A solid
+/// bordered panel so it stays legible over the timeline. Dismisses by picking
+/// an action, left-clicking any member, or right-clicking the same member
+/// again.
+fn member_menu_actions<'a>(user_id: &str, highlighted_member: Option<&str>) -> Element<'a, Message> {
+    let action = |label: &'static str, message: Message| {
+        button(text(label).size(12))
+            .on_press(message)
+            .style(crate::theme::ghost_button)
+            .width(Length::Fill)
+            .padding([5, 8])
+    };
+
+    let highlight_label =
+        if highlighted_member == Some(user_id) { "Clear highlight" } else { "Highlight messages" };
+
+    let owned = user_id.to_string();
+    let menu = column![
+        action("Direct message", Message::MemberMenuDirectMessage(owned.clone())),
+        action("New room with them", Message::MemberMenuNewRoom(owned.clone())),
+        action("Invite to this room", Message::MemberMenuInvite(owned.clone())),
+        action(highlight_label, Message::MemberMenuHighlight(owned)),
+    ]
+    .spacing(2);
+
+    container(menu)
+        .width(Length::Fixed(190.0))
+        .padding(4)
+        .style(|theme: &iced::Theme| {
+            let palette = theme.extended_palette();
+            iced::widget::container::Style {
+                background: Some(palette.background.base.color.into()),
+                border: iced::Border {
+                    color: palette.background.strong.color,
+                    width: 1.0,
+                    radius: 8.into(),
+                },
+                ..iced::widget::container::Style::default()
+            }
+        })
         .into()
 }
 
 /// Right-hand member list. Grouped by the room's MSC3949 power-level tags
 /// when it defines them ("Red team", "Purple team", ... with their colors,
 /// like Cinny/FluffyChat show); otherwise by the conventional
-/// Admin/Moderator/Member power-level bands. Clicking a member starts (or
-/// opens) a DM with them.
+/// Admin/Moderator/Member power-level bands. Left-click highlights a member
+/// in the list (`selected_member`); right-click opens the actions flyout
+/// (rendered separately, in `view`, to the left of the list). The whole panel
+/// is wrapped in a `mouse_area` that reports the cursor position so the flyout
+/// can anchor at the pointed-at row.
 fn member_panel<'a>(
     members: &'a [RoomMember],
     tags: &'a [client_core::events::PowerLevelTag],
+    selected_member: Option<&'a str>,
     media: &'a crate::media_cache::State,
 ) -> Element<'a, Message> {
-    // (label, members)
-    let mut groups: Vec<(String, Vec<&RoomMember>)> = Vec::new();
+    // (label, group color, members). The color tints the section header and
+    // its member rows; `None` for the Admin/Mod/Member fallback bands and the
+    // below-all-tags catch-all, which have no tag color to draw from.
+    let mut groups: Vec<(String, Option<iced::Color>, Vec<&RoomMember>)> = Vec::new();
 
     if tags.is_empty() {
-        groups.push(("Admin".to_string(), Vec::new()));
-        groups.push(("Moderator".to_string(), Vec::new()));
-        groups.push(("Member".to_string(), Vec::new()));
+        groups.push(("Admin".to_string(), None, Vec::new()));
+        groups.push(("Moderator".to_string(), None, Vec::new()));
+        groups.push(("Member".to_string(), None, Vec::new()));
         for member in members {
             let index = if member.power_level >= 100 {
                 0
@@ -1165,22 +1428,26 @@ fn member_panel<'a>(
             } else {
                 2
             };
-            groups[index].1.push(member);
+            groups[index].2.push(member);
         }
     } else {
         for tag in tags {
-            groups.push((tag.name.clone(), Vec::new()));
+            groups.push((
+                tag.name.clone(),
+                tag.color.as_deref().and_then(parse_hex_color),
+                Vec::new(),
+            ));
         }
         // Catch-all for members below the lowest defined tag (per the MSC,
         // undefined levels fall to the nearest LOWER tag; below every tag
         // there's nothing to fall to).
-        groups.push(("Member".to_string(), Vec::new()));
+        groups.push(("Member".to_string(), None, Vec::new()));
         for member in members {
             // `tags` is sorted highest-first: the first tag at or below the
             // member's level is theirs.
             let index =
                 tags.iter().position(|tag| member.power_level >= tag.level).unwrap_or(tags.len());
-            groups[index].1.push(member);
+            groups[index].2.push(member);
         }
     }
 
@@ -1197,42 +1464,57 @@ fn member_panel<'a>(
     // (case-insensitive, see RoomMembersUpdated in update.rs) and groups are
     // filled in iteration order — sorting per view call allocated a fresh
     // lowercase String per comparison, every frame, for the whole roster.
-    for (label, group) in groups {
+    for (label, color, group) in groups {
         if group.is_empty() {
             continue;
         }
 
-        col = col.push(
-            container(
-                text(label).size(11).font(crate::theme::SEMIBOLD_FONT).style(text::secondary),
-            )
-            .padding([6, 4]),
-        );
+        let header = text(label).size(11).font(crate::theme::SEMIBOLD_FONT);
+        let header: Element<'a, Message> = match color {
+            Some(color) => header.style(colored_text(color)).into(),
+            None => header.style(text::secondary).into(),
+        };
+        col = col.push(container(header).padding([6, 4]));
 
         for member in group {
+            let name = text(member.display_name.clone()).size(13);
+            let name: Element<'a, Message> = match color {
+                Some(color) => name.style(colored_text(color)).into(),
+                None => name.into(),
+            };
+            let is_selected = selected_member == Some(member.user_id.as_str());
+            let style = if is_selected {
+                crate::theme::selected_ghost_button
+            } else {
+                crate::theme::ghost_button
+            };
+            let row_button = button(
+                row![
+                    crate::media_cache::avatar(
+                        media,
+                        member.avatar_url.as_deref(),
+                        &member.display_name,
+                        22,
+                    ),
+                    name,
+                ]
+                .spacing(6)
+                .align_y(iced::Center),
+            )
+            .on_press(Message::MemberClicked(member.user_id.clone()))
+            .style(style)
+            .width(Length::Fill)
+            .padding([3, 6]);
+            // Wrap in a mouse_area so right-click opens the actions flyout;
+            // the inner button still handles the left-click highlight.
             col = col.push(
-                button(
-                    row![
-                        crate::media_cache::avatar(
-                            media,
-                            member.avatar_url.as_deref(),
-                            &member.display_name,
-                            22,
-                        ),
-                        text(member.display_name.clone()).size(13),
-                    ]
-                    .spacing(6)
-                    .align_y(iced::Center),
-                )
-                .on_press(Message::MemberClicked(member.user_id.clone()))
-                .style(crate::theme::ghost_button)
-                .width(Length::Fill)
-                .padding([3, 6]),
+                iced::widget::mouse_area(row_button)
+                    .on_right_press(Message::MemberRightClicked(member.user_id.clone())),
             );
         }
     }
 
-    container(
+    let panel = container(
         scrollable(col)
             .height(Length::Fill)
             .direction(iced::widget::scrollable::Direction::Vertical(
@@ -1243,8 +1525,13 @@ fn member_panel<'a>(
     .width(Length::Fixed(200.0))
     .height(Length::Fill)
     .padding(6)
-    .style(crate::theme::panel)
-    .into()
+    .style(crate::theme::panel);
+
+    // Report the cursor's roster-local position (the panel's top-left lines up
+    // with the timeline stack's, so this Y works directly as the flyout
+    // anchor). Wrapping doesn't steal events — the inner buttons/scrollbar
+    // still work.
+    iced::widget::mouse_area(panel).on_move(Message::MemberCursorMoved).into()
 }
 
 /// Local (client-side) search over the already-loaded timeline: matches
@@ -1271,6 +1558,7 @@ fn item_matches(item: &TimelineItem, query_lower: &str) -> bool {
     let content_text = match &item.content {
         TimelineItemContent::Text(body) => Some(body.as_str()),
         TimelineItemContent::Image { caption, .. } => caption.as_deref(),
+        TimelineItemContent::Sticker { body, .. } => Some(body.as_str()),
         TimelineItemContent::File { filename, .. } => Some(filename.as_str()),
         TimelineItemContent::Redacted
         | TimelineItemContent::DateDivider(_)
@@ -1344,23 +1632,29 @@ fn header<'a>(
         )
         .into()
     })));
+    // Notification mode: a bell that reflects mute at a glance and opens the
+    // mode menu (rendered as a slot below the header) on click.
+    let bell = if NotifyChoice::from_mode(notification_mode) == NotifyChoice::Mute {
+        crate::theme::icon::NOTIFY_MUTED
+    } else {
+        crate::theme::icon::NOTIFY
+    };
     bar = bar.push(
-        pick_list(
-            NOTIFY_CHOICES,
-            Some(NotifyChoice::from_mode(notification_mode)),
-            Message::NotificationModeSelected,
-        )
-        .text_size(12)
-        .padding([4, 8]),
+        button(crate::theme::icon_text(bell, 14))
+            .on_press(Message::ToggleNotifyMenu)
+            .style(crate::theme::ghost_button)
+            .padding([4, 8]),
     );
+    let search_icon =
+        if state.search_open { crate::theme::icon::CLOSE } else { crate::theme::icon::SEARCH };
     bar = bar.push(
-        button(text(if state.search_open { "Close" } else { "Search" }).size(12))
+        button(crate::theme::icon_text(search_icon, 14))
             .on_press(Message::ToggleSearch)
             .style(crate::theme::ghost_button)
             .padding([4, 8]),
     );
     bar = bar.push(
-        button(text("Members").size(12))
+        button(crate::theme::icon_text(crate::theme::icon::MEMBERS, 14))
             .on_press(Message::ToggleMembers)
             .style(crate::theme::ghost_button)
             .padding([4, 8]),
@@ -1459,8 +1753,10 @@ fn render_item<'a>(
     editing: &'a Option<EditingState>,
     confirm_delete: &'a Option<String>,
     highlighted: Option<&'a str>,
+    highlighted_member: Option<&'a str>,
     members: &'a [RoomMember],
     member_index: &'a HashMap<String, usize>,
+    power_tags: &'a [client_core::events::PowerLevelTag],
     media: &'a crate::media_cache::State,
     shortcode_index: &'a HashMap<String, client_core::events::CustomEmoji>,
     url_previews: &'a HashMap<String, Option<UrlPreview>>,
@@ -1524,6 +1820,20 @@ fn render_item<'a>(
                 None => visual,
             }
         }
+        TimelineItemContent::Sticker { url, width, height, .. } => {
+            // Like an inline image, but smaller and with no caption/zoom.
+            // Footprint fixed before the bytes arrive so a finishing fetch
+            // can't reflow the list (same reasoning as `Image`).
+            let (box_w, box_h) = sticker_display_size(*width, *height);
+            match crate::media_cache::mxc_visual(media, url, box_w, Some(box_h)) {
+                Some(img) => img,
+                None => container(text("loading sticker…").size(12).style(text::secondary))
+                    .center_x(Length::Fixed(box_w as f32))
+                    .center_y(Length::Fixed(box_h as f32))
+                    .style(crate::theme::panel)
+                    .into(),
+            }
+        }
         TimelineItemContent::File { filename, .. } => text(format!("[file: {filename}]")).size(15).into(),
         // Rendered through the normal path (not an early return) so the
         // avatar gutter, header, and sender grouping stay correct — the
@@ -1538,15 +1848,19 @@ fn render_item<'a>(
         }
     };
 
-    // Cinny-style: sender names get a stable per-user color from a hash
-    // palette (not team colors — Cinny keeps those for the member panel's
-    // grouping, and real tag colors are often unreadable as text).
-    let name_color = name_palette_color(&item.sender);
+    // Sender names are colored by the sender's power-level group — the server's
+    // "Red team", "Purple team", "Founder", … the MSC3949 tag colors Cinny
+    // renders — resolved from the roster's power level. Falls back to a
+    // stable per-user hash color when the sender has no colored tag (or the
+    // room defines none), which is also what Cinny does for untagged users.
+    let name_color = member_by_id(members, member_index, &item.sender)
+        .and_then(|member| tag_color_for_level(power_tags, member.power_level))
+        .unwrap_or_else(|| name_palette_color(&item.sender));
     let styled_name = || {
         text(sender.to_string())
             .size(13)
             .font(crate::theme::SEMIBOLD_FONT)
-            .style(move |_theme: &iced::Theme| iced::widget::text::Style { color: Some(name_color) })
+            .style(colored_text(name_color))
     };
     let sender_name: Element<'a, Message> = match &item.shield {
         Some(shield) => {
@@ -1577,8 +1891,14 @@ fn render_item<'a>(
 
     if let Some(reply) = &item.in_reply_to {
         let who = if reply.sender.is_empty() { "…".to_string() } else { reply.sender.clone() };
+        let who_line = row![
+            text(crate::theme::icon::REPLY).size(11).font(crate::theme::ICON_FONT).style(text::primary),
+            text(who).size(11).style(text::primary),
+        ]
+        .spacing(4)
+        .align_y(iced::Center);
         let texts = column![
-            text(format!("↩ {who}")).size(11).style(text::primary),
+            who_line,
             text(reply.snippet.clone()).size(12).style(text::secondary),
         ]
         .spacing(1);
@@ -1738,6 +2058,29 @@ fn render_item<'a>(
             })
             .into();
     }
+    // Persistent highlight for a member "highlighted in chat" from the roster
+    // menu: a clearly visible tinted card with an accent border (the earlier
+    // near-transparent `secondary` tint was invisible in most themes). The
+    // transient quote-jump flash above wins when both apply (it returns
+    // first).
+    if highlighted_member == Some(item.sender.as_str()) {
+        return container(interactive)
+            .padding(6)
+            .width(Length::Fill)
+            .style(|theme: &iced::Theme| {
+                let palette = theme.extended_palette();
+                iced::widget::container::Style {
+                    background: Some(palette.primary.weak.color.scale_alpha(0.22).into()),
+                    border: iced::Border {
+                        color: palette.primary.strong.color,
+                        width: 2.0,
+                        radius: 6.into(),
+                    },
+                    ..iced::widget::container::Style::default()
+                }
+            })
+            .into();
+    }
     interactive
 }
 
@@ -1774,7 +2117,8 @@ fn hover_action_bar<'a>(
             sender: sender.to_string(),
             snippet: ui_snippet(&item.content),
             image_url: match &item.content {
-                TimelineItemContent::Image { url, .. } => Some(url.clone()),
+                TimelineItemContent::Image { url, .. }
+                | TimelineItemContent::Sticker { url, .. } => Some(url.clone()),
                 _ => None,
             },
         }),
@@ -1824,6 +2168,51 @@ fn name_palette_color(user_id: &str) -> iced::Color {
     let hash: u32 = user_id.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
     let (r, g, b) = PALETTE[(hash % PALETTE.len() as u32) as usize];
     iced::Color::from_rgb8(r, g, b)
+}
+
+/// A `text` style function that pins a fixed color — used to tint sender
+/// names, member rows and group headers in their power-level group color.
+fn colored_text(color: iced::Color) -> impl Fn(&iced::Theme) -> text::Style {
+    move |_: &iced::Theme| text::Style { color: Some(color) }
+}
+
+/// Parse a CSS-style hex color (`#rgb`, `#rrggbb`, or `#rrggbbaa`) into an
+/// iced [`Color`](iced::Color). Returns `None` for anything malformed so
+/// callers fall back to the hash palette rather than rendering a wrong or
+/// invisible color. the server's tags use `#rrggbb`, but the others are cheap to
+/// accept and match what any web/Cinny-authored value could carry.
+fn parse_hex_color(hex: &str) -> Option<iced::Color> {
+    let hex = hex.trim().strip_prefix('#')?;
+    // Guard char-boundary slicing below: a stray multibyte char would panic.
+    if !hex.is_ascii() {
+        return None;
+    }
+    let pair = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+    match hex.len() {
+        // `#rgb` shorthand: each nibble is doubled (`f` → `0xff`).
+        3 => {
+            let nib = |i: usize| u8::from_str_radix(&hex[i..=i], 16).ok().map(|n| n * 17);
+            Some(iced::Color::from_rgb8(nib(0)?, nib(1)?, nib(2)?))
+        }
+        6 => Some(iced::Color::from_rgb8(pair(0)?, pair(2)?, pair(4)?)),
+        8 => Some(iced::Color::from_rgba8(pair(0)?, pair(2)?, pair(4)?, pair(6)? as f32 / 255.0)),
+        _ => None,
+    }
+}
+
+/// The group color for a member at `power_level`, per the room's MSC3949
+/// power-level tags (sorted highest-level first): the color of the first tag
+/// at or below the member's level — the same tag the member panel files them
+/// under. `None` when no tag applies or the matching tag defined no color, in
+/// which case callers fall back to the per-user hash palette.
+fn tag_color_for_level(
+    tags: &[client_core::events::PowerLevelTag],
+    power_level: i64,
+) -> Option<iced::Color> {
+    tags.iter()
+        .find(|tag| power_level >= tag.level)
+        .and_then(|tag| tag.color.as_deref())
+        .and_then(parse_hex_color)
 }
 
 /// Link preview card. Tweet links get a dedicated layout (author line,
@@ -2455,6 +2844,7 @@ fn ui_snippet(content: &TimelineItemContent) -> String {
             Some(c) => format!("[image: {c}]"),
             None => "[image]".to_string(),
         },
+        TimelineItemContent::Sticker { .. } => "[sticker]".to_string(),
         TimelineItemContent::File { filename, .. } => format!("[file: {filename}]"),
         TimelineItemContent::Redacted => "(message removed)".to_string(),
         TimelineItemContent::DateDivider(_) | TimelineItemContent::NewMessagesDivider => {
@@ -2475,10 +2865,17 @@ fn with_avatar<'a>(
 }
 
 /// A slice of a message body: literal text, a `:shortcode:` that resolved
-/// against a known custom emoji pack, or a URL.
+/// against a known custom emoji pack, a real unicode emoji typed inline, or
+/// a URL.
 enum BodySegment<'a> {
     Text(&'a str),
     Emoji(&'a client_core::events::CustomEmoji),
+    /// The emoji's own canonical, fully-qualified string (from the `emojis`
+    /// crate's static table), not the raw slice matched in the body — those
+    /// can differ (e.g. a sender's client omitting the FE0F variation
+    /// selector), and the Twemoji disk cache / picker prefetch are both
+    /// keyed by the canonical form.
+    UnicodeEmoji(&'static str),
     Link(&'a str),
 }
 
@@ -2552,7 +2949,7 @@ fn tokenize_custom_emoji_into<'a>(
         if !code.is_empty() && code.len() <= 64 && code.chars().all(is_shortcode_char) {
             if let Some(emoji) = lookup(code) {
                 if open > plain_start {
-                    out.push(BodySegment::Text(&text[plain_start..open]));
+                    tokenize_unicode_emoji_into(&text[plain_start..open], out);
                 }
                 out.push(BodySegment::Emoji(emoji));
                 plain_start = close + 1;
@@ -2566,8 +2963,79 @@ fn tokenize_custom_emoji_into<'a>(
     }
 
     if plain_start < text.len() {
+        tokenize_unicode_emoji_into(&text[plain_start..], out);
+    }
+}
+
+/// The longest real emoji sequence at the start of `s` (checked longest
+/// first, up to the ~8-codepoint length of the longest real ZWJ sequences —
+/// e.g. the couple-kissing family ones — so a sequence's first codepoint
+/// alone is never mistaken for the whole thing). Returns the byte length
+/// matched in `s` and the emoji's canonical `'static` string.
+fn emoji_prefix(s: &str) -> Option<(usize, &'static str)> {
+    const MAX_EMOJI_CHARS: usize = 8;
+    // Fixed stack buffer, not a Vec — this runs once per char position of
+    // every non-ASCII text segment, per view rebuild (the hottest loop).
+    let mut ends = [0usize; MAX_EMOJI_CHARS];
+    let mut n = 0;
+    let mut end = 0;
+    for c in s.chars().take(MAX_EMOJI_CHARS) {
+        end += c.len_utf8();
+        ends[n] = end;
+        n += 1;
+    }
+    ends[..n].iter().rev().find_map(|&end| emojis::get(&s[..end]).map(|e| (end, e.as_str())))
+}
+
+/// Splits `text` on real unicode emoji (plain-ASCII text, the common case,
+/// is returned as a single segment untouched — no emoji is representable in
+/// pure ASCII).
+fn tokenize_unicode_emoji_into<'a>(text: &'a str, out: &mut Vec<BodySegment<'a>>) {
+    if text.is_ascii() {
+        out.push(BodySegment::Text(text));
+        return;
+    }
+    let mut plain_start = 0;
+    let mut cursor = 0;
+    while cursor < text.len() {
+        if let Some((len, canonical)) = emoji_prefix(&text[cursor..]) {
+            if cursor > plain_start {
+                out.push(BodySegment::Text(&text[plain_start..cursor]));
+            }
+            out.push(BodySegment::UnicodeEmoji(canonical));
+            cursor += len;
+            plain_start = cursor;
+        } else {
+            let step = text[cursor..].chars().next().map_or(1, char::len_utf8);
+            cursor += step;
+        }
+    }
+    if plain_start < text.len() {
         out.push(BodySegment::Text(&text[plain_start..]));
     }
+}
+
+/// Every real unicode emoji embedded in `text` (canonical, fully-qualified
+/// forms) — the same detector `render_text_body` renders with, exposed so
+/// the fetch-triggering pass in `update.rs` can warm the Twemoji cache for
+/// inline message emoji the same way it already does for reactions (keeping
+/// what's fetched and what's looked up on the same key).
+pub fn unicode_emojis_in(text: &str) -> Vec<&'static str> {
+    if text.is_ascii() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut cursor = 0;
+    while cursor < text.len() {
+        match emoji_prefix(&text[cursor..]) {
+            Some((len, canonical)) => {
+                out.push(canonical);
+                cursor += len;
+            }
+            None => cursor += text[cursor..].chars().next().map_or(1, char::len_utf8),
+        }
+    }
+    out
 }
 
 /// Message text with inline custom emoji and clickable links. Emoji-only
@@ -2580,11 +3048,12 @@ fn render_text_body<'a>(
     shortcode_index: &'a HashMap<String, client_core::events::CustomEmoji>,
     media: &'a crate::media_cache::State,
 ) -> Element<'a, Message> {
-    // Both segment kinds require a ':' (URLs need their scheme's colon,
-    // shortcodes are ':code:'), so a colon-free body — the common case —
-    // skips the whole linkify + shortcode scan. This runs per text item per
-    // view call, the hottest loop in the app.
-    if !body.contains(':') {
+    // Links need their scheme's colon and shortcodes are ':code:', so a
+    // body that's both colon-free and plain ASCII (the common case — no
+    // unicode emoji is representable in ASCII) skips the whole linkify +
+    // shortcode + emoji scan. This runs per text item per view call, the
+    // hottest loop in the app.
+    if body.is_ascii() && !body.contains(':') {
         return text(body).size(15).into();
     }
     let lines: Vec<Vec<BodySegment<'a>>> =
@@ -2611,7 +3080,7 @@ fn render_text_body<'a>(
     };
 
     let emoji_only = lines.iter().flatten().all(|segment| match segment {
-        BodySegment::Emoji(_) => true,
+        BodySegment::Emoji(_) | BodySegment::UnicodeEmoji(_) => true,
         BodySegment::Text(t) => t.trim().is_empty(),
         BodySegment::Link(_) => false,
     });
@@ -2620,14 +3089,18 @@ fn render_text_body<'a>(
         for chunk in lines
             .iter()
             .flatten()
-            .filter(|s| matches!(s, BodySegment::Emoji(_)))
+            .filter(|s| matches!(s, BodySegment::Emoji(_) | BodySegment::UnicodeEmoji(_)))
             .collect::<Vec<_>>()
             .chunks(12)
         {
             let mut line = row![].spacing(2);
             for segment in chunk {
-                if let BodySegment::Emoji(emoji) = segment {
-                    line = line.push(emoji_widget(emoji, 28));
+                match segment {
+                    BodySegment::Emoji(emoji) => line = line.push(emoji_widget(emoji, 28)),
+                    BodySegment::UnicodeEmoji(emoji) => {
+                        line = line.push(crate::emoji_picker::emoji_visual(media, emoji, 28));
+                    }
+                    _ => {}
                 }
             }
             out = out.push(line);
@@ -2657,6 +3130,9 @@ fn render_text_body<'a>(
             match segment {
                 BodySegment::Text(t) => line = line.push(text(t).size(15)),
                 BodySegment::Emoji(emoji) => line = line.push(emoji_widget(emoji, 20)),
+                BodySegment::UnicodeEmoji(emoji) => {
+                    line = line.push(crate::emoji_picker::emoji_visual(media, emoji, 20));
+                }
                 BodySegment::Link(url) => line = line.push(link_widget(url)),
             }
         }
@@ -2718,7 +3194,7 @@ fn resolve_reaction_visual<'a>(
             }
         }
     }
-    crate::emoji_picker::emoji_visual(media, key)
+    crate::emoji_picker::emoji_visual(media, key, 20)
 }
 
 /// The full sectioned picker (frequently used + custom packs + every

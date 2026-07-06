@@ -7197,20 +7197,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "synapse"
-version = "0.1.0"
-dependencies = [
- "client-core",
- "directories",
- "iced",
- "tokio",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "ui",
-]
-
-[[package]]
 name = "sync_wrapper"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7350,6 +7336,20 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "thornychat"
+version = "0.1.0"
+dependencies = [
+ "client-core",
+ "directories",
+ "iced",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "ui",
 ]
 
 [[package]]

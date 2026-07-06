@@ -13,7 +13,9 @@ use std::sync::Arc;
 
 use matrix_sdk::attachment::AttachmentConfig;
 use matrix_sdk::encryption::verification::VerificationRequest;
-use matrix_sdk::notification_settings::RoomNotificationMode as SdkNotificationMode;
+use matrix_sdk::notification_settings::{
+    IsEncrypted, IsOneToOne, RoomNotificationMode as SdkNotificationMode,
+};
 use matrix_sdk::room::edit::EditedContent;
 use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
 use matrix_sdk::ruma::events::key::verification::request::ToDeviceKeyVerificationRequestEventContent;
@@ -21,8 +23,13 @@ use matrix_sdk::ruma::events::room::message::{
     MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
     RoomMessageEventContentWithoutRelation,
 };
-use matrix_sdk::ruma::events::{Mentions, ToDeviceEvent};
-use matrix_sdk::ruma::{EventId, OwnedUserId, RoomId, UserId};
+use matrix_sdk::ruma::events::room::ImageInfo;
+use matrix_sdk::ruma::events::sticker::StickerEventContent;
+use matrix_sdk::ruma::events::{AnyMessageLikeEventContent, Mentions, ToDeviceEvent};
+use matrix_sdk::ruma::{
+    EventId, OwnedMxcUri, OwnedServerName, OwnedUserId, RoomId, RoomOrAliasId, ServerName, UInt,
+    UserId,
+};
 use matrix_sdk::Client;
 use matrix_sdk_ui::sync_service::{self, SyncService};
 use matrix_sdk_ui::timeline::{AttachmentSource, Timeline, TimelineEventItemId};
@@ -335,7 +342,7 @@ async fn handle_command(
             worker_state.open_rooms.remove(&room_id);
         }
 
-        ClientCommand::OpenDirectMessage { user_id, request_id } => {
+        ClientCommand::OpenDirectMessage { user_id, encrypted, request_id } => {
             let Ok(parsed_user_id) = UserId::parse(&user_id) else {
                 fail(event_tx, request_id, "invalid user id");
                 return;
@@ -343,14 +350,28 @@ async fn handle_command(
             let client = client.clone();
             let event_tx = event_tx.clone();
             tokio::spawn(async move {
-                if let Some(room) = client.get_dm_room(&parsed_user_id) {
-                    let _ = event_tx.send(ClientEvent::DirectMessageReady {
-                        room_id: room.room_id().to_string(),
-                    });
+                // Reuse any existing DM with this user (whatever its
+                // encryption) so we don't spawn a duplicate room every time.
+                if let Some(room_id) = find_dm_room(&client, &parsed_user_id).await {
+                    let _ = event_tx
+                        .send(ClientEvent::DirectMessageReady { room_id: room_id.to_string() });
                     succeed(&event_tx, request_id);
                     return;
                 }
-                match client.create_dm(&parsed_user_id).await {
+                // Build the DM room ourselves (rather than `create_dm`, which
+                // always encrypts when the crate's e2e feature is on) so the
+                // caller's `encrypted` flag decides: same DM shape either way
+                // (`is_direct`, TrustedPrivateChat), with the encryption state
+                // event added only when requested.
+                use matrix_sdk::ruma::api::client::room::create_room;
+                let mut request = create_room::v3::Request::new();
+                request.invite = vec![parsed_user_id];
+                request.is_direct = true;
+                request.preset = Some(create_room::v3::RoomPreset::TrustedPrivateChat);
+                if encrypted {
+                    request.initial_state = vec![encryption_initial_state()];
+                }
+                match client.create_room(request).await {
                     Ok(room) => {
                         let _ = event_tx.send(ClientEvent::DirectMessageReady {
                             room_id: room.room_id().to_string(),
@@ -409,10 +430,19 @@ async fn handle_command(
                     // main timeline stays in the main timeline).
                     enforce_thread: matrix_sdk::room::reply::EnforceThread::MaybeThreaded,
                 };
-                match handles.timeline.send_reply(content.into(), reply).await {
-                    Ok(()) => succeed(event_tx, request_id),
-                    Err(error) => fail(event_tx, request_id, &error.to_string()),
-                }
+                // send_reply resolves the quoted event via make_reply_event,
+                // which falls back to a blocking /event fetch when it isn't
+                // in the event cache — spawn it so a slow request doesn't
+                // stall the command loop (same hazard as RedactEvent /
+                // SendAttachment).
+                let timeline = handles.timeline.clone();
+                let event_tx = event_tx.clone();
+                tokio::spawn(async move {
+                    match timeline.send_reply(content.into(), reply).await {
+                        Ok(()) => succeed(&event_tx, request_id),
+                        Err(error) => fail(&event_tx, request_id, &error.to_string()),
+                    }
+                });
                 return;
             }
 
@@ -488,6 +518,29 @@ async fn handle_command(
                     Err(error) => fail(&event_tx, request_id, &error.to_string()),
                 }
             });
+        }
+
+        ClientCommand::SendSticker { room_id, url, body, width, height, mimetype, request_id } => {
+            let Some(handles) = worker_state.open_rooms.get(&room_id) else {
+                fail(event_tx, request_id, "room is not open");
+                return;
+            };
+            // Picked stickers already point at a hosted `mxc://` image, so
+            // there's nothing to upload — this is a plain event send.
+            if !url.starts_with("mxc://") {
+                fail(event_tx, request_id, "sticker url is not an mxc uri");
+                return;
+            }
+            let mut info = ImageInfo::new();
+            info.width = width.map(UInt::from);
+            info.height = height.map(UInt::from);
+            info.mimetype = mimetype;
+            let content = StickerEventContent::new(body, info, OwnedMxcUri::from(url));
+
+            match handles.timeline.send(AnyMessageLikeEventContent::Sticker(content)).await {
+                Ok(_) => succeed(event_tx, request_id),
+                Err(error) => fail(event_tx, request_id, &error.to_string()),
+            }
         }
 
         ClientCommand::SetTyping { room_id, typing } => {
@@ -586,22 +639,30 @@ async fn handle_command(
             }
         }
 
-        ClientCommand::MarkRoomRead { room_id } => {
+        ClientCommand::MarkRoomRead { room_id, public_receipt } => {
             if let Some(handles) = worker_state.open_rooms.get(&room_id) {
                 let timeline = Arc::clone(&handles.timeline);
                 tokio::spawn(async move {
-                    // Both receipts, like Element: the public read receipt
-                    // (what others see, clears the unread badge) and the
-                    // private fully-read marker (what positions the "new
-                    // messages" divider next time the room opens).
-                    // `mark_as_read` returns whether it actually sent —
-                    // `false` means the SDK decided the receipt wasn't
+                    // Two receipts, like Element: a read receipt (clears the
+                    // unread badge) plus the private fully-read marker (what
+                    // positions the "new messages" divider next time the room
+                    // opens). The read receipt is public (`m.read`, federated,
+                    // others see it) normally, but the *private* variant
+                    // (`m.read.private`) when the user has read receipts off —
+                    // it still advances the read position server-side (so
+                    // unread badges clear on their own devices) without ever
+                    // being shared with anyone else. The fully-read marker is
+                    // room account data, never federated, so it's sent
+                    // regardless. `mark_as_read` returns whether it actually
+                    // sent — `false` means the SDK decided the receipt wasn't
                     // needed (e.g. it believes the marker is already at or
                     // past the latest event), which is invisible without
-                    // logging and exactly what a stuck "new messages"
-                    // divider would look like.
-                    match timeline.mark_as_read(ReceiptType::Read).await {
-                        Ok(sent) => tracing::debug!(sent, "read receipt"),
+                    // logging and exactly what a stuck "new messages" divider
+                    // would look like.
+                    let read_receipt =
+                        if public_receipt { ReceiptType::Read } else { ReceiptType::ReadPrivate };
+                    match timeline.mark_as_read(read_receipt).await {
+                        Ok(sent) => tracing::debug!(sent, public = public_receipt, "read receipt"),
                         Err(error) => tracing::warn!(%error, "failed to send read receipt"),
                     }
                     match timeline.mark_as_read(ReceiptType::FullyRead).await {
@@ -709,6 +770,41 @@ async fn handle_command(
             });
         }
 
+        ClientCommand::SetDefaultNotificationMode { scope, mode, request_id } => {
+            let is_one_to_one = match scope {
+                crate::events::NotificationScope::DirectMessages => IsOneToOne::Yes,
+                crate::events::NotificationScope::GroupChats => IsOneToOne::No,
+            };
+            let sdk_mode = match mode {
+                crate::events::NotificationMode::AllMessages => SdkNotificationMode::AllMessages,
+                crate::events::NotificationMode::MentionsAndKeywordsOnly => {
+                    SdkNotificationMode::MentionsAndKeywordsOnly
+                }
+                crate::events::NotificationMode::Mute => SdkNotificationMode::Mute,
+            };
+            let client = client.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                let settings = client.notification_settings().await;
+                // The UI only exposes one control per scope, not the SDK's
+                // full encrypted x one-to-one matrix, so both encrypted
+                // variants are kept in sync together (same simplification
+                // Element makes). The push-rules watcher in `push.rs`
+                // re-snapshots both defaults once this account-data change
+                // lands, so no event is sent from here directly.
+                let first = settings
+                    .set_default_room_notification_mode(IsEncrypted::Yes, is_one_to_one, sdk_mode)
+                    .await;
+                let second = settings
+                    .set_default_room_notification_mode(IsEncrypted::No, is_one_to_one, sdk_mode)
+                    .await;
+                match first.and(second) {
+                    Ok(()) => succeed(&event_tx, request_id),
+                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
+                }
+            });
+        }
+
         ClientCommand::ClearRoomNotificationMode { room_id, request_id } => {
             let Ok(parsed_room_id) = RoomId::parse(&room_id) else {
                 fail(event_tx, request_id, "invalid room id");
@@ -762,6 +858,147 @@ async fn handle_command(
             });
         }
 
+        ClientCommand::CreateRoomWith { user_id, encrypted, request_id } => {
+            let Ok(parsed_user_id) = UserId::parse(&user_id) else {
+                fail(event_tx, request_id, "invalid user id");
+                return;
+            };
+            let client = client.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                use matrix_sdk::ruma::api::client::room::create_room;
+                let mut request = create_room::v3::Request::new();
+                // A group room (not a DM): invite-only, creator is admin.
+                request.invite = vec![parsed_user_id];
+                request.is_direct = false;
+                request.preset = Some(create_room::v3::RoomPreset::PrivateChat);
+                if encrypted {
+                    request.initial_state = vec![encryption_initial_state()];
+                }
+                match client.create_room(request).await {
+                    Ok(room) => {
+                        let _ = event_tx.send(ClientEvent::RoomCreated {
+                            room_id: room.room_id().to_string(),
+                        });
+                        succeed(&event_tx, request_id);
+                    }
+                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
+                }
+            });
+        }
+
+        ClientCommand::InviteUser { room_id, user_id, request_id } => {
+            let Ok(parsed_room_id) = RoomId::parse(&room_id) else {
+                fail(event_tx, request_id, "invalid room id");
+                return;
+            };
+            let Ok(parsed_user_id) = UserId::parse(&user_id) else {
+                fail(event_tx, request_id, "invalid user id");
+                return;
+            };
+            let Some(room) = client.get_room(&parsed_room_id) else {
+                fail(event_tx, request_id, "unknown room");
+                return;
+            };
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                match room.invite_user_by_id(&parsed_user_id).await {
+                    Ok(()) => succeed(&event_tx, request_id),
+                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
+                }
+            });
+        }
+
+        ClientCommand::LeaveRoom { room_id, request_id } => {
+            let Ok(parsed_room_id) = RoomId::parse(&room_id) else {
+                fail(event_tx, request_id, "invalid room id");
+                return;
+            };
+            let Some(room) = client.get_room(&parsed_room_id) else {
+                fail(event_tx, request_id, "unknown room");
+                return;
+            };
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                match room.leave().await {
+                    Ok(()) => succeed(&event_tx, request_id),
+                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
+                }
+            });
+        }
+
+        ClientCommand::ForgetRoom { room_id, request_id } => {
+            let Ok(parsed_room_id) = RoomId::parse(&room_id) else {
+                fail(event_tx, request_id, "invalid room id");
+                return;
+            };
+            let Some(room) = client.get_room(&parsed_room_id) else {
+                fail(event_tx, request_id, "unknown room");
+                return;
+            };
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                // `forget()` only accepts a Left/Banned room, so leave first
+                // if we're still in it.
+                if matches!(
+                    room.state(),
+                    matrix_sdk::RoomState::Joined
+                        | matrix_sdk::RoomState::Invited
+                        | matrix_sdk::RoomState::Knocked
+                ) {
+                    if let Err(error) = room.leave().await {
+                        fail(&event_tx, request_id, &error.to_string());
+                        return;
+                    }
+                }
+                match room.forget().await {
+                    Ok(()) => succeed(&event_tx, request_id),
+                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
+                }
+            });
+        }
+
+        ClientCommand::FetchSpaceHierarchy { space_id, from, request_id } => {
+            let Ok(parsed_space_id) = RoomId::parse(&space_id) else {
+                fail(event_tx, request_id, "invalid space id");
+                return;
+            };
+            let client = client.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                match crate::rooms::spaces::fetch_children(&client, &parsed_space_id, from).await {
+                    Ok((children, next_batch)) => {
+                        let _ = event_tx.send(ClientEvent::SpaceHierarchyFetched {
+                            request_id,
+                            space_id,
+                            children,
+                            next_batch,
+                        });
+                    }
+                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
+                }
+            });
+        }
+
+        ClientCommand::JoinRoom { room_id_or_alias, via, request_id } => {
+            let Ok(alias) = RoomOrAliasId::parse(&room_id_or_alias) else {
+                fail(event_tx, request_id, "invalid room id or alias");
+                return;
+            };
+            // Unparseable via entries are dropped rather than failing the
+            // join — they're only routing hints.
+            let via: Vec<OwnedServerName> =
+                via.iter().filter_map(|s| ServerName::parse(s).ok()).collect();
+            let client = client.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                match client.join_room_by_id_or_alias(&alias, &via).await {
+                    Ok(_) => succeed(&event_tx, request_id),
+                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
+                }
+            });
+        }
+
         other => {
             tracing::debug!(?other, "command not yet implemented");
         }
@@ -778,4 +1015,54 @@ fn succeed(event_tx: &mpsc::UnboundedSender<ClientEvent>, request_id: RequestId)
 
 fn fail(event_tx: &mpsc::UnboundedSender<ClientEvent>, request_id: RequestId, error: &str) {
     let _ = event_tx.send(ClientEvent::CommandFailed { request_id, error: error.to_string() });
+}
+
+/// Resolve an existing direct-message room with `user_id`, preferring the
+/// SDK's own view (`get_dm_room`) and falling back to the global `m.direct`
+/// account data — local first, then an authoritative server fetch. On sliding
+/// sync the per-room `direct_targets` is frequently empty even for real DMs,
+/// so without this "open DM" spawns a fresh room every time instead of
+/// reusing the existing conversation.
+async fn find_dm_room(client: &Client, user_id: &UserId) -> Option<matrix_sdk::ruma::OwnedRoomId> {
+    if let Some(room) = client.get_dm_room(user_id) {
+        return Some(room.room_id().to_owned());
+    }
+    use matrix_sdk::ruma::events::{
+        direct::{DirectEventContent, DirectUserIdentifier},
+        GlobalAccountDataEventType,
+    };
+    let content = match client.account().account_data::<DirectEventContent>().await {
+        Ok(Some(raw)) => raw.deserialize().ok(),
+        _ => None,
+    };
+    let content = match content {
+        Some(content) => Some(content),
+        None => client
+            .account()
+            .fetch_account_data(GlobalAccountDataEventType::Direct)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|raw| raw.deserialize_as::<DirectEventContent>().ok()),
+    };
+    let content = content?;
+    let room_ids = content.get(<&DirectUserIdentifier>::from(user_id))?;
+    // Only reuse a room we're actually joined to. Leaving/forgetting a DM
+    // does not reliably remove it from m.direct, so falling back to the
+    // first listed id would reopen a dead (left/forgotten) room instead of
+    // letting the caller create a fresh DM — which create_room then marks
+    // in m.direct for future opens.
+    room_ids
+        .iter()
+        .find(|id| client.get_room(id).is_some_and(|r| r.state() == matrix_sdk::RoomState::Joined))
+        .cloned()
+}
+
+/// The `m.room.encryption` state event to seed a room's `initial_state` with
+/// when creating it encrypted — the same recommended defaults the SDK's
+/// `create_dm` uses.
+fn encryption_initial_state(
+) -> matrix_sdk::ruma::serde::Raw<matrix_sdk::ruma::events::AnyInitialStateEvent> {
+    use matrix_sdk::ruma::events::{room::encryption::RoomEncryptionEventContent, InitialStateEvent};
+    InitialStateEvent::new(RoomEncryptionEventContent::with_recommended_defaults()).to_raw_any()
 }

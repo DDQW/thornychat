@@ -5,7 +5,9 @@
 
 use std::collections::HashMap;
 
-use iced::widget::{button, column, container, row, scrollable, slider, text, text_input};
+use iced::widget::{
+    button, column, container, horizontal_space, row, scrollable, slider, text, text_input,
+};
 use iced::{Element, Length, Task};
 
 use crate::theme_config::{ThemeColor, ThemeConfig};
@@ -81,24 +83,24 @@ impl ColorRole {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
-    SynapseDark,
-    SynapseLight,
+    ThornyChatDark,
+    ThornyChatLight,
 }
 
 impl Preset {
-    pub const ALL: [Preset; 2] = [Preset::SynapseDark, Preset::SynapseLight];
+    pub const ALL: [Preset; 2] = [Preset::ThornyChatDark, Preset::ThornyChatLight];
 
     fn theme(self) -> ThemeConfig {
         match self {
-            Preset::SynapseDark => ThemeConfig::synapse_dark(),
-            Preset::SynapseLight => ThemeConfig::synapse_light(),
+            Preset::ThornyChatDark => ThemeConfig::thornychat_dark(),
+            Preset::ThornyChatLight => ThemeConfig::thornychat_light(),
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            Preset::SynapseDark => "Synapse Dark",
-            Preset::SynapseLight => "Synapse Light",
+            Preset::ThornyChatDark => "ThornyChat Dark",
+            Preset::ThornyChatLight => "ThornyChat Light",
         }
     }
 }
@@ -174,7 +176,7 @@ pub fn update(state: &mut State, theme: &mut ThemeConfig, message: Message) -> T
             state.import_error = None;
             Task::future(async {
                 let Some(handle) =
-                    rfd::AsyncFileDialog::new().add_filter("Synapse Theme", &["json"]).pick_file().await
+                    rfd::AsyncFileDialog::new().add_filter("ThornyChat Theme", &["json"]).pick_file().await
                 else {
                     return Message::Saved;
                 };
@@ -186,7 +188,9 @@ pub fn update(state: &mut State, theme: &mut ThemeConfig, message: Message) -> T
             })
         }
         Message::Imported(Ok(imported)) => {
-            *theme = imported;
+            // Clamp ui_scale/corner_radius from an arbitrary picked file —
+            // an out-of-range or NaN scale would otherwise brick the window.
+            *theme = imported.sanitized();
             *state = State::synced_from(theme);
             save_task(theme)
         }
@@ -200,7 +204,7 @@ pub fn update(state: &mut State, theme: &mut ThemeConfig, message: Message) -> T
             Task::future(async move {
                 let handle = rfd::AsyncFileDialog::new()
                     .set_file_name(&suggested_name)
-                    .add_filter("Synapse Theme", &["json"])
+                    .add_filter("ThornyChat Theme", &["json"])
                     .save_file()
                     .await;
                 if let Some(handle) = handle {
@@ -240,7 +244,12 @@ pub fn view<'a>(state: &'a State, theme: &'a ThemeConfig) -> Element<'a, Message
         );
     }
 
-    let mut color_rows = column![].spacing(6);
+    // Fill width with a right-hand padding gutter: each row right-aligns its
+    // swatch to the padded edge, so the overlay scrollbar rides in the gutter
+    // instead of sitting on top of the color-preview boxes.
+    let mut color_rows = column![].spacing(6).width(Length::Fill).padding(
+        iced::Padding { top: 0.0, right: 14.0, bottom: 0.0, left: 0.0 },
+    );
     for role in ColorRole::ALL {
         color_rows = color_rows.push(color_row(role, state, theme));
     }
@@ -285,7 +294,7 @@ pub fn view<'a>(state: &'a State, theme: &'a ThemeConfig) -> Element<'a, Message
             .style(crate::theme::ghost_button)
             .padding([6, 10]),
         button(text("Reset to Default").size(12))
-            .on_press(Message::PresetSelected(Preset::SynapseDark))
+            .on_press(Message::PresetSelected(Preset::ThornyChatDark))
             .style(crate::theme::ghost_button)
             .padding([6, 10]),
     ]
@@ -328,9 +337,11 @@ fn color_row<'a>(role: ColorRole, state: &'a State, theme: &'a ThemeConfig) -> E
                 }
                 style
             }),
+        horizontal_space(),
         swatch,
     ]
     .spacing(8)
     .align_y(iced::Center)
+    .width(Length::Fill)
     .into()
 }

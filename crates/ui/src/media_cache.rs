@@ -154,3 +154,22 @@ pub fn looks_like_svg(bytes: &[u8]) -> bool {
         .unwrap_or(trimmed);
     trimmed.starts_with(b"<?xml") || trimmed.starts_with(b"<svg")
 }
+
+/// ISOBMFF (`ftyp`-boxed) image containers our compiled `image` crate build
+/// has no decoder for — AVIF and HEIC/HEIF, both common exports from newer
+/// phones and some bridges/CDNs. `iced`'s raster cache swallows a decode
+/// failure completely silently (any non-IO `image::ImageError` becomes a
+/// blank 1x1 "Invalid" placeholder with no log line anywhere in that path),
+/// so left unchecked these bytes would "fetch successfully" and then just
+/// never visibly render — indistinguishable from a fetch that never
+/// happened. Catching it here lets the caller fall back to the initials
+/// avatar and log *why*, instead of a silent permanent blank.
+pub fn looks_like_unsupported_container(bytes: &[u8]) -> bool {
+    if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
+        return false;
+    }
+    matches!(
+        &bytes[8..12],
+        b"avif" | b"avis" | b"heic" | b"heix" | b"heim" | b"heis" | b"hevc" | b"hevx" | b"mif1"
+    )
+}

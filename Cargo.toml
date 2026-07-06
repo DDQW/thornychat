@@ -39,6 +39,10 @@ windows = { version = "0.58", features = [
     "Data_Xml_Dom",
     "Win32_System_Registry",
     "UI_ViewManagement",
+    # Windows Spell Checking API (ISpellChecker) + the COM plumbing to create
+    # it — backs the composer's spell check / autocorrect.
+    "Win32_Globalization",
+    "Win32_System_Com",
 ] }
 rfd = "0.15"
 

@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use iced::border;
-use iced::widget::{button, container};
+use iced::widget::{button, container, text};
 use iced::{Color, Element, Font, Theme};
 
 /// iced's default font family (Fira Sans, falling back to whatever generic
@@ -40,6 +40,36 @@ pub mod icon {
     pub const CALL: &str = "\u{E717}";
     /// U+E713 Settings (gear) — opens the appearance/settings overlay.
     pub const SETTINGS: &str = "\u{E713}";
+    /// U+E723 Attach (paperclip) — composer attachment picker.
+    pub const ATTACH: &str = "\u{E723}";
+    /// U+E724 Send — composer send button.
+    pub const SEND: &str = "\u{E724}";
+    /// U+E721 Search — timeline message search.
+    pub const SEARCH: &str = "\u{E721}";
+    /// U+E716 People — room member panel toggle.
+    pub const MEMBERS: &str = "\u{E716}";
+    /// U+E8EC Tag — keyword-highlights panel.
+    pub const KEYWORDS: &str = "\u{E8EC}";
+    /// U+EA18 Shield — device/user verification.
+    pub const VERIFY: &str = "\u{EA18}";
+    /// U+E7ED Ringer (bell) — room notification-mode menu.
+    pub const NOTIFY: &str = "\u{E7ED}";
+    /// U+E708 QuietHours (bell + moon) — shown when the room is muted.
+    pub const NOTIFY_MUTED: &str = "\u{E708}";
+    /// U+F4AA Sticker2 — composer sticker picker.
+    pub const STICKER: &str = "\u{F4AA}";
+    /// U+E72B Back — space explorer's up-one-level button.
+    pub const BACK: &str = "\u{E72B}";
+    /// U+E76C ChevronRight — drill-in affordance on space rows.
+    pub const CHEVRON_RIGHT: &str = "\u{E76C}";
+}
+
+/// An [`icon`] glyph rendered in the Windows icon font. Central so callers
+/// don't repeat the `.font(ICON_FONT)` wiring at every button. Generic over
+/// the borrow so the returned `Text` (invariant in its lifetime) unifies with
+/// whatever element lifetime the call site needs.
+pub fn icon_text<'a>(glyph: &'a str, size: u16) -> text::Text<'a> {
+    text(glyph).font(ICON_FONT).size(size)
 }
 
 /// Corner radius for `ghost_button`/`overlay_button`/`selected_ghost_button`,

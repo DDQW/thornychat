@@ -124,43 +124,54 @@ pub struct ThemeConfig {
 
 impl Default for ThemeConfig {
     fn default() -> Self {
-        Self::synapse_dark()
+        Self::thornychat_dark()
     }
 }
 
 impl ThemeConfig {
-    pub fn synapse_dark() -> Self {
+    /// "Midnight" — a cool-slate dark theme. The neutrals carry a faint
+    /// blue-gray tint (not pure gray) so surfaces read as deliberately
+    /// layered rather than flat, with evenly-stepped elevation
+    /// (bg → surface → surface_strong). The accent is a brighter, friendlier
+    /// azure than Windows' `#0078D4`, and success/danger are lifted to
+    /// stay legible on a dark ground.
+    pub fn thornychat_dark() -> Self {
         Self {
-            name: "Synapse Dark".into(),
+            name: "ThornyChat Dark".into(),
             dark: true,
-            background: ThemeColor::new(0x20, 0x20, 0x20),
-            surface: ThemeColor::new(0x2A, 0x2A, 0x2A),
-            surface_strong: ThemeColor::new(0x36, 0x36, 0x36),
-            text: ThemeColor::new(0xF3, 0xF3, 0xF3),
-            muted_text: ThemeColor::new(0xA6, 0xA6, 0xA6),
-            accent: ThemeColor::new(0x00, 0x78, 0xD4),
+            background: ThemeColor::new(0x14, 0x16, 0x1C),
+            surface: ThemeColor::new(0x1C, 0x1F, 0x28),
+            surface_strong: ThemeColor::new(0x2A, 0x2E, 0x3A),
+            text: ThemeColor::new(0xE7, 0xEA, 0xF0),
+            muted_text: ThemeColor::new(0x97, 0xA0, 0xAF),
+            accent: ThemeColor::new(0x5B, 0x8C, 0xF5),
             accent_text: ThemeColor::new(0xFF, 0xFF, 0xFF),
-            success: ThemeColor::new(0x0F, 0x7B, 0x0F),
-            danger: ThemeColor::new(0xC4, 0x2B, 0x1C),
+            success: ThemeColor::new(0x3F, 0xB8, 0x68),
+            danger: ThemeColor::new(0xEF, 0x6B, 0x6B),
             font_family: None,
             ui_scale: 1.0,
             corner_radius: 6.0,
         }
     }
 
-    pub fn synapse_light() -> Self {
+    /// "Daylight" — the light counterpart. Backgrounds are soft cool whites
+    /// rather than stark `#FFFFFF`, text is a cool near-black rather than
+    /// pure black (calmer, less hard-edged), and the accent deepens to a
+    /// richer blue so white text stays crisp on accent-filled buttons and
+    /// badges. Same blue family as Midnight for a consistent identity.
+    pub fn thornychat_light() -> Self {
         Self {
-            name: "Synapse Light".into(),
+            name: "ThornyChat Light".into(),
             dark: false,
-            background: ThemeColor::new(0xF3, 0xF3, 0xF3),
-            surface: ThemeColor::new(0xE4, 0xE4, 0xE4),
-            surface_strong: ThemeColor::new(0xD6, 0xD6, 0xD6),
-            text: ThemeColor::new(0x20, 0x20, 0x20),
-            muted_text: ThemeColor::new(0x5C, 0x5C, 0x5C),
-            accent: ThemeColor::new(0x00, 0x78, 0xD4),
+            background: ThemeColor::new(0xFB, 0xFB, 0xFD),
+            surface: ThemeColor::new(0xF0, 0xF2, 0xF6),
+            surface_strong: ThemeColor::new(0xE2, 0xE5, 0xEC),
+            text: ThemeColor::new(0x1B, 0x1E, 0x26),
+            muted_text: ThemeColor::new(0x5A, 0x61, 0x70),
+            accent: ThemeColor::new(0x29, 0x5F, 0xD6),
             accent_text: ThemeColor::new(0xFF, 0xFF, 0xFF),
-            success: ThemeColor::new(0x0F, 0x7B, 0x0F),
-            danger: ThemeColor::new(0xC4, 0x2B, 0x1C),
+            success: ThemeColor::new(0x1F, 0x9D, 0x57),
+            danger: ThemeColor::new(0xD9, 0x3B, 0x3B),
             font_family: None,
             ui_scale: 1.0,
             corner_radius: 6.0,
@@ -206,21 +217,50 @@ impl ThemeConfig {
             extended.secondary.base = muted;
             extended.secondary.weak = muted;
             extended.secondary.strong = muted;
+            // The widgets that draw text on accent backgrounds read
+            // `primary.{weak,strong}.text` (unread pill → `strong.text`,
+            // selected row / call button → `weak.text`), NOT
+            // `primary.base.text`. Overriding only `base` left the user's
+            // "Text on accent" pick with no visible effect. Assign `.text`
+            // directly (not via `Pair::new`, which would run it through
+            // `readable()` and swap it for black/white on a contrast miss)
+            // while keeping the generated `.color` backgrounds.
             extended.primary.base = Pair::new(palette.primary, accent_text);
+            extended.primary.base.text = accent_text;
+            extended.primary.weak.text = accent_text;
+            extended.primary.strong.text = accent_text;
             extended
         })
     }
 
-    /// `%APPDATA%\Synapse\Synapse\config\theme.json` — profile-independent,
+    /// `%APPDATA%\ThornyChat\ThornyChat\config\theme.json` — profile-independent,
     /// since the theme applies across every account on the machine.
     pub fn theme_path() -> Option<PathBuf> {
         AppPaths::global_config_dir().ok().map(|dir| dir.join("theme.json"))
     }
 
+    /// Clamps numeric knobs into their valid ranges (and replaces NaN/inf).
+    /// The Appearance sliders already constrain live edits, but a
+    /// hand-edited or imported theme.json can carry any value — an out-of-
+    /// range or NaN `ui_scale` feeds straight into iced's `scale_factor` and
+    /// renders a window that's zero-sized or degenerate, with no in-app way
+    /// to recover (Settings is scaled to invisibility too).
+    pub fn sanitized(mut self) -> Self {
+        if !self.ui_scale.is_finite() {
+            self.ui_scale = 1.0;
+        }
+        self.ui_scale = self.ui_scale.clamp(0.8, 1.5);
+        if !self.corner_radius.is_finite() {
+            self.corner_radius = 6.0;
+        }
+        self.corner_radius = self.corner_radius.clamp(0.0, 16.0);
+        self
+    }
+
     pub fn load() -> Option<Self> {
         let path = Self::theme_path()?;
         let contents = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str(&contents).ok()
+        serde_json::from_str::<Self>(&contents).ok().map(Self::sanitized)
     }
 
     pub fn load_or_default() -> Self {

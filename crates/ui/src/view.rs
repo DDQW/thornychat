@@ -1,7 +1,7 @@
 use client_core::events::SyncState;
 use iced::widget::{
-    button, center, column, container, horizontal_space, mouse_area, opaque, row, stack, text,
-    text_input,
+    button, center, column, container, horizontal_space, mouse_area, opaque, row, scrollable, stack,
+    text, text_input,
 };
 use iced::{Element, Length};
 
@@ -30,6 +30,15 @@ pub fn view(app: &App) -> Element<'_, Message> {
             }
             if app.show_settings {
                 layers = layers.push(settings_overlay(app));
+            }
+            if let Some(explorer) = &app.space_explorer {
+                layers = layers.push(
+                    screens::space_explorer::view(explorer, &app.media)
+                        .map(Message::SpaceExplorer),
+                );
+            }
+            if let Some(prompt) = &app.pending_room_action {
+                layers = layers.push(room_action_overlay(prompt));
             }
             layers.into()
         }
@@ -147,11 +156,13 @@ fn video_overlay(player: &crate::state::VideoPlayer) -> Element<'_, Message> {
 }
 
 /// Settings dialog: dimmed backdrop, centered panel with the tab strip and
-/// the active tab's content. Same nesting as `lightbox`/`video_overlay` —
-/// the panel's own buttons/inputs sit inside the backdrop's `mouse_area`,
-/// and iced only bubbles a click through to the backdrop's `on_press` if
-/// nothing inside consumed it first (already relied on above for the video
-/// overlay's header buttons).
+/// the active tab's content, resizable via a grip in its bottom-right
+/// corner. Same nesting as `lightbox`/`video_overlay` — the panel's own
+/// buttons/inputs sit inside the backdrop's `mouse_area`, and iced only
+/// bubbles a click through to the backdrop's `on_press` if nothing inside
+/// consumed it first (already relied on above for the video overlay's
+/// header buttons); the grip's own `mouse_area` consumes its press the same
+/// way.
 fn settings_overlay(app: &App) -> Element<'_, Message> {
     let backdrop = |_theme: &iced::Theme| iced::widget::container::Style {
         background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.5).into()),
@@ -167,13 +178,113 @@ fn settings_overlay(app: &App) -> Element<'_, Message> {
     ]
     .align_y(iced::Center);
 
-    let body = screens::settings::view(&app.settings, &app.theme).map(Message::Settings);
+    let account = screens::settings::general::AccountInfo {
+        user_id: app.own_user_id.as_deref(),
+        homeserver: app.client.as_ref().map(|client| client.homeserver().to_string()),
+        device_id: app.client.as_ref().and_then(|client| client.device_id()).map(|id| id.to_string()),
+    };
+    let body = scrollable(
+        screens::settings::view(
+            &app.settings,
+            &app.theme,
+            &app.privacy,
+            &app.encryption,
+            &app.spellcheck,
+            account,
+            app.default_notification_modes,
+            &app.verification,
+        )
+        .map(Message::Settings),
+    )
+    .style(crate::theme::thin_scrollbar);
 
-    let card = container(column![header, body].spacing(16).width(Length::Fixed(520.0)))
-        .padding(20)
-        .style(crate::theme::panel);
+    let size = app.settings_panel_size;
+    let card = container(
+        column![header, body]
+            .spacing(16)
+            .width(Length::Fixed(size.width))
+            .height(Length::Fixed(size.height)),
+    )
+    .padding(20)
+    .style(crate::theme::panel);
 
-    opaque(mouse_area(center(card).style(backdrop)).on_press(Message::ToggleSettings))
+    let grip = mouse_area(
+        container(iced::widget::Space::new(Length::Fixed(14.0), Length::Fixed(14.0))).style(
+            |theme: &iced::Theme| iced::widget::container::Style {
+                // Deliberately distinct from the card's own background
+                // (`crate::theme::panel`) — the grip has to read as an
+                // affordance, not blend into the panel it's resizing.
+                background: Some(theme.extended_palette().background.strong.color.into()),
+                border: iced::border::rounded(3),
+                ..iced::widget::container::Style::default()
+            },
+        ),
+    )
+    .on_press(Message::SettingsResizeStarted)
+    .interaction(iced::mouse::Interaction::ResizingDiagonallyDown);
+    let grip_layer = container(grip)
+        .width(Length::Fixed(size.width))
+        .height(Length::Fixed(size.height))
+        .align_x(iced::Right)
+        .align_y(iced::Bottom)
+        .padding(6);
+
+    opaque(
+        mouse_area(center(stack![card, grip_layer]).style(backdrop)).on_press(Message::ToggleSettings),
+    )
+}
+
+/// Leave-or-forget confirmation for a sidebar room, raised on right-click.
+/// Offers both actions (with a clear warning) plus Cancel — the modal itself
+/// is the confirmation gate, so nothing destructive happens on the
+/// right-click alone.
+fn room_action_overlay(prompt: &crate::state::RoomActionPrompt) -> Element<'_, Message> {
+    let backdrop = |_theme: &iced::Theme| iced::widget::container::Style {
+        background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.5).into()),
+        ..iced::widget::container::Style::default()
+    };
+
+    let kind = if prompt.is_dm { "direct message" } else { "room" };
+    let title = format!("Leave {}?", prompt.room_name);
+    let explanation = format!(
+        "Leave removes this {kind} from your list; you can rejoin if you're \
+         invited again. Forget also deletes your local copy of its history. \
+         Neither can be undone from here."
+    );
+
+    let room_id = prompt.room_id.clone();
+    let buttons = row![
+        button(text("Cancel").size(13))
+            .on_press(Message::CancelRoomAction)
+            .style(crate::theme::ghost_button)
+            .padding([6, 12]),
+        horizontal_space(),
+        button(text("Leave").size(13))
+            .on_press(Message::ConfirmLeaveRoom(room_id.clone()))
+            .padding([6, 12]),
+        button(text("Forget").size(13))
+            .on_press(Message::ConfirmForgetRoom(room_id))
+            .style(button::danger)
+            .padding([6, 12]),
+    ]
+    .spacing(8)
+    .align_y(iced::Center);
+
+    let card = container(
+        column![
+            text(title).size(16).font(crate::theme::SEMIBOLD_FONT),
+            text(explanation).size(12).style(text::secondary),
+            buttons,
+        ]
+        .spacing(14)
+        .width(Length::Fixed(380.0)),
+    )
+    .padding(20)
+    .style(crate::theme::panel);
+
+    // Backdrop click cancels; the card's own buttons consume their clicks
+    // first (same nesting the other overlays rely on).
+    opaque(mouse_area(center(card).style(backdrop)).on_press(Message::CancelRoomAction))
 }
 
 fn main_shell(app: &App) -> Element<'_, Message> {
@@ -209,6 +320,7 @@ fn main_shell(app: &App) -> Element<'_, Message> {
         &app.emoji_usage,
         &app.media,
         &app.emoji_packs,
+        &app.sticker_collection,
         &app.emoji_shortcode_index,
         &app.url_previews,
         &app.tweet_previews,
@@ -242,13 +354,13 @@ fn top_bar<'a>(app: &'a App, status: String) -> Element<'a, Message> {
         bar = bar.push(toggle.map(Message::Verification));
     }
     bar = bar.push(
-        button(text("Keywords").size(12))
+        button(crate::theme::icon_text(crate::theme::icon::KEYWORDS, 14))
             .on_press(Message::ToggleKeywordPanel)
             .style(crate::theme::ghost_button)
             .padding([4, 8]),
     );
     bar = bar.push(
-        button(text(crate::theme::icon::SETTINGS).font(crate::theme::ICON_FONT).size(14))
+        button(crate::theme::icon_text(crate::theme::icon::SETTINGS, 14))
             .on_press(Message::ToggleSettings)
             .style(crate::theme::ghost_button)
             .padding([4, 8]),

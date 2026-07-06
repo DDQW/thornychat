@@ -17,7 +17,15 @@ pub fn subscription(app: &App) -> Subscription<Message> {
         Some(client) => client_events(client.clone(), app.profile.clone()),
         None => Subscription::none(),
     };
-    Subscription::batch([client_events, iced::event::listen_with(window_events)])
+    // Only subscribed while a Settings-panel resize drag is actually in
+    // progress — tracking every mouse move for the app's whole lifetime
+    // would be wasteful when nothing is being dragged.
+    let settings_resize = if app.settings_resize_drag.is_some() {
+        iced::event::listen_with(settings_resize_events)
+    } else {
+        Subscription::none()
+    };
+    Subscription::batch([client_events, iced::event::listen_with(window_events), settings_resize])
 }
 
 /// Window-level events the app cares about: resizes keep the native video
@@ -30,6 +38,26 @@ fn window_events(
     match event {
         iced::Event::Window(iced::window::Event::Resized(size)) => {
             Some(Message::WindowResized(size))
+        }
+        _ => None,
+    }
+}
+
+/// Cursor tracking for an active Settings-panel resize drag (see
+/// `state::ResizeDrag`). The grip's own `mouse_area` only fires while the
+/// cursor stays over that tiny widget, which a drag immediately leaves, so
+/// the actual tracking has to come from a window-level subscription instead.
+fn settings_resize_events(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _window: iced::window::Id,
+) -> Option<Message> {
+    match event {
+        iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+            Some(Message::SettingsResizeDragged(position))
+        }
+        iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+            Some(Message::SettingsResizeReleased)
         }
         _ => None,
     }

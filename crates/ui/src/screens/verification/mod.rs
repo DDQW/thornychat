@@ -13,6 +13,9 @@ pub struct State {
     pub cross_signing_error: Option<String>,
 
     pub recovery_setup_needed: bool,
+    /// Set when matrix-sdk reports this device is missing room keys. No longer
+    /// used to drive a prompt — the Security tab always exposes a recovery-key
+    /// field rather than nagging — but kept for possible status display.
     pub recovery_needs_key: bool,
     pub show_passphrase_input: bool,
     pub passphrase_input: String,
@@ -37,7 +40,6 @@ pub enum Message {
     RetryCrossSigningBootstrap,
     DismissCrossSigningError,
 
-    DismissRecoveryNeeded,
     TogglePassphraseInput,
     PassphraseChanged(String),
     ConfirmEnableRecovery,
@@ -79,10 +81,18 @@ pub fn update(state: &mut State, message: Message) -> Effect {
         Message::RetryCrossSigningBootstrap => return Effect::RetryCrossSigningBootstrap,
         Message::DismissCrossSigningError => state.cross_signing_error = None,
 
-        Message::DismissRecoveryNeeded => state.recovery_needs_key = false,
         Message::TogglePassphraseInput => state.show_passphrase_input = !state.show_passphrase_input,
         Message::PassphraseChanged(v) => state.passphrase_input = v,
         Message::ConfirmEnableRecovery => {
+            // In-flight guard: a double-click would run two concurrent
+            // recovery bootstraps — the second regenerates the key, so the
+            // first key shown to the user would already be dead. The stage
+            // is set synchronously; RecoveryEnabled/RecoveryEnableFailed
+            // clear it.
+            if state.recovery_enable_stage.is_some() {
+                return Effect::None;
+            }
+            state.recovery_enable_stage = Some(RecoveryEnableStage::Starting);
             let passphrase = if state.show_passphrase_input && !state.passphrase_input.trim().is_empty() {
                 Some(state.passphrase_input.trim().to_string())
             } else {
@@ -107,16 +117,30 @@ pub fn update(state: &mut State, message: Message) -> Effect {
         Message::VerifyUserIdChanged(v) => state.verify_user_id_input = v,
         Message::ToggleVerifyForm => state.show_verify_form = !state.show_verify_form,
         Message::StartVerification => {
+            // Blank is a real input here — the placeholder promises
+            // "blank = verify this device"; the dispatcher maps an empty id
+            // to the account's own user id (self-verification).
             let user_id = state.verify_user_id_input.trim().to_string();
-            if user_id.is_empty() {
-                return Effect::None;
-            }
             return Effect::StartVerification { user_id };
         }
         Message::AcceptVerification => return Effect::AcceptVerificationRequest,
-        Message::DeclineVerification => return Effect::VerificationCancel,
+        Message::DeclineVerification => {
+            // Remove the card too — the flow is over on our side, and the
+            // request card's buttons would otherwise sit dead forever (the
+            // finished session ignores further actions).
+            state.sas = None;
+            return Effect::VerificationCancel;
+        }
         Message::ConfirmEmojisMatch => return Effect::ConfirmSasMatch,
-        Message::RejectEmojisMatch => return Effect::RejectSasMatch,
+        Message::RejectEmojisMatch => {
+            // Mismatch ends the flow; show the Cancelled card (which has a
+            // Dismiss button) instead of leaving the emoji card stuck with
+            // dead buttons.
+            state.sas = Some(client_core::events::SasState::Cancelled {
+                reason: "you indicated the emojis did not match".into(),
+            });
+            return Effect::RejectSasMatch;
+        }
         Message::DismissSas => {
             state.sas = None;
             return Effect::VerificationCancel;
@@ -150,71 +174,10 @@ pub fn view<'a>(state: &'a State, own_user_id: Option<&'a str>) -> Element<'a, M
         ]));
     }
 
-    if let Some(key) = &state.recovery_key_to_confirm {
-        cards = cards.push(card(column![
-            text("Save your recovery key").size(14),
-            text("This is the only time this key will be shown. Store it somewhere safe — you'll need it to read your encrypted message history on a new device.").size(12),
-            container(text(key.clone()).size(16)).padding(8),
-            button(text("I've saved it")).on_press(Message::RecoveryKeySaved).padding(6),
-        ]));
-    }
-
-    if state.recovery_setup_needed && state.recovery_key_to_confirm.is_none() {
-        let mut section = column![
-            text("Set up secure message backup").size(14),
-            text("Protects your encrypted messages so you can recover them on a new device.").size(12),
-        ]
-        .spacing(6);
-
-        if state.show_passphrase_input {
-            section = section.push(
-                text_input("Optional passphrase", &state.passphrase_input)
-                    .on_input(Message::PassphraseChanged)
-                    .secure(true)
-                    .padding(6),
-            );
-        }
-
-        if let Some(stage) = state.recovery_enable_stage {
-            section = section.push(text(stage_label(stage)).size(12));
-        }
-
-        section = section.push(
-            row![
-                button(text(if state.show_passphrase_input { "No passphrase" } else { "Use a passphrase" }))
-                    .on_press(Message::TogglePassphraseInput)
-                    .padding(6),
-                button(text("Enable")).on_press(Message::ConfirmEnableRecovery).padding(6),
-            ]
-            .spacing(6),
-        );
-
-        cards = cards.push(card(section));
-    }
-
-    if state.recovery_needs_key {
-        cards = cards.push(card(column![
-            text("Unlock your encrypted history").size(14),
-            text("This device is missing some encryption keys. Enter your recovery key or passphrase to unlock past messages.").size(12),
-            text_input("Recovery key", &state.recovery_key_input)
-                .on_input(Message::RecoveryKeyInputChanged)
-                .on_submit(Message::SubmitRecoveryKey)
-                .secure(true)
-                .padding(6),
-            row![
-                button(text("Unlock")).on_press(Message::SubmitRecoveryKey).padding(6),
-                button(text("Not now")).on_press(Message::DismissRecoveryNeeded).padding(6),
-            ]
-            .spacing(6),
-        ]));
-    }
-
-    if let Some(error) = &state.recovery_error {
-        cards = cards.push(card(column![
-            text(error.clone()).size(12).style(text::danger),
-            button(text("Dismiss")).on_press(Message::DismissRecoveryError).padding(6),
-        ]));
-    }
+    // Encryption backup/recovery no longer nags from here — it lives in
+    // Settings → Security (see `recovery_settings_view`). Only genuinely
+    // interactive, time-sensitive flows (an incoming verification request,
+    // cross-signing bootstrap) stay as banners below.
 
     if let Some(sas) = &state.sas {
         cards = cards.push(sas_card(sas));
@@ -246,6 +209,100 @@ pub fn view<'a>(state: &'a State, own_user_id: Option<&'a str>) -> Element<'a, M
     cards.into()
 }
 
+/// The encryption backup & recovery UI, in Settings → Security. ThornyChat never
+/// prompts for a recovery key on its own: this tab just offers a calm,
+/// always-available key field that does nothing until the user chooses to
+/// enter a key (or, when no backup exists yet, to set one up). No launch-time
+/// nagging — the "recovery needed" state is deliberately *not* used to push a
+/// prompt at the user; they act here when they want to.
+pub fn recovery_settings_view(state: &State) -> Element<'_, Message> {
+    let mut cards = column![].spacing(8);
+
+    // One-time reveal right after generating a fresh key: show it on its own
+    // until the user confirms they've saved it (it can never be shown again).
+    if let Some(key) = &state.recovery_key_to_confirm {
+        cards = cards.push(card(column![
+            text("Save your recovery key").size(14),
+            text("This is the only time this key will be shown. Store it somewhere safe — you'll need it to read your encrypted message history on a new device.").size(12),
+            container(text(key.clone()).size(16)).padding(8),
+            button(text("I've saved it")).on_press(Message::RecoveryKeySaved).padding(6),
+        ]));
+        return cards.into();
+    }
+
+    // Steady state: a single opt-in section. The key field just sits here,
+    // inert, until the user types a key and hits Unlock — not gated on any
+    // "you need to do this" signal from the SDK, so the app never asks.
+    let mut section = column![
+        text("Encrypted message backup").size(14),
+        text(
+            "Optional — ThornyChat won't ask for this on its own. If you have a recovery key \
+             or passphrase, enter it here to unlock your encrypted message history on this \
+             device. Nothing is sent or changed until you do.",
+        )
+        .size(12)
+        .style(text::secondary),
+        text_input("Recovery key or passphrase", &state.recovery_key_input)
+            .on_input(Message::RecoveryKeyInputChanged)
+            .on_submit(Message::SubmitRecoveryKey)
+            .secure(true)
+            .padding(6),
+        button(text("Unlock")).on_press(Message::SubmitRecoveryKey).padding(6),
+    ]
+    .spacing(6);
+
+    // Offer creating a fresh backup only when the account has none yet, so we
+    // never silently replace an existing recovery key (enabling again mints a
+    // new key and invalidates the old one).
+    if state.recovery_setup_needed {
+        section = section.push(
+            text("Don't have a recovery key? Set up a new backup so future messages stay recoverable on your other devices.")
+                .size(12)
+                .style(text::secondary),
+        );
+
+        if state.show_passphrase_input {
+            section = section.push(
+                text_input("Optional passphrase", &state.passphrase_input)
+                    .on_input(Message::PassphraseChanged)
+                    .secure(true)
+                    .padding(6),
+            );
+        }
+
+        if let Some(stage) = state.recovery_enable_stage {
+            section = section.push(text(stage_label(stage)).size(12));
+        }
+
+        // No .on_press while a bootstrap is in flight — iced renders it
+        // disabled, mirroring the guard in the ConfirmEnableRecovery arm.
+        let mut setup_button = button(text("Set up a new backup")).padding(6);
+        if state.recovery_enable_stage.is_none() {
+            setup_button = setup_button.on_press(Message::ConfirmEnableRecovery);
+        }
+        section = section.push(
+            row![
+                button(text(if state.show_passphrase_input { "No passphrase" } else { "Use a passphrase" }))
+                    .on_press(Message::TogglePassphraseInput)
+                    .padding(6),
+                setup_button,
+            ]
+            .spacing(6),
+        );
+    }
+
+    cards = cards.push(card(section));
+
+    if let Some(error) = &state.recovery_error {
+        cards = cards.push(card(column![
+            text(error.clone()).size(12).style(text::danger),
+            button(text("Dismiss")).on_press(Message::DismissRecoveryError).padding(6),
+        ]));
+    }
+
+    cards.into()
+}
+
 /// Small toggle for the collapsed verify form, meant for the app's top
 /// status bar (rendered there by `view.rs` so it doesn't occupy a card row
 /// of its own).
@@ -254,7 +311,7 @@ pub fn verify_toggle(state: &State) -> Option<Element<'_, Message>> {
         return None;
     }
     Some(
-        button(text("Verify device...").size(12))
+        button(crate::theme::icon_text(crate::theme::icon::VERIFY, 14))
             .on_press(Message::ToggleVerifyForm)
             .style(crate::theme::ghost_button)
             .padding([4, 8])

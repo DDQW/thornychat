@@ -1,7 +1,8 @@
-//! Room list sidebar. Spaces hierarchy rendering is deferred until
-//! `client_core::rooms::spaces` tracks parent/child relationships; for now
-//! this renders a flat list of every room the account is in, with a local
-//! filter box on top.
+//! Room list sidebar: a "Spaces" section (each row opens the space
+//! explorer overlay — a space has no timeline of its own), then flat
+//! DM/room sections, with a local filter box on top. Nesting joined rooms
+//! *under* their parent space is still deferred until
+//! `client_core::rooms::spaces` tracks parent/child relationships.
 
 use std::collections::HashMap;
 
@@ -19,6 +20,13 @@ pub struct State {
 #[derive(Debug, Clone)]
 pub enum Message {
     RoomClicked(String),
+    /// Click on a space row — opens the space explorer overlay (handled at
+    /// the app level, which issues the hierarchy fetch).
+    SpaceClicked(String),
+    /// Right-click on a room/DM/space row — opens the leave/forget confirm
+    /// prompt (handled at the app level, which knows the room's display
+    /// name).
+    RoomRightClicked(String),
     FilterChanged(String),
 }
 
@@ -32,22 +40,25 @@ pub fn view<'a>(
     let visible = |room: &&client_core::events::RoomSummary| {
         filter.is_empty() || room.name.to_lowercase().contains(&filter)
     };
+    let spaces: Vec<&client_core::events::RoomSummary> =
+        state.rooms.iter().filter(|r| r.is_space).filter(visible).collect();
     let dms: Vec<&client_core::events::RoomSummary> =
-        state.rooms.iter().filter(|r| r.is_dm).filter(visible).collect();
+        state.rooms.iter().filter(|r| r.is_dm && !r.is_space).filter(visible).collect();
     let rooms: Vec<&client_core::events::RoomSummary> =
-        state.rooms.iter().filter(|r| !r.is_dm).filter(visible).collect();
+        state.rooms.iter().filter(|r| !r.is_dm && !r.is_space).filter(visible).collect();
 
     let mut list = column![].spacing(2).padding(8);
+    if !spaces.is_empty() {
+        list = list.push(section_header("Spaces"));
+        for space in spaces {
+            list = list.push(space_row(space, media));
+        }
+    }
     for (label, group) in [("Direct messages", dms), ("Rooms", rooms)] {
         if group.is_empty() {
             continue;
         }
-        list = list.push(
-            container(
-                text(label).size(11).font(crate::theme::SEMIBOLD_FONT).style(text::secondary),
-            )
-            .padding([6, 4]),
-        );
+        list = list.push(section_header(label));
         for room in group {
             list = list.push(room_row(state, room, notification_modes, calls, media));
         }
@@ -71,6 +82,41 @@ pub fn view<'a>(
     .height(Length::Fill)
     .style(crate::theme::panel)
     .into()
+}
+
+fn section_header(label: &str) -> Element<'_, Message> {
+    container(text(label).size(11).font(crate::theme::SEMIBOLD_FONT).style(text::secondary))
+        .padding([6, 4])
+        .into()
+}
+
+/// A space row: clicking opens the space explorer (browse/join its rooms)
+/// rather than a timeline — a space room has no useful timeline of its own.
+/// Right-click still offers leave/forget like any other row.
+fn space_row<'a>(
+    space: &'a RoomSummary,
+    media: &'a crate::media_cache::State,
+) -> Element<'a, Message> {
+    let label = row![
+        crate::media_cache::avatar(media, space.avatar_url.as_deref(), &space.name, 26),
+        text(space.name.clone()).size(14).width(Length::Fill),
+        text(crate::theme::icon::CHEVRON_RIGHT)
+            .font(crate::theme::ICON_FONT)
+            .size(10)
+            .style(text::secondary),
+    ]
+    .spacing(8)
+    .align_y(iced::Center);
+
+    let row_button = button(label)
+        .on_press(Message::SpaceClicked(space.room_id.clone()))
+        .width(Length::Fill)
+        .padding([6, 8])
+        .style(crate::theme::ghost_button);
+
+    iced::widget::mouse_area(row_button)
+        .on_right_press(Message::RoomRightClicked(space.room_id.clone()))
+        .into()
 }
 
 fn room_row<'a>(
@@ -115,9 +161,14 @@ fn room_row<'a>(
         .width(Length::Fill)
         .padding([6, 8]);
 
-    if is_selected {
-        row_button.style(crate::theme::selected_ghost_button).into()
+    let styled = if is_selected {
+        row_button.style(crate::theme::selected_ghost_button)
     } else {
-        row_button.style(crate::theme::ghost_button).into()
-    }
+        row_button.style(crate::theme::ghost_button)
+    };
+
+    // Right-click opens the leave/forget prompt; left-click still selects.
+    iced::widget::mouse_area(styled)
+        .on_right_press(Message::RoomRightClicked(room.room_id.clone()))
+        .into()
 }

@@ -8,7 +8,9 @@
 //! command handlers. Push-rule *evaluation* (feeding
 //! `ClientEvent::Notification` for native toasts) is still Phase 7.
 
-use matrix_sdk::notification_settings::{NotificationSettings, RoomNotificationMode};
+use matrix_sdk::notification_settings::{
+    IsEncrypted, IsOneToOne, NotificationSettings, RoomNotificationMode,
+};
 use matrix_sdk::ruma::RoomId;
 use matrix_sdk::Client;
 use tokio::sync::mpsc;
@@ -35,14 +37,32 @@ async fn snapshot_modes(settings: &NotificationSettings) -> Vec<(String, Notific
     modes
 }
 
+/// Reads the account-wide defaults for direct messages and group rooms.
+/// The SDK tracks these per encrypted/unencrypted variant too, but this app
+/// only ever writes both together (see `sync.rs`'s `SetDefaultNotificationMode`
+/// handler), so the unencrypted variant is representative of what's shown.
+async fn snapshot_defaults(settings: &NotificationSettings) -> (NotificationMode, NotificationMode) {
+    let direct_messages = settings
+        .get_default_room_notification_mode(IsEncrypted::No, IsOneToOne::Yes)
+        .await;
+    let group_chats = settings
+        .get_default_room_notification_mode(IsEncrypted::No, IsOneToOne::No)
+        .await;
+    (from_sdk_mode(direct_messages), from_sdk_mode(group_chats))
+}
+
 async fn emit_snapshot(
     settings: &NotificationSettings,
     event_tx: &mpsc::UnboundedSender<ClientEvent>,
 ) -> bool {
     let modes = snapshot_modes(settings).await;
     let keywords: Vec<String> = settings.enabled_keywords().await.into_iter().collect();
+    let (direct_messages, group_chats) = snapshot_defaults(settings).await;
     event_tx.send(ClientEvent::RoomNotificationModesUpdated(modes)).is_ok()
         && event_tx.send(ClientEvent::KeywordHighlightsUpdated(keywords)).is_ok()
+        && event_tx
+            .send(ClientEvent::DefaultNotificationModesUpdated { direct_messages, group_chats })
+            .is_ok()
 }
 
 /// Spawns the settings watcher. The `NotificationSettings` instance must be

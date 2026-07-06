@@ -11,6 +11,7 @@ use std::sync::Arc;
 use matrix_sdk::deserialized_responses::ShieldState as SdkShieldState;
 use matrix_sdk::ruma::events::room::message::MessageType;
 use matrix_sdk::ruma::events::room::MediaSource;
+use matrix_sdk::ruma::events::sticker::{StickerEventContent, StickerMediaSource};
 use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, RoomId, UserId};
 use matrix_sdk::{Client, Room};
 use matrix_sdk_ui::timeline::{
@@ -267,7 +268,8 @@ fn convert_reply_preview(details: &InReplyToDetails) -> ReplyPreview {
                 _ => embedded.sender.to_string(),
             };
             let image_url = match convert_content(&embedded.content) {
-                TimelineItemContent::Image { url, .. } => Some(url),
+                TimelineItemContent::Image { url, .. }
+                | TimelineItemContent::Sticker { url, .. } => Some(url),
                 _ => None,
             };
             (sender, summarize_content(&embedded.content), image_url)
@@ -290,6 +292,7 @@ fn summarize_content(content: &SdkTimelineItemContent) -> String {
             }
         }
         TimelineItemContent::Image { .. } => "[image]".to_string(),
+        TimelineItemContent::Sticker { .. } => "[sticker]".to_string(),
         TimelineItemContent::File { filename, .. } => format!("[file: {filename}]"),
         TimelineItemContent::Redacted => "(message removed)".to_string(),
         TimelineItemContent::DateDivider(_) | TimelineItemContent::NewMessagesDivider => {
@@ -319,7 +322,7 @@ fn convert_content(content: &SdkTimelineItemContent) -> TimelineItemContent {
         SdkTimelineItemContent::MsgLike(msg_like) => match &msg_like.kind {
             MsgLikeKind::Message(message) => convert_message(message),
             MsgLikeKind::Redacted => TimelineItemContent::Redacted,
-            MsgLikeKind::Sticker(_) => TimelineItemContent::Text("[sticker]".to_string()),
+            MsgLikeKind::Sticker(sticker) => convert_sticker(sticker.content()),
             MsgLikeKind::Poll(_) => TimelineItemContent::Text("[poll]".to_string()),
             MsgLikeKind::UnableToDecrypt(_) => {
                 TimelineItemContent::Text("[unable to decrypt]".to_string())
@@ -342,6 +345,32 @@ fn convert_content(content: &SdkTimelineItemContent) -> TimelineItemContent {
         SdkTimelineItemContent::CallNotify => {
             TimelineItemContent::Text("(call notification)".to_string())
         }
+    }
+}
+
+/// Stickers (`m.sticker`) carry their image directly on the event instead
+/// of nested in a `msgtype`. They get their own `Sticker` content (rather
+/// than being flattened into `Image`) so the UI can render them at sticker
+/// size and harvest them into the grow-with-use collection, keeping the
+/// `mxc://` URL + body needed to resend one.
+fn convert_sticker(content: &StickerEventContent) -> TimelineItemContent {
+    match &content.source {
+        StickerMediaSource::Plain(uri) => {
+            let width = content.info.width.and_then(|w| u32::try_from(w).ok());
+            let height = content.info.height.and_then(|h| u32::try_from(h).ok());
+            TimelineItemContent::Sticker {
+                url: uri.to_string(),
+                body: content.body.clone(),
+                width,
+                height,
+            }
+        }
+        StickerMediaSource::Encrypted(_) => {
+            TimelineItemContent::Text(format!("[encrypted sticker: {}]", content.body))
+        }
+        // `StickerMediaSource` is `#[non_exhaustive]`; no other variant
+        // exists today, so this can't currently be reached.
+        _ => TimelineItemContent::Text(format!("[sticker: {}]", content.body)),
     }
 }
 

@@ -19,6 +19,9 @@ pub enum ClientEvent {
     /// A DM room with the requested user is ready (found or freshly
     /// created) — the UI should open it.
     DirectMessageReady { room_id: String },
+    /// A room requested via `ClientCommand::CreateRoomWith` was created — the
+    /// UI should open it (same handling as `DirectMessageReady`).
+    RoomCreated { room_id: String },
     /// MSC3949 power-level tags for a room ("Red team", "Purple team",
     /// ...) — custom member-list groups defined by the room. Sorted by
     /// power level, highest first. Sent when a room is opened.
@@ -87,6 +90,11 @@ pub enum ClientEvent {
     /// rules change (including changes made from another device) — rooms
     /// absent from the list follow the account default.
     RoomNotificationModesUpdated(Vec<(String, NotificationMode)>),
+    /// The account-wide default notification mode for direct messages and
+    /// group rooms (what a room follows when it has no per-room override).
+    /// Sent by the same watcher as `RoomNotificationModesUpdated`, so it
+    /// stays current with changes made from other devices too.
+    DefaultNotificationModesUpdated { direct_messages: NotificationMode, group_chats: NotificationMode },
     KeywordHighlightsUpdated(Vec<String>),
     SearchResults { request_id: RequestId, results: Vec<SearchResult> },
 
@@ -96,6 +104,18 @@ pub enum ClientEvent {
     /// after a local join/leave. Empty `participants` = no active call
     /// (sent too, so an ending call clears the banner).
     CallStateUpdated(CallState),
+
+    // --- Phase 6: spaces ---
+    /// One page of a space's direct children (the space-hierarchy API),
+    /// answering `ClientCommand::FetchSpaceHierarchy`. Pages append: the UI
+    /// passes this page's `next_batch` back as `from` to get the following
+    /// one (`None` = last page).
+    SpaceHierarchyFetched {
+        request_id: RequestId,
+        space_id: String,
+        children: Vec<SpaceChildSummary>,
+        next_batch: Option<String>,
+    },
 
     // --- correlated command outcomes ---
     CommandFailed { request_id: RequestId, error: String },
@@ -133,6 +153,46 @@ pub struct RoomSummary {
     pub is_dm: bool,
     pub parent_space_id: Option<String>,
     pub last_message_preview: Option<String>,
+}
+
+/// One room (or subspace) listed under a space by the space-hierarchy API.
+/// Unlike `RoomSummary` this can describe rooms the account hasn't joined —
+/// that's the point of the space explorer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpaceChildSummary {
+    pub room_id: String,
+    /// `None` when the room publishes no name — display falls back to the
+    /// alias, then the room id.
+    pub name: Option<String>,
+    pub topic: Option<String>,
+    pub canonical_alias: Option<String>,
+    pub avatar_url: Option<String>,
+    pub num_joined_members: u64,
+    /// This child is itself a space (the explorer drills in rather than
+    /// opening a timeline).
+    pub is_space: bool,
+    /// Whether this account already belongs to the room.
+    pub joined: bool,
+    pub join_rule: SpaceJoinRule,
+    /// Candidate servers for joining, from the parent space's
+    /// `m.space.child` event — needed when our homeserver isn't already in
+    /// the room. Empty is fine for rooms it knows.
+    pub via: Vec<String>,
+}
+
+/// How a space child can be entered, reduced to the cases the explorer UI
+/// distinguishes (the spec's `SpaceRoomJoinRule` is wider).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceJoinRule {
+    /// Anyone can join.
+    Public,
+    /// Members of the parent space can join (`restricted` /
+    /// `knock_restricted`).
+    Restricted,
+    /// Joining requires knocking (asking to be let in).
+    Knock,
+    /// Invite-only — also the bucket for unknown/custom rules.
+    InviteOnly,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -221,6 +281,16 @@ pub struct EmojiPack {
 pub struct CustomEmoji {
     pub shortcode: String,
     pub mxc_url: String,
+    /// MSC2545 usage flags. An image that declares no usage is usable as
+    /// *both*, so both default to true — the emoji picker shows the
+    /// `is_emoticon` images, the sticker picker shows the `is_sticker` ones.
+    pub is_emoticon: bool,
+    pub is_sticker: bool,
+    /// Intrinsic dimensions from the pack's per-image `info` block, when the
+    /// pack declares them — used to render stickers at true aspect and to
+    /// fill the `m.sticker` event's `ImageInfo` on send.
+    pub width: Option<u32>,
+    pub height: Option<u32>,
 }
 
 /// Signaling-level state of a room's MatrixRTC call (MSC3401 room-scope
@@ -249,6 +319,16 @@ pub enum NotificationMode {
     Mute,
 }
 
+/// Which account-wide default a `ClientCommand::SetDefaultNotificationMode`
+/// targets. The SDK models this as a 4-way matrix (encrypted x one-to-one),
+/// but the UI only exposes these two buckets — setting either one writes
+/// both the encrypted and unencrypted variant together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationScope {
+    DirectMessages,
+    GroupChats,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrustShield {
     Red(String),
@@ -264,6 +344,11 @@ pub enum TimelineItemContent {
     /// otherwise every image load reflows the timeline and yanks the
     /// scroll position around.
     Image { url: String, caption: Option<String>, width: Option<u32>, height: Option<u32> },
+    /// A sticker (`m.sticker`). Rendered like an image but kept distinct so it
+    /// can render at sticker size (no caption/bubble) and so the composer can
+    /// harvest it into the grow-with-use collection. `body` is the sticker's
+    /// alt text / shortcode, reused as the `body` when resending it.
+    Sticker { url: String, body: String, width: Option<u32>, height: Option<u32> },
     File { url: String, filename: String },
     Redacted,
     DateDivider(String),
