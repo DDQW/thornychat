@@ -1,8 +1,8 @@
 //! Privacy controls: what your activity reveals to other users and to
 //! third-party servers. Each toggle writes straight through to the live
 //! `PrivacyConfig` (so `update.rs` gates the next command with it
-//! immediately) and autosaves to disk. Every option ships disabled by
-//! default — the most private stance; see `crate::privacy_config`.
+//! immediately) and autosaves to disk. Activity-sharing options ship
+//! disabled, link previews ship enabled; see `crate::privacy_config`.
 
 use iced::widget::{column, row, text, toggler};
 use iced::{Element, Length, Task};
@@ -49,8 +49,8 @@ fn save_task(privacy: PrivacyConfig) -> Task<Message> {
 
 pub fn view<'a>(privacy: &'a PrivacyConfig) -> Element<'a, Message> {
     let intro = text(
-        "ThornyChat defaults to a high-privacy stance: until you turn these on, your \
-         activity isn't shared with other people or third-party servers.",
+        "ThornyChat never shares your activity with other people until you opt in. \
+         Link previews only fetch content for you, so they start enabled.",
     )
     .size(12)
     .style(text::secondary);

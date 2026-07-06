@@ -1,10 +1,12 @@
-//! Room list sidebar: a "Spaces" section (each row opens the space
-//! explorer overlay — a space has no timeline of its own), then flat
-//! DM/room sections, with a local filter box on top. Nesting joined rooms
-//! *under* their parent space is still deferred until
-//! `client_core::rooms::spaces` tracks parent/child relationships.
+//! Room list sidebar: one group per joined space — the space renders as a
+//! header (clicking it opens the explorer overlay; a space has no timeline
+//! of its own) with its joined rooms nested beneath, Cinny-style — then
+//! flat DM/room sections for everything spaceless, with a local filter box
+//! on top. Child sets come from `ClientEvent::SpaceChildrenFetched`
+//! (hierarchy sweep at startup/join); a joined subspace groups as its own
+//! top-level header rather than nesting deeper.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use client_core::events::{NotificationMode, RoomSummary};
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
@@ -13,6 +15,9 @@ use iced::{Element, Length};
 #[derive(Debug, Clone, Default)]
 pub struct State {
     pub rooms: Vec<RoomSummary>,
+    /// space id → all of its child room ids (joined or not, straight from
+    /// the space hierarchy) — what nests a joined room under its space.
+    pub space_children: HashMap<String, Vec<String>>,
     pub selected_room_id: Option<String>,
     pub filter: String,
 }
@@ -37,23 +42,60 @@ pub fn view<'a>(
     media: &'a crate::media_cache::State,
 ) -> Element<'a, Message> {
     let filter = state.filter.trim().to_lowercase();
-    let visible = |room: &&client_core::events::RoomSummary| {
-        filter.is_empty() || room.name.to_lowercase().contains(&filter)
-    };
-    let spaces: Vec<&client_core::events::RoomSummary> =
-        state.rooms.iter().filter(|r| r.is_space).filter(visible).collect();
-    let dms: Vec<&client_core::events::RoomSummary> =
-        state.rooms.iter().filter(|r| r.is_dm && !r.is_space).filter(visible).collect();
-    let rooms: Vec<&client_core::events::RoomSummary> =
-        state.rooms.iter().filter(|r| !r.is_dm && !r.is_space).filter(visible).collect();
+    let visible =
+        |room: &RoomSummary| filter.is_empty() || room.name.to_lowercase().contains(&filter);
 
     let mut list = column![].spacing(2).padding(8);
-    if !spaces.is_empty() {
-        list = list.push(section_header("Spaces"));
-        for space in spaces {
-            list = list.push(space_row(space, media));
+
+    // Space groups first: the space is a container, so it sits *above* the
+    // rooms it contains, never next to them. The first space to list a room
+    // claims it (a room can be in several spaces; showing it twice would
+    // read as two rooms); DMs keep their own section even when a space
+    // lists them.
+    let mut claimed: HashSet<&str> = HashSet::new();
+    for space in state.rooms.iter().filter(|r| r.is_space) {
+        let child_ids: HashSet<&str> = state
+            .space_children
+            .get(&space.room_id)
+            .map(|ids| ids.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        let children: Vec<&RoomSummary> = state
+            .rooms
+            .iter()
+            .filter(|r| {
+                !r.is_space
+                    && !r.is_dm
+                    && child_ids.contains(r.room_id.as_str())
+                    && !claimed.contains(r.room_id.as_str())
+            })
+            .collect();
+        claimed.extend(children.iter().map(|r| r.room_id.as_str()));
+
+        // Under a filter, the group shows while the space itself or any of
+        // its rooms matches — and only matching rooms render.
+        let shown: Vec<&RoomSummary> =
+            children.iter().copied().filter(|r| visible(r)).collect();
+        if !visible(space) && shown.is_empty() {
+            continue;
+        }
+        list = list.push(space_row(space, media));
+        for room in shown {
+            list = list.push(
+                container(room_row(state, room, notification_modes, calls, media)).padding(
+                    iced::Padding { left: 18.0, ..iced::Padding::ZERO },
+                ),
+            );
         }
     }
+
+    let dms: Vec<&RoomSummary> =
+        state.rooms.iter().filter(|r| r.is_dm && !r.is_space).filter(|r| visible(r)).collect();
+    let rooms: Vec<&RoomSummary> = state
+        .rooms
+        .iter()
+        .filter(|r| !r.is_dm && !r.is_space && !claimed.contains(r.room_id.as_str()))
+        .filter(|r| visible(r))
+        .collect();
     for (label, group) in [("Direct messages", dms), ("Rooms", rooms)] {
         if group.is_empty() {
             continue;
@@ -90,16 +132,21 @@ fn section_header(label: &str) -> Element<'_, Message> {
         .into()
 }
 
-/// A space row: clicking opens the space explorer (browse/join its rooms)
-/// rather than a timeline — a space room has no useful timeline of its own.
-/// Right-click still offers leave/forget like any other row.
+/// A space group header: clicking opens the space explorer (browse/join its
+/// rooms) rather than a timeline — a space room has no useful timeline of
+/// its own. Rendered semibold with a chevron so it reads as the container
+/// of the indented rooms beneath it. Right-click still offers leave/forget
+/// like any other row.
 fn space_row<'a>(
     space: &'a RoomSummary,
     media: &'a crate::media_cache::State,
 ) -> Element<'a, Message> {
     let label = row![
         crate::media_cache::avatar(media, space.avatar_url.as_deref(), &space.name, 26),
-        text(space.name.clone()).size(14).width(Length::Fill),
+        text(space.name.clone())
+            .size(14)
+            .font(crate::theme::SEMIBOLD_FONT)
+            .width(Length::Fill),
         text(crate::theme::icon::CHEVRON_RIGHT)
             .font(crate::theme::ICON_FONT)
             .size(10)

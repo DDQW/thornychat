@@ -1,5 +1,7 @@
 //! Message composer: @mention autocomplete, emoji picker (unicode + custom
-//! emoji packs), and attachment picking. This
+//! emoji packs), and attachment staging — picked/pasted files wait as chips
+//! above the input until Enter/Send, with any typed text riding out as the
+//! first file's caption (MSC2530). This
 //! module never talks to `client_core::sync`/`mpsc` directly — it only
 //! produces `Effect`s, which the root dispatcher (`ui::update`) turns into
 //! actual `ClientCommand` sends, generating and tracking the `request_id`
@@ -50,10 +52,50 @@ pub struct State {
     /// In-flight sticker send. A separate slot (like attachments) so a sticker
     /// send never runs the text-draft reset that a `SendSucceeded` would.
     pub pending_sticker_request: Option<RequestId>,
+    /// Attachments staged in the composer (picked or pasted), shown as chips
+    /// above the input. Nothing uploads until Enter/Send; the typed text (if
+    /// any) goes out as the FIRST file's caption. While a batch is sending,
+    /// the front entry is the in-flight upload — it stays staged until the
+    /// server takes it, so a failure can be retried without re-picking.
+    /// Dropped with the rest of the composer on room switch.
+    pub staged_attachments: Vec<StagedAttachment>,
+    /// How many entries at the front of `staged_attachments` belong to the
+    /// Enter-batch currently sending. The pipeline stops there: files staged
+    /// *during* an upload wait for their own Enter instead of being swept
+    /// into a batch the user already dispatched.
+    pub sending_remaining: usize,
+    /// Text snapshot taken when Enter dispatched a batch (the trimmed body
+    /// rides as the first file's caption). Held until that first send
+    /// resolves: a failure puts the draft back instead of losing it.
+    pub carried: Option<CarriedText>,
     pub error: Option<String>,
     /// Spell-check suggestion bar + autocorrect bookkeeping (all plain data;
     /// the Windows speller is only touched in `update`).
     pub spell: SpellState,
+}
+
+/// A file waiting in the composer to be sent (picked via the dialog or
+/// pasted from the clipboard).
+#[derive(Debug, Clone)]
+pub struct StagedAttachment {
+    pub filename: String,
+    pub bytes: Vec<u8>,
+    /// Sniffed from the filename once at staging time.
+    pub mime: String,
+    /// Chip thumbnail, pre-built once at staging time (`image/*` only) —
+    /// building a fresh handle per view frame would re-decode and re-upload
+    /// the texture every frame.
+    pub preview: Option<iced::widget::image::Handle>,
+}
+
+/// The text/mentions/reply captured when Enter dispatched an attachment
+/// batch — the trimmed body becomes the first file's caption. Kept until
+/// that send resolves so a failure restores the draft instead of eating it.
+#[derive(Debug, Clone)]
+pub struct CarriedText {
+    pub body: String,
+    pub mentioned: Vec<(String, String)>,
+    pub replying_to: Option<ReplyPreview>,
 }
 
 /// Spell-check state for the composer, recomputed on every edit. Holds only
@@ -156,7 +198,11 @@ pub enum Message {
     StickerPicked { url: String, body: String, width: Option<u32>, height: Option<u32> },
     MentionCandidateClicked(String, String),
     PickAttachment,
+    /// A file's bytes arrived (dialog pick or clipboard paste) — staged as
+    /// a chip above the input, NOT sent; Enter/Send dispatches it.
     AttachmentPicked(Result<(String, Vec<u8>), String>),
+    /// × clicked on a staged-attachment chip.
+    RemoveStagedAttachment(usize),
 
     /// A suggestion-bar button was clicked — replace the flagged word with it.
     SpellSuggestionPicked(String),
@@ -174,7 +220,17 @@ pub enum Effect {
     None,
     Send { body: String, mentioned_user_ids: Vec<String>, reply_to_event_id: Option<String> },
     PickAttachment,
-    SendAttachment { filename: String, bytes: Vec<u8>, mime: String },
+    /// Upload+send one attachment. `caption`/`mentioned_user_ids`/
+    /// `reply_to_event_id` ride on the event itself (MSC2530 caption) —
+    /// only the first file of an Enter-batch carries them.
+    SendAttachment {
+        filename: String,
+        bytes: Vec<u8>,
+        mime: String,
+        caption: Option<String>,
+        mentioned_user_ids: Vec<String>,
+        reply_to_event_id: Option<String>,
+    },
     Typing(bool),
     EnsureEmojiFetched(Vec<String>),
     /// The sticker tab was opened/selected — the root dispatcher ensures the
@@ -227,6 +283,49 @@ pub fn update(
             (Task::none(), typing)
         }
         Message::Send => {
+            // Attachments staged? Enter sends them, and the typed text (if
+            // any) rides along as the first file's caption — one event, not
+            // an attachment plus a separate text message.
+            if !state.staged_attachments.is_empty() {
+                // In-flight guard, same shape as the text path's below: the
+                // upload slot is single, and a second Enter mid-batch would
+                // double-send the front file.
+                if state.pending_attachment_request.is_some() {
+                    return (Task::none(), Effect::None);
+                }
+                let carried = CarriedText {
+                    body: std::mem::take(&mut state.body),
+                    mentioned: std::mem::take(&mut state.mentioned),
+                    replying_to: state.replying_to.take(),
+                };
+                state.error = None;
+                state.spell = SpellState::default();
+                state.sending_remaining = state.staged_attachments.len();
+
+                let caption = {
+                    let trimmed = carried.body.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                };
+                let mentioned_user_ids =
+                    carried.mentioned.iter().map(|(id, _)| id.clone()).collect();
+                let reply_to_event_id =
+                    carried.replying_to.as_ref().map(|r| r.event_id.clone());
+                // The entry stays staged (its chip shows "uploading") until
+                // the server takes it — the bytes must survive a failure for
+                // retry, hence the clone.
+                let first = &state.staged_attachments[0];
+                let effect = Effect::SendAttachment {
+                    filename: first.filename.clone(),
+                    bytes: first.bytes.clone(),
+                    mime: first.mime.clone(),
+                    caption,
+                    mentioned_user_ids,
+                    reply_to_event_id,
+                };
+                state.carried = Some(carried);
+                return (Task::none(), effect);
+            }
+
             // In-flight guard: a second Enter (or Enter + Send click) before
             // CommandSucceeded round-trips would post the message twice —
             // and overwrite pending_request, orphaning the first response.
@@ -318,17 +417,44 @@ pub fn update(
         }
         Message::PickAttachment => (Task::none(), Effect::PickAttachment),
         Message::AttachmentPicked(Ok((filename, bytes))) => {
-            // One upload at a time — a second pick would overwrite
-            // pending_attachment_request and orphan the first response.
-            if state.pending_attachment_request.is_some() {
-                state.error = Some("An attachment is already uploading".into());
+            // Stage it — nothing uploads until Enter/Send. An identical
+            // payload already staged is a key-repeat echo of the same Ctrl+V
+            // (iced 0.13 exposes no repeat flag to filter on) or a double
+            // pick; the visible chip already says it's attached, so skip it
+            // rather than stacking duplicates.
+            if state
+                .staged_attachments
+                .iter()
+                .any(|staged| staged.filename == filename && staged.bytes == bytes)
+            {
                 return (Task::none(), Effect::None);
             }
             let mime = mime_guess::from_path(&filename).first_or_octet_stream().to_string();
-            (Task::none(), Effect::SendAttachment { filename, bytes, mime })
+            let preview = mime
+                .starts_with("image/")
+                .then(|| iced::widget::image::Handle::from_bytes(bytes.clone()));
+            state.staged_attachments.push(StagedAttachment { filename, bytes, mime, preview });
+            state.error = None;
+            (Task::none(), Effect::None)
         }
         Message::AttachmentPicked(Err(reason)) => {
             state.error = Some(reason);
+            (Task::none(), Effect::None)
+        }
+        Message::RemoveStagedAttachment(index) => {
+            // The front chip is the in-flight upload while a batch sends;
+            // its × is disabled in `view` (removing it couldn't cancel the
+            // upload), so refuse it here too.
+            if index < state.staged_attachments.len()
+                && !(index == 0 && state.pending_attachment_request.is_some())
+            {
+                state.staged_attachments.remove(index);
+                // If it was part of the batch currently sending, the batch
+                // shrinks with it.
+                if index < state.sending_remaining {
+                    state.sending_remaining -= 1;
+                }
+            }
             (Task::none(), Effect::None)
         }
         Message::SpellSuggestionPicked(replacement) => {
@@ -512,13 +638,30 @@ fn typed_trailing_boundary(previous: &str, current: &str) -> bool {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Stable widget id for the composer's text input — lets the root dispatcher
+/// refocus it after staging a pasted/picked attachment, so "paste → type a
+/// caption → Enter" flows without an extra click.
+pub fn input_id() -> text_input::Id {
+    text_input::Id::new("composer-input")
+}
+
+/// "412 B" / "3.2 KB" / "8.1 MB" — size tag on a staged-attachment chip.
+fn human_size(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    let b = bytes as f64;
+    if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.1} KB", b / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 pub fn view<'a>(
     state: &'a State,
-    emoji_usage: &'a HashMap<String, u32>,
     media: &'a crate::media_cache::State,
-    packs: &'a [EmojiPack],
-    stickers: &'a [crate::state::CollectedSticker],
     typing: Element<'a, Message>,
     followers: Element<'a, Message>,
 ) -> Element<'a, Message> {
@@ -607,29 +750,76 @@ pub fn view<'a>(
         container(bar).padding([2, 4]).into()
     }));
 
-    // Right-aligned so the panel opens under the emoji/sticker buttons, which
-    // now sit at the right end of the input row (not the left). Same
-    // Fill+align_x(Right)-inside-a-slot trick the notification menu uses.
-    let picker_slot = crate::theme::slot(state.show_emoji_picker.then(|| {
-        container(picker_panel(state, emoji_usage, media, packs, stickers))
-            .width(Length::Fill)
-            .align_x(iced::Right)
+    // Staged attachments (picked or pasted, not yet sent): one chip per
+    // file — thumbnail for images, name, size, × to unstage. While a batch
+    // uploads, the front chip is the in-flight file: its label says so and
+    // its × is disabled (removal couldn't cancel the upload).
+    let staged_slot = crate::theme::slot((!state.staged_attachments.is_empty()).then(|| {
+        let uploading = state.pending_attachment_request.is_some();
+        let mut chips = row![].spacing(6).align_y(iced::Center);
+        for (index, staged) in state.staged_attachments.iter().enumerate() {
+            let is_uploading = index == 0 && uploading;
+            let mut chip = row![].spacing(6).align_y(iced::Center);
+            if let Some(preview) = &staged.preview {
+                chip = chip.push(
+                    iced::widget::image(preview.clone()).height(Length::Fixed(28.0)),
+                );
+            } else {
+                chip = chip.push(
+                    text(crate::theme::icon::ATTACH)
+                        .size(12)
+                        .font(crate::theme::ICON_FONT)
+                        .style(text::primary),
+                );
+            }
+            let label = if is_uploading {
+                format!("{} — uploading…", staged.filename)
+            } else {
+                staged.filename.clone()
+            };
+            chip = chip
+                .push(text(label).size(12))
+                .push(text(human_size(staged.bytes.len())).size(11).style(text::secondary));
+            let mut remove = button(text("×").size(13))
+                .style(crate::theme::ghost_button)
+                .padding([0, 6]);
+            if !is_uploading {
+                remove = remove.on_press(Message::RemoveStagedAttachment(index));
+            }
+            chip = chip.push(remove);
+            chips = chips.push(container(chip).padding([2, 6]).style(crate::theme::panel));
+        }
+        // Horizontal scroll rather than clipping when many files are staged
+        // (the chips row can outgrow the composer width).
+        iced::widget::scrollable(chips)
+            .direction(iced::widget::scrollable::Direction::Horizontal(
+                iced::widget::scrollable::Scrollbar::new().width(3).scroller_width(3),
+            ))
             .into()
     }));
 
+    // The emoji/sticker picker panel is NOT part of this column: it floats
+    // over the message area as a layer (see the chat stack in
+    // `timeline::view`), so opening it doesn't grow the composer and shove
+    // the whole timeline upward.
     let mut col =
-        column![error_slot, reply_slot, mention_slot, spell_slot, picker_slot].spacing(4);
+        column![error_slot, reply_slot, staged_slot, mention_slot, spell_slot].spacing(4);
 
     // One compact row (Cinny-style): attachment on the left, the input
     // filling the middle, then the emoji/sticker pickers and Send clustered on
     // the right. Icon-only (Windows Fluent glyphs).
-    let input: Element<'_, Message> =
-        text_input("Message... (@mention, markdown supported)", &state.body)
-            .on_input(Message::BodyChanged)
-            .on_submit(Message::Send)
-            .padding(6)
-            .width(Length::Fill)
-            .into();
+    let placeholder = if state.staged_attachments.is_empty() {
+        "Message... (@mention, markdown supported)"
+    } else {
+        "Add a caption… (optional) — Enter sends the attachment"
+    };
+    let input: Element<'_, Message> = text_input(placeholder, &state.body)
+        .id(input_id())
+        .on_input(Message::BodyChanged)
+        .on_submit(Message::Send)
+        .padding(6)
+        .width(Length::Fill)
+        .into();
 
     let input_row = row![
         button(crate::theme::icon_text(crate::theme::icon::ATTACH, 15))
@@ -668,10 +858,12 @@ pub fn view<'a>(
 }
 
 /// The composer's picker panel: a Sticker | Emoji tab bar over either the
-/// sticker grid or the emoji list. (The timeline's reaction picker calls
-/// `emoji_picker::view` directly and stays emoji-only — you react with emoji,
-/// not stickers.)
-fn picker_panel<'a>(
+/// sticker grid or the emoji list. Rendered by `timeline::view` as a layer
+/// floating over the bottom-right of the chat — not inline in the composer
+/// column — so it covers messages instead of pushing them up. (The
+/// timeline's reaction picker calls `emoji_picker::view` directly and stays
+/// emoji-only — you react with emoji, not stickers.)
+pub(super) fn picker_panel<'a>(
     state: &'a State,
     emoji_usage: &'a HashMap<String, u32>,
     media: &'a crate::media_cache::State,
@@ -689,8 +881,10 @@ fn picker_panel<'a>(
             .style(style)
             .padding([4, 10])
     };
+    // Emoji left, Sticker right — same order as the toolbar buttons under
+    // the panel, so tab and button don't sit crossed over each other.
     let tabs =
-        row![tab("Sticker", PickerTab::Sticker), tab("Emoji", PickerTab::Emoji)].spacing(4);
+        row![tab("Emoji", PickerTab::Emoji), tab("Sticker", PickerTab::Sticker)].spacing(4);
 
     let content: Element<'a, Message> = match state.picker_tab {
         PickerTab::Sticker => crate::emoji_picker::sticker_view(

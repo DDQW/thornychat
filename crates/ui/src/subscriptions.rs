@@ -28,8 +28,11 @@ pub fn subscription(app: &App) -> Subscription<Message> {
     Subscription::batch([client_events, iced::event::listen_with(window_events), settings_resize])
 }
 
-/// Window-level events the app cares about: resizes keep the native video
-/// overlay (see `video_player`) glued to the iced-drawn frame.
+/// Window-level events the app cares about: resizes invalidate the
+/// timeline's scroll-anchor geometry (and, via the update wrapper's stage
+/// probe, reglue the inline video player), Escape dismisses the image
+/// lightbox, Ctrl+V probes the clipboard for files/images to attach
+/// (`clipboard_paste`), and dropped files stage as attachment chips.
 fn window_events(
     event: iced::Event,
     _status: iced::event::Status,
@@ -38,6 +41,26 @@ fn window_events(
     match event {
         iced::Event::Window(iced::window::Event::Resized(size)) => {
             Some(Message::WindowResized(size))
+        }
+        iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+            Some(Message::FileDropped(path))
+        }
+        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+            ..
+        }) => Some(Message::EscapePressed),
+        // Deliberately ignores the capture status: a focused text_input
+        // consumes Ctrl+V for its own *text* paste, but files/images on the
+        // clipboard aren't text — those are handled app-side, and the
+        // update-side "text wins" rule keeps one Ctrl+V from double-acting.
+        // `!alt()` exempts AltGr combos (reported as Ctrl+Alt on Windows),
+        // which are characters being typed, not paste chords.
+        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Character(c),
+            modifiers,
+            ..
+        }) if modifiers.command() && !modifiers.alt() && c.eq_ignore_ascii_case("v") => {
+            Some(Message::PasteClipboard)
         }
         _ => None,
     }

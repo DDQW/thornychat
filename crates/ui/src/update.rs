@@ -9,6 +9,26 @@ use crate::screens;
 use crate::state::App;
 
 pub fn update(app: &mut App, message: Message) -> Task<Message> {
+    // Glue for the inline video player: while one is playing, any message
+    // at all may have reflowed the timeline (scrolls, arriving messages,
+    // images finishing decode, panels toggling...), so re-probe where the
+    // stage container sits after every update and let the probe handler
+    // resync the native webview. Probe results themselves are exempt —
+    // they'd re-trigger forever; `inline_video_bounds` re-issues probes
+    // itself in the one case that needs it (a missed stage), bounded by
+    // its miss limit.
+    let is_probe_result = matches!(message, Message::InlineVideoBounds(_));
+    let task = update_inner(app, message);
+    if !is_probe_result && app.timeline.inline_video.is_some() {
+        return Task::batch([
+            task,
+            crate::video_player::stage_bounds_probe().map(Message::InlineVideoBounds),
+        ]);
+    }
+    task
+}
+
+fn update_inner(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::RestoreResult(Ok(Some(opaque_client))) => {
             app.adopt_client(opaque_client.0);
@@ -186,93 +206,117 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
 
-        Message::AttachmentPickedFor { room_id, filename, bytes } => {
-            if app.timeline.room_id.as_deref() == Some(room_id.as_str()) {
-                // Same room still open — route through the composer's normal
-                // AttachmentPicked path (mime sniffing, in-flight guard).
-                update(
-                    app,
-                    Message::Timeline(screens::timeline::Message::Composer(
-                        screens::timeline::composer::Message::AttachmentPicked(Ok((
-                            filename, bytes,
-                        ))),
-                    )),
-                )
-            } else {
-                tracing::info!("attachment picked for a room no longer open; dropped");
-                app.timeline.composer.error =
-                    Some("Attachment cancelled — the room changed while picking a file".into());
-                Task::none()
+        Message::PasteClipboard => {
+            // A paste belongs to the surface being looked at: with Settings
+            // or the space explorer overlaying the shell (each has its own
+            // text inputs), or before login, don't aim it at the room
+            // behind. Text pastes are unaffected either way — the clipboard
+            // probe ignores them (see `clipboard_paste::read`).
+            if app.route != crate::state::Route::Main
+                || app.show_settings
+                || app.space_explorer.is_some()
+            {
+                return Task::none();
             }
+            match app.timeline.room_id.clone() {
+                Some(room_id) => paste_clipboard_task(room_id),
+                None => Task::none(),
+            }
+        }
+        Message::FileDropped(path) => {
+            // Same surface rule as paste: a drop targets the open room's
+            // composer only while the main shell is actually showing it.
+            if app.route != crate::state::Route::Main
+                || app.show_settings
+                || app.space_explorer.is_some()
+            {
+                return Task::none();
+            }
+            match app.timeline.room_id.clone() {
+                Some(room_id) => dropped_file_task(room_id, path),
+                None => Task::none(),
+            }
+        }
+        Message::AttachmentsReadFor { room_id, files, failed } => {
+            if app.timeline.room_id.as_deref() != Some(room_id.as_str()) {
+                tracing::info!("attachments read for a room no longer open; dropped");
+                app.timeline.composer.error =
+                    Some("Attachment cancelled — the room changed while reading the files".into());
+                return Task::none();
+            }
+            if failed > 0 {
+                let plural = if failed == 1 { "" } else { "s" };
+                app.timeline.composer.error = Some(format!(
+                    "{failed} item{plural} couldn't be read (folders can't be attached)"
+                ));
+            }
+            // Stage each file through the composer's normal AttachmentPicked
+            // path (mime sniffing, duplicate skip). Nothing sends yet —
+            // Enter/Send dispatches the batch.
+            let staged_any = !files.is_empty();
+            let mut tasks: Vec<Task<Message>> = files
+                .into_iter()
+                .map(|(filename, bytes)| {
+                    update_inner(
+                        app,
+                        Message::Timeline(screens::timeline::Message::Composer(
+                            screens::timeline::composer::Message::AttachmentPicked(Ok((
+                                filename, bytes,
+                            ))),
+                        )),
+                    )
+                })
+                .collect();
+            if staged_any {
+                // Focus the input so "paste → type a caption → Enter" flows
+                // without an extra click (Enter submits via on_submit).
+                tasks.push(iced::widget::text_input::focus(
+                    screens::timeline::composer::input_id(),
+                ));
+            }
+            Task::batch(tasks)
         }
 
         Message::CloseZoom => {
             app.zoomed_image = None;
             Task::none()
         }
-
-        Message::VideoPlayerOpened { window, scale, result } => {
-            match &mut app.video_player {
-                Some(player) => {
-                    // A WindowResized that landed while the webview was still
-                    // building recorded a fresher size — keep that one and
-                    // re-sync the native bounds to it, instead of clobbering
-                    // it with the stale open-time capture (maximize emits no
-                    // further resize, so it would stay wrong indefinitely).
-                    let effective = *player.window.get_or_insert(window);
-                    player.scale = scale;
-                    if let Err(reason) = result {
-                        tracing::warn!(%reason, "embedded video player failed to start");
-                        player.error = Some(reason);
-                        return Task::none();
-                    }
-                    if effective != window {
-                        let rect = crate::video_player::video_rect(effective);
-                        return iced::window::get_latest().then(move |id| match id {
-                            Some(id) => iced::window::run_with_handle(id, move |_handle| {
-                                crate::video_player::set_bounds(rect, scale);
-                            })
-                            .map(|_| Message::Noop),
-                            None => Task::none(),
-                        });
-                    }
-                    Task::none()
-                }
-                // Overlay was dismissed before the webview finished
-                // building — tear the orphan down.
-                None => close_native_player(),
-            }
+        Message::EscapePressed => {
+            // Only the lightbox: it's the one overlay whose surface eats
+            // clicks (the image viewer pans/zooms), so it needs a keyboard
+            // exit. Everything else keeps its explicit close affordances.
+            app.zoomed_image = None;
+            Task::none()
         }
-        Message::WindowResized(size) => {
-            // Text rewraps to the new width — every row's on-screen position
-            // changes legitimately, so the scroll anchor's stored geometry
-            // is meaningless until the next scroll re-learns it.
-            app.timeline.scroll_anchor = None;
-            if let Some(player) = &mut app.video_player {
-                player.window = Some(size);
-                if player.error.is_none() {
-                    let rect = crate::video_player::video_rect(size);
-                    let scale = player.scale;
-                    return iced::window::get_latest().then(move |id| match id {
-                        Some(id) => iced::window::run_with_handle(id, move |_handle| {
-                            crate::video_player::set_bounds(rect, scale);
-                        })
-                        .map(|_| Message::Noop),
-                        None => Task::none(),
-                    });
+
+        Message::InlineVideoScale(scale) => {
+            if let Some(inline) = app.timeline.inline_video.as_mut() {
+                inline.scale = Some(scale);
+            }
+            // The wrapper's probe follows this message; once bounds land
+            // too, the webview opens.
+            Task::none()
+        }
+        Message::InlineVideoOpened(result) => {
+            if let Err(reason) = result {
+                tracing::warn!(%reason, "inline video player failed to start");
+                if let Some(inline) = app.timeline.inline_video.as_mut() {
+                    inline.error = Some(reason);
                 }
+                // Belt and braces — `open` cleans up after itself on error.
+                return close_native_player();
             }
             Task::none()
         }
-        Message::CloseVideoPlayer => {
-            app.video_player = None;
-            close_native_player()
-        }
-        Message::OpenVideoInBrowser => {
-            if let Some(player) = app.video_player.take() {
-                let _ = open::that(player.video.watch_url());
-            }
-            close_native_player()
+        Message::InlineVideoBounds(probed) => inline_video_bounds(app, probed),
+        Message::WindowResized(_) => {
+            // Text rewraps to the new width — every row's on-screen position
+            // changes legitimately, so the scroll anchor's stored geometry
+            // is meaningless until the next scroll re-learns it. (The inline
+            // video player reglues itself through the probe this message
+            // triggers, like any other reflow.)
+            app.timeline.scroll_anchor = None;
+            Task::none()
         }
 
         Message::ToggleSettings => {
@@ -586,24 +630,34 @@ fn apply_timeline_effect(app: &mut App, effect: screens::timeline::Effect) -> Ta
             );
             Task::none()
         }
-        screens::timeline::Effect::InviteToRoom(user_id) => {
-            if let Some(room_id) = app.timeline.room_id.clone() {
-                send_cmd(
-                    app,
-                    ClientCommand::InviteUser { room_id, user_id, request_id: Uuid::new_v4() },
-                );
-            }
-            Task::none()
-        }
-        screens::timeline::Effect::PlayVideo { video, title } => {
-            app.video_player = Some(crate::state::VideoPlayer {
-                video: video.clone(),
+        screens::timeline::Effect::PlayVideo { event_id, video, title } => {
+            app.timeline.inline_video = Some(screens::timeline::InlineVideo {
+                event_id,
+                video,
                 title,
-                window: None,
-                scale: 1.0,
                 error: None,
+                scale: None,
+                live: false,
+                synced: None,
+                misses: 0,
             });
-            open_native_player(&app.profile, video)
+            // The webview is created once both the scale factor (fetched
+            // here) and the stage's first bounds probe (fired by the update
+            // wrapper for this very message) have landed. Tear down any
+            // previous player first — one video at a time.
+            Task::batch([
+                close_native_player(),
+                iced::window::get_latest().then(|maybe_id| match maybe_id {
+                    Some(id) => {
+                        iced::window::get_scale_factor(id).map(Message::InlineVideoScale)
+                    }
+                    None => Task::none(),
+                }),
+            ])
+        }
+        screens::timeline::Effect::StopVideo => {
+            app.timeline.inline_video = None;
+            close_native_player()
         }
         screens::timeline::Effect::JoinCall => {
             send_call_command(app, true);
@@ -640,11 +694,107 @@ fn send_call_command(app: &mut App, join: bool) {
     send_cmd(app, cmd);
 }
 
-/// Builds the native webview on the event-loop thread: window id → size →
-/// scale factor → `run_with_handle` (which is where WebView2 creation must
-/// happen). The geometry captured along the way rides back on
-/// [`Message::VideoPlayerOpened`] so the overlay draws to the same rect.
-fn open_native_player(profile: &str, video: crate::video_player::EmbedVideo) -> Task<Message> {
+/// How many consecutive failed stage probes before playback stops. The
+/// first layout of a fresh placeholder can legitimately miss once or
+/// twice; a sustained run means the card left the tree for good (message
+/// redacted, filtered out by search, timeline reset).
+const INLINE_VIDEO_MISS_LIMIT: u32 = 30;
+
+/// Applies a resolved stage-geometry probe (see
+/// `video_player::stage_bounds_probe`): creates the webview once geometry
+/// and scale are first known, then keeps regluing it as the stage moves.
+fn inline_video_bounds(
+    app: &mut App,
+    probed: Option<(iced::Rectangle, Option<iced::Rectangle>)>,
+) -> Task<Message> {
+    // Every iced overlay draws *under* the native webview, so while one is
+    // open the video hides (audio keeps playing) instead of covering it.
+    let overlay_open = app.show_settings
+        || app.zoomed_image.is_some()
+        || app.space_explorer.is_some()
+        || app.pending_room_action.is_some();
+
+    let Some(inline) = app.timeline.inline_video.as_mut() else {
+        // Stopped while the probe was in flight; the close already ran.
+        return Task::none();
+    };
+
+    match probed {
+        Some((full, visible)) => {
+            inline.misses = 0;
+            let visible = if overlay_open { None } else { visible };
+            if inline.live {
+                // Nothing moved since the last sync → no task. This is the
+                // loop's resting state: a sync's completion message triggers
+                // exactly one more probe, which lands here and goes quiet.
+                if inline.synced == Some((full, visible)) {
+                    return Task::none();
+                }
+                inline.synced = Some((full, visible));
+                let scale = inline.scale.unwrap_or(1.0);
+                return iced::window::get_latest().then(move |maybe_id| match maybe_id {
+                    Some(id) => iced::window::run_with_handle(id, move |_handle| {
+                        crate::video_player::sync_bounds(full, visible, scale);
+                    })
+                    .map(|_| Message::Noop),
+                    None => Task::none(),
+                });
+            }
+            if inline.error.is_some() {
+                // The stage is showing the failure fallback; nothing to glue.
+                return Task::none();
+            }
+            let Some(scale) = inline.scale else {
+                // Bounds beat the scale-factor fetch; its arrival re-probes.
+                return Task::none();
+            };
+            inline.live = true;
+            inline.synced = Some((full, visible));
+            open_inline_player(&app.profile, inline.video.clone(), full, visible, scale)
+        }
+        None => {
+            inline.misses += 1;
+            if inline.misses > INLINE_VIDEO_MISS_LIMIT {
+                app.timeline.inline_video = None;
+                return close_native_player();
+            }
+            // Re-probe straight away: before the webview exists this is
+            // how the open path polls for the placeholder's first layout,
+            // and after, how a vanished card counts up to the limit above
+            // instead of leaving hidden audio playing forever. Bounded by
+            // the miss limit — the update wrapper doesn't re-probe on
+            // probe results, so this is the only repeat path.
+            let hide = if inline.live {
+                // The native player no longer reflects any known geometry;
+                // whatever probe next finds the stage must sync it.
+                inline.synced = None;
+                iced::window::get_latest().then(|maybe_id| match maybe_id {
+                    Some(id) => iced::window::run_with_handle(id, |_handle| {
+                        crate::video_player::hide();
+                    })
+                    .map(|_| Message::Noop),
+                    None => Task::none(),
+                })
+            } else {
+                Task::none()
+            };
+            Task::batch([
+                hide,
+                crate::video_player::stage_bounds_probe().map(Message::InlineVideoBounds),
+            ])
+        }
+    }
+}
+
+/// Builds the native webview over the probed stage geometry, on the
+/// event-loop thread (where WebView2 creation must happen).
+fn open_inline_player(
+    profile: &str,
+    video: crate::video_player::EmbedVideo,
+    full: iced::Rectangle,
+    visible: Option<iced::Rectangle>,
+    scale: f32,
+) -> Task<Message> {
     // WebView2 refuses to put its profile data next to the exe; park it
     // with the rest of this profile's on-disk state.
     let data_dir = client_core::store::AppPaths::for_profile(profile)
@@ -657,19 +807,10 @@ fn open_native_player(profile: &str, video: crate::video_player::EmbedVideo) -> 
         };
         let video = video.clone();
         let data_dir = data_dir.clone();
-        iced::window::get_size(id).then(move |size| {
-            let video = video.clone();
-            let data_dir = data_dir.clone();
-            iced::window::get_scale_factor(id).then(move |scale| {
-                let video = video.clone();
-                let data_dir = data_dir.clone();
-                let rect = crate::video_player::video_rect(size);
-                iced::window::run_with_handle(id, move |handle| {
-                    crate::video_player::open(&handle, &video, rect, scale, data_dir)
-                })
-                .map(move |result| Message::VideoPlayerOpened { window: size, scale, result })
-            })
+        iced::window::run_with_handle(id, move |handle| {
+            crate::video_player::open(&handle, &video, full, visible, scale, data_dir)
         })
+        .map(Message::InlineVideoOpened)
     })
 }
 
@@ -716,8 +857,15 @@ fn apply_composer_effect(app: &mut App, effect: screens::timeline::composer::Eff
             Some(room_id) => pick_attachment_task(room_id),
             None => Task::none(),
         },
-        ComposerEffect::SendAttachment { filename, bytes, mime } => {
-            send_attachment(app, filename, bytes, mime);
+        ComposerEffect::SendAttachment {
+            filename,
+            bytes,
+            mime,
+            caption,
+            mentioned_user_ids,
+            reply_to_event_id,
+        } => {
+            send_attachment(app, filename, bytes, mime, caption, mentioned_user_ids, reply_to_event_id);
             Task::none()
         }
         ComposerEffect::Typing(typing) => {
@@ -823,14 +971,31 @@ fn send_message(
     });
 }
 
-fn send_attachment(app: &mut App, filename: String, bytes: Vec<u8>, mime: String) {
+fn send_attachment(
+    app: &mut App,
+    filename: String,
+    bytes: Vec<u8>,
+    mime: String,
+    caption: Option<String>,
+    mentioned_user_ids: Vec<String>,
+    reply_to_event_id: Option<String>,
+) {
     let Some(room_id) = app.timeline.room_id.clone() else { return };
     let Some(cmd_tx) = &app.cmd_tx else { return };
     let request_id = Uuid::new_v4();
     // NOT pending_request: sharing the text-send slot would make the
     // attachment's CommandSucceeded wipe an unsent draft via SendSucceeded.
     app.timeline.composer.pending_attachment_request = Some(request_id);
-    let _ = cmd_tx.send(ClientCommand::SendAttachment { room_id, filename, bytes, mime, request_id });
+    let _ = cmd_tx.send(ClientCommand::SendAttachment {
+        room_id,
+        filename,
+        bytes,
+        mime,
+        caption,
+        mentioned_user_ids,
+        reply_to_event_id,
+        request_id,
+    });
 }
 
 fn send_sticker(app: &mut App, url: String, body: String, width: Option<u32>, height: Option<u32>) {
@@ -1125,25 +1290,119 @@ fn unicode_body_emojis(
         .collect()
 }
 
+/// Probes the clipboard off-thread (see `clipboard_paste::read`) and reads
+/// any pasted files' bytes, resolving to `AttachmentsReadFor` (staging).
+/// Bound to the room open at Ctrl+V time for the same reason the file
+/// dialog is.
+fn paste_clipboard_task(room_id: String) -> Task<Message> {
+    Task::perform(
+        async move {
+            let pasted = tokio::task::spawn_blocking(crate::clipboard_paste::read)
+                .await
+                .unwrap_or(crate::clipboard_paste::Pasted::None);
+            match pasted {
+                crate::clipboard_paste::Pasted::None => (Vec::new(), 0),
+                crate::clipboard_paste::Pasted::Image { filename, bytes } => {
+                    (vec![(filename, bytes)], 0)
+                }
+                crate::clipboard_paste::Pasted::Files(paths) => {
+                    let mut files = Vec::new();
+                    let mut failed = 0usize;
+                    for path in paths {
+                        match tokio::fs::read(&path).await {
+                            Ok(bytes) => {
+                                let filename = path
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| "attachment".to_string());
+                                files.push((filename, bytes));
+                            }
+                            Err(error) => {
+                                // Folders land here too (fs::read refuses them).
+                                tracing::warn!(
+                                    %error,
+                                    path = %path.display(),
+                                    "pasted path not readable; skipped"
+                                );
+                                failed += 1;
+                            }
+                        }
+                    }
+                    (files, failed)
+                }
+            }
+        },
+        move |(files, failed)| {
+            if files.is_empty() && failed == 0 {
+                // Nothing attachable — the everyday text paste. Stay silent.
+                Message::Noop
+            } else {
+                Message::AttachmentsReadFor { room_id: room_id.clone(), files, failed }
+            }
+        },
+    )
+}
+
+/// Reads one drag-and-dropped file and resolves to `AttachmentsReadFor`
+/// (staging), bound to the room open at drop time like the paste and picker
+/// paths. One task per file — the OS delivers a multi-file drop as a burst
+/// of `FileDropped` events.
+fn dropped_file_task(room_id: String, path: std::path::PathBuf) -> Task<Message> {
+    Task::perform(
+        async move {
+            match tokio::fs::read(&path).await {
+                Ok(bytes) => {
+                    let filename = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "attachment".to_string());
+                    (vec![(filename, bytes)], 0)
+                }
+                Err(error) => {
+                    // Folders land here too (fs::read refuses them).
+                    tracing::warn!(
+                        %error,
+                        path = %path.display(),
+                        "dropped path not readable; skipped"
+                    );
+                    (Vec::new(), 1)
+                }
+            }
+        },
+        move |(files, failed)| Message::AttachmentsReadFor {
+            room_id: room_id.clone(),
+            files,
+            failed,
+        },
+    )
+}
+
 fn pick_attachment_task(room_id: String) -> Task<Message> {
     Task::perform(
         async {
-            match rfd::AsyncFileDialog::new().pick_file().await {
-                Some(file) => {
-                    let filename = file.file_name();
-                    let bytes = file.read().await;
-                    Some((filename, bytes))
+            // Multi-select: files stage as chips and send together on
+            // Enter, so picking several at once is the natural unit.
+            match rfd::AsyncFileDialog::new().pick_files().await {
+                Some(picked) => {
+                    let mut files = Vec::new();
+                    for file in picked {
+                        let filename = file.file_name();
+                        let bytes = file.read().await;
+                        files.push((filename, bytes));
+                    }
+                    files
                 }
-                None => None,
+                None => Vec::new(),
             }
         },
-        move |result| match result {
-            Some((filename, bytes)) => {
-                Message::AttachmentPickedFor { room_id: room_id.clone(), filename, bytes }
+        move |files| {
+            if files.is_empty() {
+                // Cancelling the dialog is a normal action, not an error to
+                // pin above the composer.
+                Message::Noop
+            } else {
+                Message::AttachmentsReadFor { room_id: room_id.clone(), files, failed: 0 }
             }
-            // Cancelling the dialog is a normal action, not an error to pin
-            // above the composer.
-            None => Message::Noop,
         },
     )
 }
@@ -1202,11 +1461,22 @@ fn select_room(app: &mut App, room_id: String) -> Task<Message> {
     app.timeline.highlighted_member = None;
     app.timeline.member_menu = None;
     app.zoomed_image = None;
+    // An inline video belongs to a message in the room being left — its
+    // card is gone from the new timeline, so stop it (the miss-counting
+    // fallback would get there too, just slower and with lingering audio).
+    let close_video = if app.timeline.inline_video.take().is_some() {
+        close_native_player()
+    } else {
+        Task::none()
+    };
 
-    let reset_scroll = iced::widget::scrollable::scroll_to(
-        screens::timeline::timeline_scroll_id(),
-        iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
-    );
+    let reset_scroll = Task::batch([
+        close_video,
+        iced::widget::scrollable::scroll_to(
+            screens::timeline::timeline_scroll_id(),
+            iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
+        ),
+    ]);
 
     let Some(cmd_tx) = &app.cmd_tx else { return reset_scroll };
 
@@ -1237,6 +1507,9 @@ fn forget_open_room(app: &mut App, room_id: &str) -> Task<Message> {
     app.timeline.highlighted_member = None;
     app.timeline.member_menu = None;
     send_cmd(app, ClientCommand::CloseRoom { room_id: room_id.to_string() });
+    if app.timeline.inline_video.take().is_some() {
+        return close_native_player();
+    }
     Task::none()
 }
 
@@ -1271,9 +1544,9 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
             app.zoomed_image = None;
             app.space_explorer = None;
             app.route = crate::state::Route::Login;
-            if app.video_player.take().is_some() {
-                return close_native_player();
-            }
+            // The timeline reset above dropped any inline-video state; tear
+            // down the native webview too (no-op when none is live).
+            return close_native_player();
         }
         ClientEvent::DirectMessageReady { room_id } => {
             return select_room(app, room_id);
@@ -1440,10 +1713,40 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                 );
                 return apply_composer_effect(app, effect);
             } else if app.timeline.composer.pending_attachment_request == Some(request_id) {
-                // Attachment done — clear only the upload tracking; the
-                // typed draft (if any) is untouched.
-                app.timeline.composer.pending_attachment_request = None;
-                app.timeline.composer.error = None;
+                // Attachment landed: drop its chip (the front of the staged
+                // list) and, if this Enter-batch has more files waiting,
+                // start the next — bare, the caption already rode out on
+                // the first file. A typed draft is untouched.
+                let composer = &mut app.timeline.composer;
+                composer.pending_attachment_request = None;
+                composer.error = None;
+                if !composer.staged_attachments.is_empty() {
+                    composer.staged_attachments.remove(0);
+                }
+                composer.sending_remaining = composer.sending_remaining.saturating_sub(1);
+                if composer.staged_attachments.is_empty() {
+                    composer.sending_remaining = 0;
+                }
+                let had_caption = composer
+                    .carried
+                    .take()
+                    .is_some_and(|carried| !carried.body.trim().is_empty());
+                let next = if composer.sending_remaining > 0 {
+                    composer.staged_attachments.first().map(|staged| {
+                        (staged.filename.clone(), staged.bytes.clone(), staged.mime.clone())
+                    })
+                } else {
+                    None
+                };
+                if let Some((filename, bytes, mime)) = next {
+                    send_attachment(app, filename, bytes, mime, None, Vec::new(), None);
+                }
+                if had_caption {
+                    // The caption went out with the file — stop advertising
+                    // "is typing" for text that's already posted (the text
+                    // path does the same via SendSucceeded).
+                    set_typing(app, false);
+                }
             } else if app.timeline.composer.pending_sticker_request == Some(request_id) {
                 // Sticker posted — the echo lands in the timeline (and gets
                 // harvested); nothing here touches the text draft.
@@ -1481,8 +1784,24 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                 );
                 return apply_composer_effect(app, effect);
             } else if app.timeline.composer.pending_attachment_request == Some(request_id) {
-                app.timeline.composer.pending_attachment_request = None;
-                app.timeline.composer.error = Some(error);
+                let composer = &mut app.timeline.composer;
+                composer.pending_attachment_request = None;
+                composer.error = Some(error);
+                // Stop the batch: the failed file stays staged (front chip)
+                // so Enter retries it; nothing behind it is silently
+                // skipped or sent out of order.
+                composer.sending_remaining = 0;
+                // The caption never left — put the draft back rather than
+                // losing it, unless the user typed something new meanwhile.
+                if let Some(carried) = composer.carried.take() {
+                    if composer.body.is_empty() {
+                        composer.body = carried.body;
+                        composer.mentioned = carried.mentioned;
+                    }
+                    if composer.replying_to.is_none() {
+                        composer.replying_to = carried.replying_to;
+                    }
+                }
             } else if app.timeline.composer.pending_sticker_request == Some(request_id) {
                 app.timeline.composer.pending_sticker_request = None;
                 app.timeline.composer.error = Some(error);
@@ -1654,6 +1973,9 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                 explorer.apply_page(request_id, &space_id, children, next_batch);
             }
             ensure_media_fetched(app, avatar_urls);
+        }
+        ClientEvent::SpaceChildrenFetched { space_id, children } => {
+            app.room_list.space_children.insert(space_id, children);
         }
         _ => {}
     }

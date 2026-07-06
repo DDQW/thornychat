@@ -3,18 +3,38 @@
 //! directory — it returns rooms the account hasn't joined, which is the
 //! point. Fetched one level deep per request; the UI drills into subspaces
 //! with follow-up fetches instead of walking the whole tree up front.
+//!
+//! Also owns joined-space *discovery* ([`spawn_joined_spaces_subscriber`]):
+//! sliding sync filters `m.space` rooms out entirely, so the spaces the
+//! account belongs to have to be found over REST and force-fed into the
+//! store via room subscriptions before the sidebar can list them.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use matrix_sdk::ruma::api::client::membership::joined_rooms;
 use matrix_sdk::ruma::api::client::space::get_hierarchy;
+use matrix_sdk::ruma::api::client::state::get_state_events_for_key;
+use matrix_sdk::ruma::events::room::create::RoomCreateEventContent;
+use matrix_sdk::ruma::events::StateEventType;
+use matrix_sdk::ruma::room::RoomType;
 use matrix_sdk::ruma::{OwnedRoomId, RoomId, UInt};
-use matrix_sdk::Client;
+use matrix_sdk::{Client, RoomState};
+use matrix_sdk_ui::room_list_service::{RoomListLoadingState, RoomListService};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
-use crate::events::{SpaceChildSummary, SpaceJoinRule};
+use crate::events::{ClientEvent, SpaceChildSummary, SpaceJoinRule};
 
 /// Children per page — small enough for a snappy first paint, paged via the
 /// returned `next_batch` token.
 const PAGE_LIMIT: u32 = 50;
+
+/// Page cap for the sidebar-grouping child sweep ([`fetch_all_child_ids`]) —
+/// 10 pages = 500 children, far beyond any space whose rooms should nest in
+/// a sidebar. Truncation just means the overflow rooms stay in the flat
+/// "Rooms" section.
+const CHILD_ID_PAGE_CAP: u32 = 10;
 
 /// Fetches one page of `space_id`'s direct children. Returns the children
 /// plus the pagination token for the next page (`None` = last page).
@@ -67,6 +87,156 @@ pub async fn fetch_children(
         .collect();
 
     Ok((children, response.next_batch))
+}
+
+/// Every child room id of `space_id` (rooms and subspaces, joined or not),
+/// walking the hierarchy one level deep across pages. Powers the sidebar's
+/// space grouping, so it only needs ids — the explorer keeps using the
+/// richer per-page [`fetch_children`].
+pub async fn fetch_all_child_ids(
+    client: &Client,
+    space_id: &RoomId,
+) -> Result<Vec<String>, matrix_sdk::HttpError> {
+    let mut ids = Vec::new();
+    let mut from = None;
+    for page in 0.. {
+        if page == CHILD_ID_PAGE_CAP {
+            tracing::warn!(%space_id, "space child sweep truncated at {CHILD_ID_PAGE_CAP} pages");
+            break;
+        }
+        let (children, next_batch) = fetch_children(client, space_id, from).await?;
+        ids.extend(children.into_iter().map(|child| child.room_id));
+        match next_batch {
+            Some(token) => from = Some(token),
+            None => break,
+        }
+    }
+    Ok(ids)
+}
+
+/// Fetches `space_id`'s child ids and announces them to the UI; failures are
+/// logged and swallowed (the sidebar just keeps that space's rooms in the
+/// flat list). Shared by the startup sweep and the post-join hook.
+pub async fn emit_space_children(
+    client: &Client,
+    space_id: &RoomId,
+    event_tx: &mpsc::UnboundedSender<ClientEvent>,
+) {
+    match fetch_all_child_ids(client, space_id).await {
+        Ok(children) => {
+            let _ = event_tx.send(ClientEvent::SpaceChildrenFetched {
+                space_id: space_id.to_string(),
+                children,
+            });
+        }
+        Err(error) => {
+            tracing::warn!(%space_id, %error, "could not fetch space children for sidebar grouping");
+        }
+    }
+}
+
+/// Gets joined spaces flowing into the client store — without this the
+/// sidebar's "Spaces" section (the only way into the explorer) stays empty
+/// forever. matrix-sdk-ui's `RoomListService` hard-codes
+/// `not_room_types: ["m.space"]` into its sliding sync list, so a joined
+/// space never arrives through sync alone; room *subscriptions* bypass list
+/// filters, so this task discovers the account's joined spaces server-side
+/// once at startup and subscribes to them. From there the normal machinery
+/// takes over (store insert → room-list forwarder → sidebar).
+///
+/// Spaces joined mid-session from the explorer are covered by the `JoinRoom`
+/// handler subscribing to whatever it joins; a space joined from *another*
+/// client mid-session only shows up on the next start.
+pub fn spawn_joined_spaces_subscriber(
+    client: Client,
+    room_list_service: Arc<RoomListService>,
+    event_tx: mpsc::UnboundedSender<ClientEvent>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        // Wait for the first full room-list load: before it, "joined
+        // server-side but missing from the store" describes most of the
+        // account's ordinary rooms, not just its spaces, and the create-state
+        // probe below would fire once per room instead of once per space.
+        match room_list_service.all_rooms().await {
+            Ok(all_rooms) => {
+                let mut loading = all_rooms.loading_state();
+                loop {
+                    match loading.next().await {
+                        Some(RoomListLoadingState::Loaded { .. }) => break,
+                        Some(RoomListLoadingState::NotLoaded) => continue,
+                        // Observable dropped — the sync service is shutting
+                        // down, nothing left to do.
+                        None => return,
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "space discovery: could not watch the room list loading state; probing immediately");
+            }
+        }
+
+        let joined = match client.send(joined_rooms::v3::Request::new()).await {
+            Ok(response) => response.joined_rooms,
+            Err(error) => {
+                tracing::warn!(%error, "space discovery: /joined_rooms failed; joined spaces stay hidden until next start");
+                return;
+            }
+        };
+
+        let mut space_ids: Vec<OwnedRoomId> = Vec::new();
+        for room_id in joined {
+            match client.get_room(&room_id) {
+                // Already in the store (persisted by a previous session's
+                // subscription): re-subscribe spaces so their name/avatar
+                // keep updating — subscriptions only last a session.
+                Some(room) => {
+                    if room.state() == RoomState::Joined && room.is_space() {
+                        space_ids.push(room_id);
+                    }
+                }
+                // Joined server-side yet unknown to a fully-loaded store —
+                // almost certainly a space; confirm via its m.room.create
+                // rather than subscribing blindly.
+                None => match fetch_room_type(&client, &room_id).await {
+                    Ok(Some(RoomType::Space)) => space_ids.push(room_id),
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(%room_id, %error, "space discovery: create-state fetch failed; skipping room");
+                    }
+                },
+            }
+        }
+
+        if space_ids.is_empty() {
+            return;
+        }
+        let refs: Vec<&RoomId> = space_ids.iter().map(std::ops::Deref::deref).collect();
+        room_list_service.subscribe_to_rooms(&refs).await;
+        tracing::info!(count = refs.len(), "subscribed to joined spaces");
+
+        // With the spaces subscribed, fetch each one's child ids so the
+        // sidebar can nest joined rooms under their space instead of
+        // listing the container next to its contents.
+        for space_id in &space_ids {
+            emit_space_children(&client, space_id, &event_tx).await;
+        }
+    })
+}
+
+/// The room's `m.room.create` `type` field, fetched over REST — for rooms
+/// the local store doesn't know (sliding sync never delivers spaces).
+async fn fetch_room_type(
+    client: &Client,
+    room_id: &RoomId,
+) -> anyhow::Result<Option<RoomType>> {
+    let request = get_state_events_for_key::v3::Request::new(
+        room_id.to_owned(),
+        StateEventType::RoomCreate,
+        String::new(),
+    );
+    let response = client.send(request).await?;
+    let content = response.content.deserialize_as::<RoomCreateEventContent>()?;
+    Ok(content.room_type)
 }
 
 fn map_join_rule(rule: &matrix_sdk::ruma::space::SpaceRoomJoinRule) -> SpaceJoinRule {

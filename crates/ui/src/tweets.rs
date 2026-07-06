@@ -121,6 +121,9 @@ pub fn tweet_api_url(url: &str) -> Option<String> {
             | "fxtwitter.com"
             | "vxtwitter.com"
             | "fixupx.com"
+            // Nitter mirror: same `/user/status/{id}` shape, and the ids are
+            // canonical tweet ids, so FxTwitter resolves them directly.
+            | "xcancel.com"
     );
     if !tweet_host {
         return None;

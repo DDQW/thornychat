@@ -166,6 +166,22 @@ pub fn panel(theme: &Theme) -> container::Style {
     }
 }
 
+/// Solid bordered card for layers that float over the timeline (reaction
+/// picker, composer emoji picker) — unlike `panel` it needs a border, since
+/// it sits on top of other content instead of in the layout flow.
+pub fn floating_panel(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(palette.background.weak.color.into()),
+        border: iced::Border {
+            color: palette.background.strong.color,
+            width: 1.0,
+            radius: 10.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
 /// Hyperlink-style button: accent-colored text, no chrome, blends into a
 /// text row.
 pub fn link_button(theme: &Theme, status: button::Status) -> button::Style {

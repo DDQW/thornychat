@@ -2,6 +2,7 @@
 //! directly — only on the plain boundary types in
 //! `client_core::events`/`client_core::commands`.
 
+pub mod clipboard_paste;
 pub mod emoji_picker;
 pub mod encryption_config;
 pub mod media_cache;

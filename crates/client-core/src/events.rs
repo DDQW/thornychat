@@ -116,6 +116,11 @@ pub enum ClientEvent {
         children: Vec<SpaceChildSummary>,
         next_batch: Option<String>,
     },
+    /// The full child room-id set of a joined space (joined or not, rooms
+    /// and subspaces alike), fetched unprompted at startup and after joins —
+    /// the sidebar uses it to nest joined rooms under their parent space.
+    /// Replaces that space's previous set wholesale.
+    SpaceChildrenFetched { space_id: String, children: Vec<String> },
 
     // --- correlated command outcomes ---
     CommandFailed { request_id: RequestId, error: String },
@@ -151,7 +156,6 @@ pub struct RoomSummary {
     pub is_space: bool,
     /// Marked as a direct message via `m.direct` account data.
     pub is_dm: bool,
-    pub parent_space_id: Option<String>,
     pub last_message_preview: Option<String>,
 }
 
@@ -349,7 +353,9 @@ pub enum TimelineItemContent {
     /// harvest it into the grow-with-use collection. `body` is the sticker's
     /// alt text / shortcode, reused as the `body` when resending it.
     Sticker { url: String, body: String, width: Option<u32>, height: Option<u32> },
-    File { url: String, filename: String },
+    /// `caption` follows MSC2530: when the event carries a `filename` field,
+    /// a differing `body` is a caption, not the filename.
+    File { url: String, filename: String, caption: Option<String> },
     Redacted,
     DateDivider(String),
     /// Everything below this point is unread (the SDK's read-marker

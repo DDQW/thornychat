@@ -47,8 +47,16 @@ fn main() -> iced::Result {
         None => iced::Font::DEFAULT,
     };
 
+    // Runtime window/taskbar icon, decoded from the embedded PNG. `.ok()`:
+    // a corrupt asset falls back to iced's default icon rather than
+    // aborting launch. (The exe icon Explorer shows is separate — embedded
+    // from app.rc by build.rs.)
+    let window_icon =
+        iced::window::icon::from_file_data(include_bytes!("../../../assets/icon-256.png"), None).ok();
+
     iced::application("ThornyChat", ui::update, ui::view)
         .subscription(ui::subscription)
+        .window(iced::window::Settings { icon: window_icon, ..Default::default() })
         // Clone the pre-built theme (an Arc bump) rather than regenerating
         // the extended palette every update cycle.
         .theme(|state: &ui::App| state.built_theme.clone())

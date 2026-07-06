@@ -20,5 +20,7 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 directories = { workspace = true }
 
-# Icon/version-info embedding (embed-resource crate + build.rs) is added in
-# Phase 7 alongside MSIX packaging, not needed for the app to run.
+[build-dependencies]
+# Compiles app.rc (exe icon for Explorer/taskbar) into the binary. The
+# version-info block and MSIX packaging remain Phase 7.
+embed-resource = "3"

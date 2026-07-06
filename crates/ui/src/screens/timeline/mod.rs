@@ -94,6 +94,11 @@ pub struct State {
     pub action_error: Option<String>,
     /// Event id of the message whose reaction picker is open, if any.
     pub reacting_to: Option<String>,
+    /// Where the open reaction picker anchors: the clicked message row's top
+    /// edge in chat-area coordinates (window y minus `viewport_top`), probed
+    /// via `visible_bounds` when the picker opens. `None` while the probe is
+    /// in flight — the picker renders once it lands (one frame later).
+    pub reaction_anchor_y: Option<f32>,
     pub search_open: bool,
     pub search_query: String,
     /// Whether the room notification-mode menu (opened from the header bell)
@@ -203,6 +208,46 @@ pub struct State {
     /// Instant of the most recent user scroll input, for the descent grace
     /// period. `None` until the first scroll.
     pub last_scroll_input: Option<std::time::Instant>,
+    /// The video currently playing inline in the chat, if any — its
+    /// message's link card renders as a live player stage instead of a
+    /// thumbnail. At most one at a time (the native webview is a
+    /// singleton, see `crate::video_player`).
+    pub inline_video: Option<InlineVideo>,
+}
+
+/// A video playing inline in place of its link card. The fields after
+/// `error` are bookkeeping for the root dispatcher (`update.rs`), which
+/// owns the native webview's lifecycle and keeps it glued over the stage
+/// container by re-probing the stage's bounds after every update.
+#[derive(Debug, Clone)]
+pub struct InlineVideo {
+    /// Event id of the message whose card is playing — how the view knows
+    /// which card to swap for the player.
+    pub event_id: String,
+    pub video: crate::video_player::EmbedVideo,
+    /// OG title captured from the card at click time, for the player's
+    /// header row.
+    pub title: Option<String>,
+    /// The native webview failed to start (e.g. no WebView2 runtime) —
+    /// the stage shows this and offers the browser instead.
+    pub error: Option<String>,
+    /// Window scale factor, fetched right after the play click; webview
+    /// creation waits for it (`None` until it lands).
+    pub scale: Option<f32>,
+    /// Whether the native webview has been created.
+    pub live: bool,
+    /// The `(full, visible)` geometry last pushed to the native player
+    /// (`None` = unknown, e.g. hidden after a missed probe). Probes that
+    /// resolve to the same geometry are dropped without producing a task —
+    /// that's what lets the probe-after-every-message loop settle instead
+    /// of feeding itself forever (each sync's completion is itself a
+    /// message, which triggers one more probe, which must then go quiet).
+    pub synced: Option<(iced::Rectangle, Option<iced::Rectangle>)>,
+    /// Consecutive bounds probes that found no stage container. A couple
+    /// are normal (the placeholder's first layout is a frame away); a
+    /// sustained run means the card is gone — message redacted, filtered
+    /// out by search, or the room's timeline reset — and playback stops.
+    pub misses: u32,
 }
 
 /// A message acting as the timeline's scroll anchor: its event id, the
@@ -258,7 +303,6 @@ pub enum Message {
     MemberCursorMoved(iced::Point),
     MemberMenuDirectMessage(String),
     MemberMenuNewRoom(String),
-    MemberMenuInvite(String),
     /// Toggle tinting this member's messages in the open timeline.
     MemberMenuHighlight(String),
     SearchQueryChanged(String),
@@ -273,15 +317,24 @@ pub enum Message {
         generation: u64,
         bounds: Option<iced::Rectangle>,
     },
+    /// The reaction picker's one-shot anchor probe resolved: where the
+    /// clicked row sits on screen, so the picker opens next to it.
+    ReactionAnchorProbed { event_id: String, bounds: Option<iced::Rectangle> },
     StartReply(client_core::events::ReplyPreview),
     /// A quote block was clicked — scroll to (and highlight) the quoted
     /// message.
     JumpToEvent(String),
     ZoomImage(String),
     OpenUrl(String),
-    /// A video card's play button was clicked — open the in-app player
-    /// overlay (the root shell owns the native webview lifecycle).
-    PlayVideo { video: crate::video_player::EmbedVideo, title: Option<String> },
+    /// A video card's play button was clicked — start playing it inline in
+    /// place of the card (the root shell owns the native webview
+    /// lifecycle).
+    PlayVideo { event_id: String, video: crate::video_player::EmbedVideo, title: Option<String> },
+    /// The inline player's ✕ was clicked — stop playback, back to the card.
+    StopVideo,
+    /// "Watch on {platform}" on the inline player: open the original link
+    /// in the browser and stop the inline playback.
+    OpenVideoExternally(String),
     /// Join the room's call (or start one — same command either way).
     JoinCallClicked,
     LeaveCallClicked,
@@ -304,10 +357,11 @@ pub enum Effect {
     OpenDirectMessage(String),
     /// Create a fresh private room with this user and switch to it.
     CreateRoomWith(String),
-    /// Invite this user to the currently-open room.
-    InviteToRoom(String),
-    /// Start the embedded player overlay for this video.
-    PlayVideo { video: crate::video_player::EmbedVideo, title: Option<String> },
+    /// Start playing this video inline, in place of its card.
+    PlayVideo { event_id: String, video: crate::video_player::EmbedVideo, title: Option<String> },
+    /// Stop the inline video (✕ on the player, or after opening the link
+    /// externally) — the root dispatcher tears the native webview down.
+    StopVideo,
     /// The user scrolled — if that landed them back at the newest message,
     /// the root dispatcher marks the room read (catching up on anything that
     /// arrived while they were scrolled up).
@@ -552,13 +606,30 @@ pub fn update(
         }
         Message::ToggleReactionPicker(event_id) => {
             let opening = state.reacting_to.as_deref() != Some(event_id.as_str());
-            state.reacting_to = if opening { Some(event_id) } else { None };
-            let effect = if opening {
-                Effect::EnsureEmojiFetched(crate::emoji_picker::all_unicode_glyphs())
-            } else {
-                Effect::None
-            };
-            (iced::Task::none(), effect)
+            state.reaction_anchor_y = None;
+            if !opening {
+                state.reacting_to = None;
+                return (iced::Task::none(), Effect::None);
+            }
+            state.reacting_to = Some(event_id.clone());
+            // Anchor the picker at the clicked message: probe where its row
+            // sits right now. The picker renders when the probe lands, one
+            // frame later.
+            let probe = iced::widget::container::visible_bounds(anchor_container_id(&event_id))
+                .map(move |bounds| Message::ReactionAnchorProbed {
+                    event_id: event_id.clone(),
+                    bounds,
+                });
+            (probe, Effect::EnsureEmojiFetched(crate::emoji_picker::all_unicode_glyphs()))
+        }
+        Message::ReactionAnchorProbed { event_id, bounds } => {
+            // A stale probe (picker closed, or re-opened on another message,
+            // before this resolved) must not position the current picker.
+            if state.reacting_to.as_deref() == Some(event_id.as_str()) {
+                state.reaction_anchor_y =
+                    Some(bounds.map(|rect| rect.y - state.viewport_top).unwrap_or(0.0));
+            }
+            (iced::Task::none(), Effect::None)
         }
         Message::ReactWithEmoji { event_id, key } => {
             state.reacting_to = None;
@@ -647,10 +718,6 @@ pub fn update(
         Message::MemberMenuNewRoom(user_id) => {
             state.member_menu = None;
             (iced::Task::none(), Effect::CreateRoomWith(user_id))
-        }
-        Message::MemberMenuInvite(user_id) => {
-            state.member_menu = None;
-            (iced::Task::none(), Effect::InviteToRoom(user_id))
         }
         Message::MemberMenuHighlight(user_id) => {
             state.member_menu = None;
@@ -1054,8 +1121,13 @@ pub fn update(
             let _ = open::that(url);
             (iced::Task::none(), Effect::None)
         }
-        Message::PlayVideo { video, title } => {
-            (iced::Task::none(), Effect::PlayVideo { video, title })
+        Message::PlayVideo { event_id, video, title } => {
+            (iced::Task::none(), Effect::PlayVideo { event_id, video, title })
+        }
+        Message::StopVideo => (iced::Task::none(), Effect::StopVideo),
+        Message::OpenVideoExternally(url) => {
+            let _ = open::that(url);
+            (iced::Task::none(), Effect::StopVideo)
         }
         Message::JoinCallClicked => (iced::Task::none(), Effect::JoinCall),
         Message::LeaveCallClicked => (iced::Task::none(), Effect::LeaveCall),
@@ -1154,6 +1226,7 @@ pub fn view<'a>(
             url_previews,
             tweet_previews,
             steam_previews,
+            state.inline_video.as_ref(),
         );
         // Rows with an event id get an addressable wrapper so scroll-anchor
         // probes (`container::visible_bounds`) can measure where a specific
@@ -1192,8 +1265,7 @@ pub fn view<'a>(
     );
     let bottom = column![
         error_slot,
-        composer::view(&state.composer, emoji_usage, media, packs, stickers, typing, followers)
-            .map(Message::Composer),
+        composer::view(&state.composer, media, typing, followers).map(Message::Composer),
     ]
     .spacing(4);
 
@@ -1252,34 +1324,96 @@ pub fn view<'a>(
         Message::DismissCallError,
     ));
 
+    let chat = scrollable(list)
+        .id(timeline_scroll_id())
+        .height(Length::Fill)
+        .on_scroll(Message::Scrolled)
+        // Chat semantics: open at the newest message, stay pinned
+        // to the bottom as messages arrive, and don't jump when
+        // older history is prepended. The anchor lives *inside* the
+        // per-axis `Scrollbar` config, so it must be set on the
+        // scrollbar passed to `.direction(...)` — the previous
+        // free-standing `.anchor_bottom()` call before
+        // `.direction(...)` was silently wiped when `.direction`
+        // replaced the whole Direction struct (default anchor: top),
+        // leaving the timeline top-anchored at runtime while every
+        // piece of scroll logic assumed offset 0 = bottom. That one
+        // ordering mistake was the root cause of the entire
+        // scroll-jumping saga.
+        .direction(iced::widget::scrollable::Direction::Vertical(
+            iced::widget::scrollable::Scrollbar::new()
+                .width(6)
+                .scroller_width(6)
+                .anchor(iced::widget::scrollable::Anchor::End),
+        ))
+        .style(crate::theme::thin_scrollbar);
+
+    // Composer emoji/sticker picker: a layer floating over the bottom-right
+    // of the chat, right above the input-row buttons that toggle it — NOT a
+    // row in the composer column, which resized the scrollable and shoved
+    // the whole conversation up whenever it opened. `opaque` so clicks
+    // inside it land on the picker and not the messages underneath;
+    // everywhere else the chat stays live.
+    let composer_picker = crate::theme::slot(state.composer.show_emoji_picker.then(|| {
+        let panel = container(
+            composer::picker_panel(&state.composer, emoji_usage, media, packs, stickers)
+                .map(Message::Composer),
+        )
+        .padding(6)
+        .style(crate::theme::floating_panel);
+        container(iced::widget::opaque(panel))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::Right)
+            .align_y(iced::Bottom)
+            .padding(iced::Padding { top: 0.0, right: 14.0, bottom: 6.0, left: 0.0 })
+            .into()
+    }));
+
+    // Reaction picker: anchored to the message whose React button opened it
+    // (`reaction_anchor_y`, probed at click time) — below the row when there
+    // is room, above it otherwise, instead of the old centered modal. The
+    // outer `opaque`+`mouse_area` backdrop makes a click anywhere else on
+    // the chat dismiss it; the inner `opaque` keeps clicks on the panel
+    // itself from falling through to that backdrop.
+    let reaction_overlay = crate::theme::slot(
+        state.reacting_to.as_deref().zip(state.reaction_anchor_y).map(|(event_id, anchor_y)| {
+            let panel = container(reaction_picker(event_id, emoji_usage, media, packs))
+                .max_width(430)
+                .style(crate::theme::floating_panel);
+            // The picker's fixed 320px scroll box + 2×8 padding + border.
+            let panel_h = 338.0_f32;
+            // 26px clears the hover action bar sitting at the row's top edge.
+            let below = anchor_y + 26.0;
+            let top = if below + panel_h <= state.last_bounds_height {
+                below
+            } else {
+                (anchor_y - 6.0 - panel_h)
+                    .clamp(0.0, (state.last_bounds_height - panel_h).max(0.0))
+            };
+            let close = Message::ToggleReactionPicker(event_id.to_string());
+            let positioned = container(iced::widget::opaque(panel))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::Right)
+                .padding(iced::Padding { top, right: 14.0, bottom: 0.0, left: 0.0 });
+            iced::widget::opaque(iced::widget::mouse_area(positioned).on_press(close))
+        }),
+    );
+
+    // Stacked so the pickers float over the messages as layers; both are
+    // always-present slots, keeping the tree's shape fixed whether they're
+    // open or not.
+    let chat_area = iced::widget::stack![chat, composer_picker, reaction_overlay]
+        .width(Length::Fill)
+        .height(Length::Fill);
+
     let main: Element<'a, Message> = column![
         header(state, room, notification_mode, calls, open_room_id),
         call_banner,
         notify_slot,
         search_slot,
-        scrollable(list)
-            .id(timeline_scroll_id())
-            .height(Length::Fill)
-            .on_scroll(Message::Scrolled)
-            // Chat semantics: open at the newest message, stay pinned
-            // to the bottom as messages arrive, and don't jump when
-            // older history is prepended. The anchor lives *inside* the
-            // per-axis `Scrollbar` config, so it must be set on the
-            // scrollbar passed to `.direction(...)` — the previous
-            // free-standing `.anchor_bottom()` call before
-            // `.direction(...)` was silently wiped when `.direction`
-            // replaced the whole Direction struct (default anchor: top),
-            // leaving the timeline top-anchored at runtime while every
-            // piece of scroll logic assumed offset 0 = bottom. That one
-            // ordering mistake was the root cause of the entire
-            // scroll-jumping saga.
-            .direction(iced::widget::scrollable::Direction::Vertical(
-                iced::widget::scrollable::Scrollbar::new()
-                    .width(6)
-                    .scroller_width(6)
-                    .anchor(iced::widget::scrollable::Anchor::End),
-            ))
-            .style(crate::theme::thin_scrollbar),
+        chat_area,
         bottom,
     ]
     .height(Length::Fill)
@@ -1297,35 +1431,6 @@ pub fn view<'a>(
         ));
     }
 
-    // The reaction picker floats as a centered overlay: expanding it
-    // inline under a message near the viewport's bottom edge got the
-    // panel clipped mid-row. Always a stack so the tree keeps its shape.
-    let picker_overlay = state.reacting_to.as_deref().map(|event_id| {
-        let panel = container(reaction_picker(
-            event_id,
-            emoji_usage,
-            media,
-            packs,
-        ))
-        .max_width(430)
-        .style(|theme: &iced::Theme| {
-            let palette = theme.extended_palette();
-            iced::widget::container::Style {
-                background: Some(palette.background.weak.color.into()),
-                border: iced::Border {
-                    color: palette.background.strong.color,
-                    width: 1.0,
-                    radius: 10.into(),
-                },
-                ..iced::widget::container::Style::default()
-            }
-        });
-        let close = Message::ToggleReactionPicker(event_id.to_string());
-        iced::widget::opaque(
-            iced::widget::mouse_area(iced::widget::center(iced::widget::opaque(panel)))
-                .on_press(close),
-        )
-    });
     // The member actions menu is a flyout pinned just to the LEFT of the
     // roster, at the height of the right-clicked row (`member_menu_anchor_y`,
     // frozen at click time). Positioned with a top spacer + right-alignment
@@ -1334,8 +1439,8 @@ pub fn view<'a>(
     // to the timeline and roster below.
     let member_flyout = state.member_menu.as_deref().filter(|_| members_shown).map(|user_id| {
         // Keep the menu from spilling off the bottom: clamp its top so a
-        // ~4-row menu still fits in the visible height.
-        let max_y = (state.last_bounds_height - 140.0).max(0.0);
+        // ~3-row menu still fits in the visible height.
+        let max_y = (state.last_bounds_height - 110.0).max(0.0);
         let anchor_y = state.member_menu_anchor_y.clamp(0.0, max_y);
         let menu = member_menu_actions(user_id, state.highlighted_member.as_deref());
         let positioned = column![iced::widget::Space::with_height(Length::Fixed(anchor_y)), menu];
@@ -1347,10 +1452,7 @@ pub fn view<'a>(
             // right edge lands just left of the list.
             .padding(iced::Padding { top: 0.0, right: 206.0, bottom: 0.0, left: 0.0 })
     });
-    iced::widget::stack![layout.height(Length::Fill)]
-        .push_maybe(picker_overlay)
-        .push_maybe(member_flyout)
-        .into()
+    iced::widget::stack![layout.height(Length::Fill)].push_maybe(member_flyout).into()
 }
 
 /// The member actions menu, rendered as a floating flyout to the left of the
@@ -1374,7 +1476,6 @@ fn member_menu_actions<'a>(user_id: &str, highlighted_member: Option<&str>) -> E
     let menu = column![
         action("Direct message", Message::MemberMenuDirectMessage(owned.clone())),
         action("New room with them", Message::MemberMenuNewRoom(owned.clone())),
-        action("Invite to this room", Message::MemberMenuInvite(owned.clone())),
         action(highlight_label, Message::MemberMenuHighlight(owned)),
     ]
     .spacing(2);
@@ -1620,17 +1721,13 @@ fn header<'a>(
     // shift the positional widget state of everything after it (the open
     // notification dropdown would snap shut when someone starts a call).
     bar = bar.push(crate::theme::slot((!calls.has_active_call(open_room_id)).then(|| {
-        tooltip(
-            button(text(crate::theme::icon::CALL).font(crate::theme::ICON_FONT).size(12))
-                .on_press_maybe(
-                    (!calls.pending_for(open_room_id)).then_some(Message::JoinCallClicked),
-                )
-                .style(crate::theme::ghost_button)
-                .padding([4, 8]),
-            container(text("Start call").size(12)).padding(6).style(crate::theme::panel),
-            tooltip::Position::Bottom,
-        )
-        .into()
+        button(text(crate::theme::icon::CALL).font(crate::theme::ICON_FONT).size(12))
+            .on_press_maybe(
+                (!calls.pending_for(open_room_id)).then_some(Message::JoinCallClicked),
+            )
+            .style(crate::theme::ghost_button)
+            .padding([4, 8])
+            .into()
     })));
     // Notification mode: a bell that reflects mute at a glance and opens the
     // mode menu (rendered as a slot below the header) on click.
@@ -1762,6 +1859,7 @@ fn render_item<'a>(
     url_previews: &'a HashMap<String, Option<UrlPreview>>,
     tweet_previews: &'a HashMap<String, Option<crate::tweets::TweetData>>,
     steam_previews: &'a HashMap<String, Option<crate::steam::SteamAppData>>,
+    inline_video: Option<&'a InlineVideo>,
 ) -> Element<'a, Message> {
     if let TimelineItemContent::DateDivider(date) = &item.content {
         // The SDK places date dividers at *local* day boundaries, but the
@@ -1834,7 +1932,13 @@ fn render_item<'a>(
                     .into(),
             }
         }
-        TimelineItemContent::File { filename, .. } => text(format!("[file: {filename}]")).size(15).into(),
+        TimelineItemContent::File { filename, caption, .. } => {
+            let name = text(format!("[file: {filename}]")).size(15);
+            match caption {
+                Some(c) => column![name, text(c.clone()).size(12)].spacing(2).into(),
+                None => name.into(),
+            }
+        }
         // Rendered through the normal path (not an early return) so the
         // avatar gutter, header, and sender grouping stay correct — the
         // grouping loop counts a redacted item as this sender's, so a bare
@@ -1958,7 +2062,15 @@ fn render_item<'a>(
         if let Some(url) = first_url {
             if let Some(video) = crate::video_player::video_in(url) {
                 let preview = url_previews.get(url).and_then(|p| p.as_ref());
-                block = block.push(embed_video_card(video, preview, media));
+                let playing = inline_video
+                    .filter(|iv| Some(iv.event_id.as_str()) == item.event_id.as_deref());
+                block = block.push(embed_video_card(
+                    video,
+                    preview,
+                    media,
+                    item.event_id.as_deref(),
+                    playing,
+                ));
             } else if let Some(Some(tweet)) = tweet_previews.get(url) {
                 block = block.push(real_tweet_card(tweet, url, media));
             } else if let Some(Some(app_data)) = steam_previews.get(url) {
@@ -2250,14 +2362,24 @@ fn preview_card<'a>(
 
 /// Video-platform link card: OG title/thumbnail (from the homeserver's
 /// preview proxy, once resolved) under a centered play badge, with a
-/// platform-tinted accent strip. Clicking starts the in-app embedded player
-/// overlay — the link never opens a browser. Renders even before/without OG
-/// data since the video id alone is enough to play.
+/// platform-tinted accent strip. Clicking starts the player *inline*: the
+/// card re-renders as [`inline_player_card`] and the native webview is
+/// glued over its stage — the link never opens a browser. Renders even
+/// before/without OG data since the video id alone is enough to play.
 fn embed_video_card<'a>(
     video: crate::video_player::EmbedVideo,
     preview: Option<&'a UrlPreview>,
     media: &'a crate::media_cache::State,
+    event_id: Option<&str>,
+    playing: Option<&'a InlineVideo>,
 ) -> Element<'a, Message> {
+    // This message's video is the one playing — swap the card for the
+    // live player. (The video comparison guards the edge where the
+    // message was edited to a different link mid-playback.)
+    if let Some(inline) = playing.filter(|iv| iv.video == video) {
+        return inline_player_card(inline);
+    }
+
     let title = preview.and_then(|p| p.title.clone());
     let platform = video.platform;
 
@@ -2297,6 +2419,14 @@ fn embed_video_card<'a>(
     let visual = iced::widget::stack![thumb, iced::widget::center(play_badge)];
     let card = column![details, visual].spacing(6);
 
+    // Inline playback needs the event id to know which card is the player;
+    // a message without one (a local echo still in flight) can't play yet.
+    let play = event_id.map(|id| Message::PlayVideo {
+        event_id: id.to_string(),
+        video,
+        title,
+    });
+
     button(
         container(container(card).padding(8).style(crate::theme::panel))
             .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 3.0 })
@@ -2308,9 +2438,78 @@ fn embed_video_card<'a>(
                 ..iced::widget::container::Style::default()
             }),
     )
-    .on_press(Message::PlayVideo { video, title })
+    .on_press_maybe(play)
     .style(crate::theme::ghost_button)
     .padding(0)
+    .into()
+}
+
+/// The playing state of a video card: a header row (title, "Watch on
+/// {platform}", ✕) over the stage the native webview covers. The stage
+/// container carries `video_player::stage_id`, which the root dispatcher
+/// probes every update to keep the webview glued through scrolls — iced
+/// only ever draws the black backing (visible for the moment WebView2
+/// takes to start) or the error fallback if it couldn't.
+fn inline_player_card(inline: &InlineVideo) -> Element<'_, Message> {
+    let platform = inline.video.platform;
+    let label = platform.label();
+
+    let header = row![
+        text(inline.title.as_deref().unwrap_or(label))
+            .size(12)
+            .font(crate::theme::SEMIBOLD_FONT)
+            .width(Length::Fill),
+        button(text(format!("Watch on {label}")).size(11))
+            .on_press(Message::OpenVideoExternally(inline.video.watch_url()))
+            .style(crate::theme::ghost_button)
+            .padding([2, 6]),
+        button(text(crate::theme::icon::CLOSE).font(crate::theme::ICON_FONT).size(11))
+            .on_press(Message::StopVideo)
+            .style(crate::theme::ghost_button)
+            .padding([2, 6]),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
+
+    let stage_content: Element<'_, Message> = if let Some(reason) = &inline.error {
+        column![
+            text("The embedded player couldn't start.").size(13).color(iced::Color::WHITE),
+            text(reason.clone()).size(11).color(iced::Color::from_rgb8(0xB0, 0xB0, 0xB0)),
+            button(text("Watch in browser").size(12))
+                .on_press(Message::OpenVideoExternally(inline.video.watch_url()))
+                .style(crate::theme::overlay_button)
+                .padding([4, 8]),
+        ]
+        .spacing(8)
+        .align_x(iced::Center)
+        .into()
+    } else {
+        text("Starting player...")
+            .size(12)
+            .color(iced::Color::from_rgb8(0xB0, 0xB0, 0xB0))
+            .into()
+    };
+
+    let stage = container(stage_content)
+        .id(crate::video_player::stage_id())
+        .center_x(Length::Fixed(crate::video_player::STAGE_WIDTH))
+        .center_y(Length::Fixed(crate::video_player::STAGE_HEIGHT))
+        .style(|_theme: &iced::Theme| iced::widget::container::Style {
+            background: Some(iced::Color::BLACK.into()),
+            border: iced::border::rounded(4),
+            ..iced::widget::container::Style::default()
+        });
+
+    container(
+        container(column![header, stage].spacing(6)).padding(8).style(crate::theme::panel),
+    )
+    .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 3.0 })
+    .max_width(480)
+    .style(move |_theme: &iced::Theme| iced::widget::container::Style {
+        background: Some(platform.accent().into()),
+        border: iced::border::rounded(3),
+        ..iced::widget::container::Style::default()
+    })
     .into()
 }
 

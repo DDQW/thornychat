@@ -20,7 +20,7 @@ use matrix_sdk::room::edit::EditedContent;
 use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
 use matrix_sdk::ruma::events::key::verification::request::ToDeviceKeyVerificationRequestEventContent;
 use matrix_sdk::ruma::events::room::message::{
-    MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
+    FormattedBody, MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
     RoomMessageEventContentWithoutRelation,
 };
 use matrix_sdk::ruma::events::room::ImageInfo;
@@ -98,7 +98,14 @@ async fn run(
     event_tx: mpsc::UnboundedSender<ClientEvent>,
     media_cache_dir: PathBuf,
 ) -> anyhow::Result<()> {
-    let sync_service = SyncService::builder(client.clone()).build().await?;
+    // `with_offline_mode`: sync errors park the service in an auto-retrying
+    // Offline state instead of the terminal Error state. Without it, any
+    // sustained run of failed requests (a saturated uplink during a large
+    // upload, Wi-Fi blip, server restart) killed sync permanently — the only
+    // `.start()` call is the one below, so nothing ever restarted the loops
+    // and the app stopped receiving messages until relaunch.
+    let sync_service =
+        SyncService::builder(client.clone()).with_offline_mode().build().await?;
     let mut state_stream = sync_service.state();
     let _ = event_tx.send(ClientEvent::SyncStateChanged(SyncState::Connecting));
     sync_service.start().await;
@@ -108,6 +115,15 @@ async fn run(
     let _room_list_handle = room_list::spawn_forwarder(client.clone(), event_tx.clone());
     let _notification_watcher = crate::push::spawn_watcher(client.clone(), event_tx.clone());
     let call_manager = crate::calls::CallManager::spawn(client.clone(), event_tx.clone());
+    // One-shot rather than lifetime, but detached for the same reason:
+    // sliding sync never delivers `m.space` rooms (list filter), so joined
+    // spaces have to be discovered over REST and subscribed to explicitly or
+    // the sidebar's Spaces section stays empty.
+    let _space_discovery = crate::rooms::spaces::spawn_joined_spaces_subscriber(
+        client.clone(),
+        sync_service.room_list_service(),
+        event_tx.clone(),
+    );
 
     // One-time startup checks. Blocking the command loop briefly here is
     // fine — there's nothing meaningful for the UI to command yet (no room
@@ -495,7 +511,16 @@ async fn handle_command(
             });
         }
 
-        ClientCommand::SendAttachment { room_id, filename, bytes, mime, request_id } => {
+        ClientCommand::SendAttachment {
+            room_id,
+            filename,
+            bytes,
+            mime,
+            caption,
+            mentioned_user_ids,
+            reply_to_event_id,
+            request_id,
+        } => {
             let Some(handles) = worker_state.open_rooms.get(&room_id) else {
                 fail(event_tx, request_id, "room is not open");
                 return;
@@ -503,8 +528,36 @@ async fn handle_command(
 
             let mime_type: mime::Mime =
                 mime.parse().unwrap_or(mime::APPLICATION_OCTET_STREAM);
-            let source = AttachmentSource::Data { bytes, filename };
-            let config = AttachmentConfig::new();
+            // Markdown in the caption renders the way a text message's
+            // would (`formatted_caption` carries the HTML; clients without
+            // MSC2530 fall back to the plain `caption` body).
+            let formatted = caption.as_deref().and_then(FormattedBody::markdown);
+            let mut config =
+                AttachmentConfig::new().caption(caption).formatted_caption(formatted);
+            if !mentioned_user_ids.is_empty() {
+                match parse_user_ids(&mentioned_user_ids) {
+                    Ok(ids) => {
+                        config = config.mentions(Some(Mentions::with_user_ids(ids)));
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "invalid mentioned user id, sending attachment without mentions"
+                        );
+                    }
+                }
+            }
+            if let Some(reply_to) = reply_to_event_id {
+                let Ok(reply_event_id) = EventId::parse(&reply_to) else {
+                    fail(event_tx, request_id, "invalid reply event id");
+                    return;
+                };
+                config = config.reply(Some(matrix_sdk::room::reply::Reply {
+                    event_id: reply_event_id,
+                    // Follow the quoted message's threading, like SendMessage.
+                    enforce_thread: matrix_sdk::room::reply::EnforceThread::MaybeThreaded,
+                }));
+            }
 
             // send_attachment performs the full media upload before returning
             // (no send queue for attachments in SDK 0.13) — awaiting it inline
@@ -512,7 +565,31 @@ async fn handle_command(
             // whole upload on a slow uplink.
             let timeline = handles.timeline.clone();
             let event_tx = event_tx.clone();
+            let client = client.clone();
             tokio::spawn(async move {
+                // Pre-flight against the server's advertised upload cap
+                // (cached client-side after the first fetch). Without this,
+                // an over-limit file grinds through a doomed multi-minute
+                // upload that monopolizes the HTTP connection — starving
+                // sliding sync and every other request — before the server
+                // rejects it anyway. Fail-open: if the cap can't be fetched,
+                // let the upload attempt proceed.
+                if let Ok(limit) = client.load_or_fetch_max_upload_size().await {
+                    if bytes.len() as u64 > u64::from(limit) {
+                        let file_mb = bytes.len() as f64 / (1024.0 * 1024.0);
+                        let cap_mb = u64::from(limit) as f64 / (1024.0 * 1024.0);
+                        fail(
+                            &event_tx,
+                            request_id,
+                            &format!(
+                                "{filename} is {file_mb:.1} MB — over the server's \
+                                 {cap_mb:.1} MB upload limit"
+                            ),
+                        );
+                        return;
+                    }
+                }
+                let source = AttachmentSource::Data { bytes, filename };
                 match timeline.send_attachment(source, mime_type, config).await {
                     Ok(()) => succeed(&event_tx, request_id),
                     Err(error) => fail(&event_tx, request_id, &error.to_string()),
@@ -991,9 +1068,30 @@ async fn handle_command(
                 via.iter().filter_map(|s| ServerName::parse(s).ok()).collect();
             let client = client.clone();
             let event_tx = event_tx.clone();
+            let room_list_service = sync_service.room_list_service();
             tokio::spawn(async move {
                 match client.join_room_by_id_or_alias(&alias, &via).await {
-                    Ok(_) => succeed(&event_tx, request_id),
+                    Ok(room) => {
+                        // Subscribe unconditionally: if what was joined is a
+                        // space, sliding sync will never deliver it (list
+                        // filter) — and its type isn't knowable locally yet
+                        // (the join response is just a room id; the create
+                        // event only arrives via the subscription itself).
+                        // For plain rooms this merely fronts the subscription
+                        // that opening them would establish anyway.
+                        room_list_service.subscribe_to_rooms(&[room.room_id()]).await;
+                        succeed(&event_tx, request_id);
+                        // Same uncertainty about the type: sweep children so
+                        // a just-joined space groups its rooms in the
+                        // sidebar right away. On a plain room the hierarchy
+                        // returns only the room itself, i.e. no children.
+                        crate::rooms::spaces::emit_space_children(
+                            &client,
+                            room.room_id(),
+                            &event_tx,
+                        )
+                        .await;
+                    }
                     Err(error) => fail(&event_tx, request_id, &error.to_string()),
                 }
             });
@@ -1014,6 +1112,9 @@ fn succeed(event_tx: &mpsc::UnboundedSender<ClientEvent>, request_id: RequestId)
 }
 
 fn fail(event_tx: &mpsc::UnboundedSender<ClientEvent>, request_id: RequestId, error: &str) {
+    // The UI surfaces `error` in whichever screen issued the command; log it
+    // too so failures are diagnosable from the file after the fact.
+    tracing::warn!(%request_id, error, "client command failed");
     let _ = event_tx.send(ClientEvent::CommandFailed { request_id, error: error.to_string() });
 }
 

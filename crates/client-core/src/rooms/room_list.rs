@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use matrix_sdk::ruma::OwnedRoomId;
 use matrix_sdk::{Client, Room, RoomMemberships};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
@@ -31,8 +31,6 @@ pub fn to_summary(room: &Room, dm_rooms: &HashSet<OwnedRoomId>) -> RoomSummary {
         is_encrypted: room.encryption_state().is_encrypted(),
         is_space: room.is_space(),
         is_dm,
-        // Populated once space hierarchy tracking lands.
-        parent_space_id: None,
         last_message_preview: None,
     }
 }
@@ -125,13 +123,23 @@ pub async fn fetch_members(room: &Room) -> Vec<RoomMember> {
 }
 
 /// Spawns a task that emits the room list on startup and again every time
-/// the client's room vector changes; detaches on send failure (i.e. once
-/// the UI side of the channel is gone).
+/// the client's room vector changes or any room's info notably updates;
+/// detaches on send failure (i.e. once the UI side of the channel is gone).
 pub fn spawn_forwarder(
     client: Client,
     event_tx: mpsc::UnboundedSender<ClientEvent>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        // Second wakeup source, subscribed before the initial snapshot so
+        // nothing lands between the two unobserved: `rooms_stream` diffs only
+        // fire when a room is created or forgotten, while a room's *info*
+        // (display name, unread counts, the m.room.create that makes
+        // `is_space` true) mutates in place afterwards with no diff. Most
+        // visibly, a space delivered via sliding sync room subscription is
+        // inserted bare and gets its state applied moments later — rebuilding
+        // only on diffs left it rendered as a nameless regular room forever.
+        let mut info_updates = client.room_info_notable_update_receiver();
+
         // Joined rooms only: `Client::rooms()` also returns left/banned and
         // invited rooms, which would sit in the sidebar looking like normal
         // rooms (left rooms persist in the sqlite store across restarts).
@@ -148,13 +156,42 @@ pub fn spawn_forwarder(
             return;
         }
 
-        while diffs.next().await.is_some() {
-            // The diffs are used purely as wakeups; coalesce an already-queued
-            // burst (startup discovers rooms one insert at a time) so N queued
-            // diffs cost one rebuild instead of N full O(rooms) rebuilds.
+        loop {
+            // Both streams are pure wakeups — the rebuild below re-reads
+            // everything from the client regardless of what was received.
+            tokio::select! {
+                diff = diffs.next() => {
+                    if diff.is_none() {
+                        break;
+                    }
+                }
+                update = info_updates.recv() => {
+                    match update {
+                        // Lagged only means wakeups were missed, and the
+                        // rebuild reads current state anyway.
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        // The sender lives inside the client — closed means
+                        // shutdown, same as the diff stream ending.
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+
+            // Debounce, then drain both sources: sync responses touch many
+            // rooms at once and receipts arrive in bursts, so N queued
+            // wakeups cost one O(rooms) rebuild instead of N.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             while let Ok(Some(_)) =
                 tokio::time::timeout(std::time::Duration::ZERO, diffs.next()).await
             {}
+            loop {
+                match info_updates.try_recv() {
+                    Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                    // Empty (or Closed, which the next recv() handles).
+                    Err(_) => break,
+                }
+            }
+
             // Re-read `m.direct` each rebuild so a DM created/marked after
             // startup starts classifying correctly.
             let dm_rooms = direct_room_ids(&client).await;

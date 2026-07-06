@@ -36,6 +36,14 @@ pub enum ClientCommand {
         filename: String,
         bytes: Vec<u8>,
         mime: String,
+        /// Optional caption (MSC2530): rides in the media event's `body`,
+        /// with the real name in `filename`. Markdown is rendered the same
+        /// way a text message's would be.
+        caption: Option<String>,
+        /// Users the caption mentions (attached as `m.mentions`).
+        mentioned_user_ids: Vec<String>,
+        /// When set, sends the attachment as a rich reply quoting this event.
+        reply_to_event_id: Option<String>,
         request_id: RequestId,
     },
     /// Post an `m.sticker` event pointing at an already-hosted image. Stickers

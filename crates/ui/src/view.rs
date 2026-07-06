@@ -25,9 +25,6 @@ pub fn view(app: &App) -> Element<'_, Message> {
             if let Some(url) = &app.zoomed_image {
                 layers = layers.push(lightbox(app, url));
             }
-            if let Some(player) = &app.video_player {
-                layers = layers.push(video_overlay(player));
-            }
             if app.show_settings {
                 layers = layers.push(settings_overlay(app));
             }
@@ -46,14 +43,25 @@ pub fn view(app: &App) -> Element<'_, Message> {
 }
 
 /// Fullscreen image viewer: dimmed backdrop, the image contain-fit in the
-/// middle, click anywhere to dismiss.
+/// middle. The viewer is sized `Shrink`, not `Fill` — its hit-box then
+/// matches the rendered picture exactly (same on-screen size either way,
+/// `Shrink` just stops it from also claiming the letterboxed margin around
+/// a picture whose aspect ratio doesn't match the window), so a click
+/// anywhere in that translucent margin — like the ✕ or Escape — dismisses,
+/// while a click on the picture itself is left for the viewer's own
+/// zoom/pan handling.
 fn lightbox<'a>(app: &'a App, url: &'a str) -> Element<'a, Message> {
     let visual: Element<'a, Message> = if let Some(frames) = app.media.mxc_gifs.get(url) {
         iced_gif::gif(frames).width(Length::Fill).height(Length::Fill).into()
     } else if let Some(handle) = app.media.images.get(url) {
-        iced::widget::image(handle.clone())
-            .width(Length::Fill)
-            .height(Length::Fill)
+        iced::widget::image::Viewer::new(handle.clone())
+            .width(Length::Shrink)
+            .height(Length::Shrink)
+            // 1.0 = contain-fit; wheel-down stops there instead of
+            // shrinking the image into a thumbnail.
+            .min_scale(1.0)
+            .max_scale(16.0)
+            .scale_step(0.25)
             .into()
     } else if let Some(handle) = app.media.mxc_svgs.get(url) {
         iced::widget::svg(handle.clone()).width(Length::Fill).height(Length::Fill).into()
@@ -61,108 +69,39 @@ fn lightbox<'a>(app: &'a App, url: &'a str) -> Element<'a, Message> {
         text("Loading image...").size(14).into()
     };
 
-    opaque(
-        mouse_area(
-            center(container(visual).padding(40)).style(|_theme: &iced::Theme| {
-                iced::widget::container::Style {
-                    background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.82).into()),
-                    ..iced::widget::container::Style::default()
-                }
-            }),
-        )
-        .on_press(Message::CloseZoom)
-        .interaction(iced::mouse::Interaction::Pointer),
+    let backdrop = mouse_area(
+        center(container(visual).padding(40)).style(|_theme: &iced::Theme| {
+            iced::widget::container::Style {
+                background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.82).into()),
+                ..iced::widget::container::Style::default()
+            }
+        }),
     )
-}
+    .on_press(Message::CloseZoom)
+    .interaction(iced::mouse::Interaction::Pointer);
 
-/// In-app video player overlay: dimmed backdrop, header row (title,
-/// "Watch on {platform}", close), and the video stage. The video itself is
-/// a native WebView2 child window that composites *over* the iced surface
-/// at exactly `video_player::video_rect` — iced draws everything around it,
-/// and the black stage only peeks through while the player is loading (or
-/// hosts the error fallback if the webview couldn't start).
-fn video_overlay(player: &crate::state::VideoPlayer) -> Element<'_, Message> {
-    let backdrop = |_theme: &iced::Theme| iced::widget::container::Style {
-        background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.82).into()),
-        ..iced::widget::container::Style::default()
-    };
-
-    let Some(window) = player.window else {
-        // Geometry unknown until the open task reports back (a frame or
-        // two) — just dim the screen.
-        return opaque(
-            mouse_area(center(text("Starting player...").size(14)).style(backdrop))
-                .on_press(Message::CloseVideoPlayer),
-        );
-    };
-
-    let rect = crate::video_player::video_rect(window);
-    let platform_label = player.video.platform.label();
-
-    let header = row![
-        text(player.title.as_deref().unwrap_or(platform_label))
-            .size(14)
-            .font(crate::theme::SEMIBOLD_FONT)
-            .color(iced::Color::WHITE)
-            .width(Length::Fill),
-        button(text(format!("Watch on {platform_label}")).size(12))
-            .on_press(Message::OpenVideoInBrowser)
+    // Floating ✕, top-right. Its container spans the whole layer but only
+    // the button consumes clicks — everywhere else falls through to the
+    // backdrop's close-on-click (same stacking trick as the settings grip).
+    let close = container(
+        button(text(crate::theme::icon::CLOSE).font(crate::theme::ICON_FONT).size(14))
+            .on_press(Message::CloseZoom)
             .style(crate::theme::overlay_button)
-            .padding([4, 8]),
-        button(text(crate::theme::icon::CLOSE).font(crate::theme::ICON_FONT).size(12))
-            .on_press(Message::CloseVideoPlayer)
-            .style(crate::theme::overlay_button)
-            .padding([4, 8]),
-    ]
-    .spacing(8)
-    .align_y(iced::Center)
-    .width(Length::Fixed(rect.width))
-    .height(Length::Fixed(crate::video_player::HEADER_HEIGHT));
-
-    let stage = |_theme: &iced::Theme| iced::widget::container::Style {
-        background: Some(iced::Color::BLACK.into()),
-        ..iced::widget::container::Style::default()
-    };
-    let surface: Element<'_, Message> = if let Some(reason) = &player.error {
-        container(
-            column![
-                text("The embedded player couldn't start.")
-                    .size(14)
-                    .color(iced::Color::WHITE),
-                text(reason.clone()).size(12).color(iced::Color::from_rgb8(0xB0, 0xB0, 0xB0)),
-                button(text("Watch in browser").size(13))
-                    .on_press(Message::OpenVideoInBrowser)
-                    .style(crate::theme::overlay_button)
-                    .padding([6, 10]),
-            ]
-            .spacing(10)
-            .align_x(iced::Center),
-        )
-        .center_x(Length::Fixed(rect.width))
-        .center_y(Length::Fixed(rect.height))
-        .style(stage)
-        .into()
-    } else {
-        container(iced::widget::Space::new(rect.width, rect.height)).style(stage).into()
-    };
-
-    let block = column![header, surface].spacing(crate::video_player::HEADER_GAP);
-
-    opaque(
-        mouse_area(center(block).style(backdrop))
-            .on_press(Message::CloseVideoPlayer)
-            .interaction(iced::mouse::Interaction::Pointer),
+            .padding([6, 10]),
     )
+    .width(Length::Fill)
+    .align_x(iced::Right)
+    .padding(12);
+
+    opaque(stack![backdrop, close])
 }
 
 /// Settings dialog: dimmed backdrop, centered panel with the tab strip and
 /// the active tab's content, resizable via a grip in its bottom-right
-/// corner. Same nesting as `lightbox`/`video_overlay` — the panel's own
-/// buttons/inputs sit inside the backdrop's `mouse_area`, and iced only
-/// bubbles a click through to the backdrop's `on_press` if nothing inside
-/// consumed it first (already relied on above for the video overlay's
-/// header buttons); the grip's own `mouse_area` consumes its press the same
-/// way.
+/// corner. Same nesting as `lightbox` — the panel's own buttons/inputs sit
+/// inside the backdrop's `mouse_area`, and iced only bubbles a click
+/// through to the backdrop's `on_press` if nothing inside consumed it
+/// first; the grip's own `mouse_area` consumes its press the same way.
 fn settings_overlay(app: &App) -> Element<'_, Message> {
     let backdrop = |_theme: &iced::Theme| iced::widget::container::Style {
         background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.5).into()),

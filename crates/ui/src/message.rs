@@ -84,25 +84,42 @@ pub enum Message {
     /// `Arc` because `iced_gif::Frames` isn't `Clone` but `Message` must be.
     GifDecoded(String, Result<std::sync::Arc<iced_gif::Frames>, iced::widget::image::Handle>),
 
-    /// A file was picked from the (non-modal) attachment dialog. Carries
-    /// the room that was open when the dialog was launched — the user can
-    /// switch rooms while it sits open, and the file must not be sent to
-    /// whichever room happens to be open when the dialog resolves.
-    AttachmentPickedFor { room_id: String, filename: String, bytes: Vec<u8> },
+    /// Ctrl+V was pressed somewhere in the main shell: probe the clipboard
+    /// for files/images to stage as attachments. Plain text is left alone —
+    /// the focused text_input pastes it natively (see `clipboard_paste`).
+    PasteClipboard,
+    /// A file was drag-and-dropped onto the window: stage it as an
+    /// attachment chip, same as a pasted file. The OS delivers a multi-file
+    /// drop as one of these per file.
+    FileDropped(std::path::PathBuf),
+    /// Attachment bytes arrived for staging, from the (non-modal) picker
+    /// dialog or a clipboard paste. Carries the room that was open when the
+    /// read started — the user can switch rooms while a dialog sits open,
+    /// and the files must not stage into whichever room happens to be open
+    /// when it resolves. `failed` counts entries that couldn't be read
+    /// (folders, files gone by read time).
+    AttachmentsReadFor { room_id: String, files: Vec<(String, Vec<u8>)>, failed: usize },
 
     /// Dismiss the fullscreen image lightbox.
     CloseZoom,
+    /// Escape pressed anywhere — dismisses the image lightbox (which eats
+    /// clicks over the image for pan/zoom, so it needs a keyboard exit).
+    EscapePressed,
 
-    // --- embedded YouTube player overlay (native webview, see `video_player`) ---
+    // --- inline video player (native webview glued over the playing
+    // card's stage — see `video_player`) ---
+    /// Window scale factor, fetched when playback starts; webview creation
+    /// waits for it (stage rects are logical, the native window physical).
+    InlineVideoScale(f32),
+    /// A stage-geometry probe resolved: `(full rect, visible slice)`, or
+    /// `None` when no stage container is in the widget tree (see
+    /// `video_player::stage_bounds_probe`).
+    InlineVideoBounds(Option<(iced::Rectangle, Option<iced::Rectangle>)>),
     /// The native webview finished starting (or failed) on the event-loop
-    /// thread; carries the window geometry captured at open time.
-    VideoPlayerOpened { window: iced::Size, scale: f32, result: Result<(), String> },
-    /// Window resized — keep the native video surface glued to the overlay.
+    /// thread.
+    InlineVideoOpened(Result<(), String>),
+    /// Window resized — the timeline's scroll anchor geometry is stale.
     WindowResized(iced::Size),
-    /// Dismiss the player overlay (backdrop click or ✕).
-    CloseVideoPlayer,
-    /// "Watch on YouTube": open the watch page externally and dismiss.
-    OpenVideoInBrowser,
 
     // --- room leave/forget confirmation (sidebar right-click) ---
     /// Leave the room, then dismiss the prompt.

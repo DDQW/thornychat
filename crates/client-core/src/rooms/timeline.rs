@@ -291,7 +291,10 @@ fn summarize_content(content: &SdkTimelineItemContent) -> String {
                 flat
             }
         }
-        TimelineItemContent::Image { .. } => "[image]".to_string(),
+        TimelineItemContent::Image { caption: Some(caption), .. } => {
+            format!("[image: {caption}]")
+        }
+        TimelineItemContent::Image { caption: None, .. } => "[image]".to_string(),
         TimelineItemContent::Sticker { .. } => "[sticker]".to_string(),
         TimelineItemContent::File { filename, .. } => format!("[file: {filename}]"),
         TimelineItemContent::Redacted => "(message removed)".to_string(),
@@ -395,7 +398,14 @@ fn convert_message(message: &matrix_sdk_ui::timeline::Message) -> TimelineItemCo
                         )
                     })
                     .unwrap_or((None, None));
-                TimelineItemContent::Image { url: uri.to_string(), caption: None, width, height }
+                // MSC2530: with a `filename` field present, a differing
+                // `body` is a caption (ruma's `caption()` encodes that rule).
+                TimelineItemContent::Image {
+                    url: uri.to_string(),
+                    caption: image.caption().map(str::to_owned),
+                    width,
+                    height,
+                }
             }
             MediaSource::Encrypted(_) => {
                 TimelineItemContent::Text(format!("[encrypted image: {}]", message.body()))
@@ -403,7 +413,13 @@ fn convert_message(message: &matrix_sdk_ui::timeline::Message) -> TimelineItemCo
         },
         MessageType::File(file) => match &file.source {
             MediaSource::Plain(uri) => {
-                TimelineItemContent::File { url: uri.to_string(), filename: message.body().to_string() }
+                // `filename()` (not `body()`): for captioned files the body
+                // IS the caption and the real name sits in `filename`.
+                TimelineItemContent::File {
+                    url: uri.to_string(),
+                    filename: file.filename().to_string(),
+                    caption: file.caption().map(str::to_owned),
+                }
             }
             MediaSource::Encrypted(_) => {
                 TimelineItemContent::Text(format!("[encrypted file: {}]", message.body()))

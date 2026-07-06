@@ -148,8 +148,15 @@ pub fn view<'a, M: Clone + 'a>(
     for pack in sorted_packs {
         // Only the emoticon-usage images belong in the emoji picker; a
         // sticker-only pack (e.g. HQ's stickers) contributes nothing here and
-        // shouldn't render an empty header.
-        let emoticons: Vec<&CustomEmoji> = pack.emojis.iter().filter(|e| e.is_emoticon).collect();
+        // shouldn't render an empty header. Deduped by image url: alias
+        // shortcodes for the same image (common in MSC2545 packs) still work
+        // typed as :alias:, but shouldn't fill the grid with duplicates.
+        let mut seen = std::collections::HashSet::new();
+        let emoticons: Vec<&CustomEmoji> = pack
+            .emojis
+            .iter()
+            .filter(|e| e.is_emoticon && seen.insert(e.mxc_url.as_str()))
+            .collect();
         if emoticons.is_empty() {
             continue;
         }
@@ -301,10 +308,13 @@ pub fn sticker_view<'a, M: Clone + 'a>(
     let mut sorted_packs: Vec<&EmojiPack> = packs.iter().collect();
     sorted_packs.sort_by(|a, b| b.emojis.len().cmp(&a.emojis.len()).then(a.name.cmp(&b.name)));
     for pack in sorted_packs {
+        // Alias shortcodes pointing at the same image are common in MSC2545
+        // packs — show the image once (first alias wins), not once per alias.
+        let mut seen = std::collections::HashSet::new();
         let cells: Vec<Element<'a, M>> = pack
             .emojis
             .iter()
-            .filter(|e| e.is_sticker)
+            .filter(|e| e.is_sticker && seen.insert(e.mxc_url.as_str()))
             .map(|e| {
                 cell(
                     visual(&e.mxc_url, e.width, e.height),

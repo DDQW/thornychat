@@ -4,21 +4,6 @@ use tokio::sync::mpsc;
 use crate::message::{Message, OpaqueClient};
 use crate::screens;
 
-/// UI-side state of the embedded video player overlay (YouTube, Vimeo,
-/// Dailymotion, Rumble, Kick). `window`/`scale` mirror the real window so
-/// the iced-drawn frame and the native webview bounds stay glued together
-/// (`video_player::video_rect` maps them both).
-pub struct VideoPlayer {
-    pub video: crate::video_player::EmbedVideo,
-    pub title: Option<String>,
-    /// Unknown for the first frame or two (fetched right after opening).
-    pub window: Option<iced::Size>,
-    pub scale: f32,
-    /// The native webview failed to start (e.g. no WebView2 runtime) —
-    /// the overlay shows this and offers the browser instead.
-    pub error: Option<String>,
-}
-
 /// An open "leave or forget this room?" confirmation prompt, raised by
 /// right-clicking a room in the sidebar. Carries the display name so the
 /// modal can name the room without re-looking it up.
@@ -124,9 +109,6 @@ pub struct App {
     pub settings_resize_drag: Option<ResizeDrag>,
     /// `mxc://` URL of the image currently open in the fullscreen lightbox.
     pub zoomed_image: Option<String>,
-    /// Present while the in-app video player overlay is open (the native
-    /// webview itself lives on the event-loop thread — see `video_player`).
-    pub video_player: Option<VideoPlayer>,
     /// Present while the leave/forget confirmation modal is open (raised by
     /// right-clicking a room in the sidebar).
     pub pending_room_action: Option<RoomActionPrompt>,
@@ -241,14 +223,25 @@ impl App {
             show_keyword_panel: false,
             theme,
             built_theme,
-            privacy: crate::privacy_config::PrivacyConfig::load_or_default(),
+            privacy: {
+                let privacy = crate::privacy_config::PrivacyConfig::load_or_default();
+                // Features silently gated by privacy (link previews above
+                // all) are a recurring "why doesn't X work" — record the
+                // posture once per run so the log answers it.
+                tracing::info!(
+                    read_receipts = privacy.send_read_receipts,
+                    typing = privacy.send_typing_notifications,
+                    link_previews = privacy.enable_link_previews,
+                    "privacy config loaded"
+                );
+                privacy
+            },
             encryption: crate::encryption_config::EncryptionConfig::load_or_default(),
             spellcheck: crate::spellcheck_config::SpellcheckConfig::load_or_default(),
             show_settings: false,
             settings_panel_size: DEFAULT_SETTINGS_SIZE,
             settings_resize_drag: None,
             zoomed_image: None,
-            video_player: None,
             pending_room_action: None,
             space_explorer: None,
             url_previews: std::collections::HashMap::new(),
