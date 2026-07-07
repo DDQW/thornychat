@@ -127,8 +127,6 @@ pub enum ClientCommand {
         mode: crate::events::NotificationMode,
         request_id: RequestId,
     },
-    AddKeywordHighlight { keyword: String, request_id: RequestId },
-    RemoveKeywordHighlight { keyword: String, request_id: RequestId },
     Search { query: String, request_id: RequestId },
 
     // --- Phase 5: calls (MatrixRTC signaling) ---

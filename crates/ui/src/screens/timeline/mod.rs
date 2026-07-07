@@ -324,7 +324,7 @@ pub enum Message {
     /// A quote block was clicked — scroll to (and highlight) the quoted
     /// message.
     JumpToEvent(String),
-    ZoomImage(String),
+    ZoomImage { url: String, width: Option<u32>, height: Option<u32> },
     OpenUrl(String),
     /// A video card's play button was clicked — start playing it inline in
     /// place of the card (the root shell owns the native webview
@@ -351,7 +351,7 @@ pub enum Effect {
     /// `None` clears the per-room override (back to account default).
     SetNotificationMode(Option<NotificationMode>),
     PaginateBackwards,
-    ZoomImage(String),
+    ZoomImage { url: String, width: Option<u32>, height: Option<u32> },
     /// Open (or create) a DM with this user and switch to it. Whether a
     /// newly created DM is encrypted follows the user's encryption setting.
     OpenDirectMessage(String),
@@ -1116,7 +1116,9 @@ pub fn update(
                 None => (iced::Task::none(), Effect::None),
             }
         }
-        Message::ZoomImage(url) => (iced::Task::none(), Effect::ZoomImage(url)),
+        Message::ZoomImage { url, width, height } => {
+            (iced::Task::none(), Effect::ZoomImage { url, width, height })
+        }
         Message::OpenUrl(url) => {
             let _ = open::that(url);
             (iced::Task::none(), Effect::None)
@@ -1361,13 +1363,20 @@ pub fn view<'a>(
         )
         .padding(6)
         .style(crate::theme::floating_panel);
-        container(iced::widget::opaque(panel))
+        let positioned = container(iced::widget::opaque(panel))
             .width(Length::Fill)
             .height(Length::Fill)
             .align_x(iced::Right)
             .align_y(iced::Bottom)
-            .padding(iced::Padding { top: 0.0, right: 14.0, bottom: 6.0, left: 0.0 })
-            .into()
+            .padding(iced::Padding { top: 0.0, right: 14.0, bottom: 6.0, left: 0.0 });
+        // Backdrop dismiss, same shape as the reaction overlay below: a click
+        // anywhere off the (opaque) panel closes the picker; clicks on the
+        // panel are absorbed by its `opaque` wrapper and never reach here, so
+        // picking several emoji in a row keeps it open.
+        iced::widget::opaque(
+            iced::widget::mouse_area(positioned)
+                .on_press(Message::Composer(composer::Message::ClosePicker)),
+        )
     }));
 
     // Reaction picker: anchored to the message whose React button opened it
@@ -1904,7 +1913,11 @@ fn render_item<'a>(
             let visual: Element<'a, Message> =
                 match crate::media_cache::mxc_visual(media, url, box_w, Some(box_h)) {
                     Some(img) => iced::widget::mouse_area(img)
-                        .on_press(Message::ZoomImage(url.clone()))
+                        .on_press(Message::ZoomImage {
+                            url: url.clone(),
+                            width: *width,
+                            height: *height,
+                        })
                         .interaction(iced::mouse::Interaction::Pointer)
                         .into(),
                     None => container(text("loading image…").size(12).style(text::secondary))
@@ -3417,7 +3430,12 @@ fn reaction_picker<'a>(
         },
         move |emoji| Message::ReactWithEmoji {
             event_id: event_id_custom.clone(),
-            key: emoji.mxc_url.clone(),
+            // Cinny (what the HQ room runs) keys custom-emoji reactions on the
+            // `:shortcode:`, not the mxc URL — sending the same form is what
+            // makes this client's reactions aggregate with theirs instead of
+            // sitting as a separate pill. `resolve_reaction_visual` already
+            // renders inbound `:shortcode:` keys.
+            key: format!(":{}:", emoji.shortcode),
         },
     )
 }

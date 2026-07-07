@@ -1,7 +1,6 @@
-use client_core::events::SyncState;
 use iced::widget::{
     button, center, column, container, horizontal_space, mouse_area, opaque, row, scrollable, stack,
-    text, text_input,
+    text,
 };
 use iced::{Element, Length};
 
@@ -22,8 +21,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
             // widget type would reset the whole tree's state (scroll
             // positions, input focus) every time the lightbox opens.
             let mut layers = stack![main_shell(app)];
-            if let Some(url) = &app.zoomed_image {
-                layers = layers.push(lightbox(app, url));
+            if let Some(zoom) = &app.zoomed_image {
+                layers = layers.push(lightbox(app, zoom));
             }
             if app.show_settings {
                 layers = layers.push(settings_overlay(app));
@@ -43,28 +42,50 @@ pub fn view(app: &App) -> Element<'_, Message> {
 }
 
 /// Fullscreen image viewer: dimmed backdrop, the image contain-fit in the
-/// middle. The viewer is sized `Shrink`, not `Fill` — its hit-box then
-/// matches the rendered picture exactly (same on-screen size either way,
-/// `Shrink` just stops it from also claiming the letterboxed margin around
-/// a picture whose aspect ratio doesn't match the window), so a click
-/// anywhere in that translucent margin — like the ✕ or Escape — dismisses,
-/// while a click on the picture itself is left for the viewer's own
-/// zoom/pan handling.
-fn lightbox<'a>(app: &'a App, url: &'a str) -> Element<'a, Message> {
+/// middle at rest, scroll-wheel zoom growing it from there. The picture
+/// itself swallows clicks (`swallow_click`) so pressing it never closes the
+/// lightbox; the backdrop's own `on_press` only ever sees a click that
+/// landed on translucent margin the picture doesn't cover — which, at a
+/// high enough zoom, can be none at all, and that's fine: there's simply
+/// nothing left to click that isn't the picture. The ✕ and Escape are the
+/// close affordances that always work regardless of zoom.
+fn lightbox<'a>(app: &'a App, zoom: &'a crate::state::ZoomedImage) -> Element<'a, Message> {
+    let url = zoom.url.as_str();
+    let scale = zoom.scale;
+
     let visual: Element<'a, Message> = if let Some(frames) = app.media.mxc_gifs.get(url) {
-        iced_gif::gif(frames).width(Length::Fill).height(Length::Fill).into()
+        swallow_click(iced_gif::gif(frames).width(Length::Fill).height(Length::Fill).into())
     } else if let Some(handle) = app.media.images.get(url) {
-        iced::widget::image::Viewer::new(handle.clone())
-            .width(Length::Shrink)
-            .height(Length::Shrink)
-            // 1.0 = contain-fit; wheel-down stops there instead of
-            // shrinking the image into a thumbnail.
-            .min_scale(1.0)
-            .max_scale(16.0)
-            .scale_step(0.25)
-            .into()
+        match (zoom.width, zoom.height) {
+            // Sender-declared dimensions: the image can grow with `scale`
+            // past its contain-fit size — `responsive` hands back the
+            // backdrop's actual padded pixel size, already excluding its
+            // own margin, so the math here doesn't need to know the window
+            // size or duplicate that padding.
+            (Some(w), Some(h)) if w > 0 && h > 0 => {
+                let handle = handle.clone();
+                let (w, h) = (w as f32, h as f32);
+                iced::widget::responsive(move |available| {
+                    let fit = (available.width.max(1.0) / w).min(available.height.max(1.0) / h);
+                    let final_w = w * fit * scale;
+                    let final_h = h * fit * scale;
+
+                    center(swallow_click(
+                        iced::widget::image(handle.clone())
+                            .width(Length::Fixed(final_w))
+                            .height(Length::Fixed(final_h))
+                            .into(),
+                    ))
+                    .into()
+                })
+                .into()
+            }
+            // No declared size to scale from — same contain-fit, non-zoomable
+            // picture this was before zoom existed at all.
+            _ => iced::widget::image(handle.clone()).width(Length::Fill).height(Length::Fill).into(),
+        }
     } else if let Some(handle) = app.media.mxc_svgs.get(url) {
-        iced::widget::svg(handle.clone()).width(Length::Fill).height(Length::Fill).into()
+        swallow_click(iced::widget::svg(handle.clone()).width(Length::Fill).height(Length::Fill).into())
     } else {
         text("Loading image...").size(14).into()
     };
@@ -78,6 +99,7 @@ fn lightbox<'a>(app: &'a App, url: &'a str) -> Element<'a, Message> {
         }),
     )
     .on_press(Message::CloseZoom)
+    .on_scroll(Message::LightboxZoomed)
     .interaction(iced::mouse::Interaction::Pointer);
 
     // Floating ✕, top-right. Its container spans the whole layer but only
@@ -94,6 +116,14 @@ fn lightbox<'a>(app: &'a App, url: &'a str) -> Element<'a, Message> {
     .padding(12);
 
     opaque(stack![backdrop, close])
+}
+
+/// Consumes a press so it never bubbles up to an ancestor `mouse_area`'s
+/// `on_press` (see `MouseArea::on_event`: it returns early once its content
+/// reports the event as captured) — what keeps a click on the lightbox's
+/// picture from closing it.
+fn swallow_click(content: Element<'_, Message>) -> Element<'_, Message> {
+    mouse_area(content).on_press(Message::Noop).into()
 }
 
 /// Settings dialog: dimmed backdrop, centered panel with the tab strip and
@@ -227,16 +257,13 @@ fn room_action_overlay(prompt: &crate::state::RoomActionPrompt) -> Element<'_, M
 }
 
 fn main_shell(app: &App) -> Element<'_, Message> {
-    let status = match &app.sync_state {
-        SyncState::Connecting => "Connecting...".to_string(),
-        SyncState::Syncing => "Connected".to_string(),
-        SyncState::Offline => "Offline".to_string(),
-        SyncState::Error(e) => format!("Sync error: {e}"),
-    };
-
-    let sidebar =
+    let sidebar = column![
         screens::room_list::view(&app.room_list, &app.notification_modes, &app.call, &app.media)
-            .map(Message::RoomList);
+            .map(Message::RoomList),
+        own_profile_bar(app),
+    ]
+    .width(Length::Fixed(240.0))
+    .height(Length::Fill);
 
     let selected_room = app
         .room_list
@@ -267,16 +294,10 @@ fn main_shell(app: &App) -> Element<'_, Message> {
     )
     .map(Message::Timeline);
 
-    let security = screens::verification::view(&app.verification, app.own_user_id.as_deref())
-        .map(Message::Verification);
-
-    let keyword_slot =
-        crate::theme::slot(app.show_keyword_panel.then(|| keyword_panel(app)));
+    let security = screens::verification::view(&app.verification).map(Message::Verification);
 
     column![
-        top_bar(app, status),
         security,
-        keyword_slot,
         row![sidebar, timeline].width(Length::Fill).height(Length::Fill),
     ]
     .width(Length::Fill)
@@ -284,75 +305,25 @@ fn main_shell(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-fn top_bar<'a>(app: &'a App, status: String) -> Element<'a, Message> {
-    let mut bar = row![text(status).size(12), horizontal_space()]
-        .spacing(8)
-        .align_y(iced::Center);
-
-    if let Some(toggle) = screens::verification::verify_toggle(&app.verification) {
-        bar = bar.push(toggle.map(Message::Verification));
-    }
-    bar = bar.push(
-        button(crate::theme::icon_text(crate::theme::icon::KEYWORDS, 14))
-            .on_press(Message::ToggleKeywordPanel)
-            .style(crate::theme::ghost_button)
-            .padding([4, 8]),
-    );
-    bar = bar.push(
-        button(crate::theme::icon_text(crate::theme::icon::SETTINGS, 14))
-            .on_press(Message::ToggleSettings)
-            .style(crate::theme::ghost_button)
-            .padding([4, 8]),
-    );
-
-    container(bar).padding([4, 8]).style(crate::theme::panel).into()
-}
-
-/// Account-wide keyword highlights (words that trigger a
-/// mentions-and-keywords notification even without an @mention), toggled
-/// from the top bar.
-fn keyword_panel(app: &App) -> Element<'_, Message> {
-    let mut chips = row![].spacing(6).align_y(iced::Center);
-    if app.keyword_highlights.is_empty() {
-        chips = chips.push(text("No highlight keywords yet.").size(12).style(text::secondary));
-    }
-    for keyword in &app.keyword_highlights {
-        chips = chips.push(
-            row![
-                text(keyword.clone()).size(12),
-                button(text("×").size(12))
-                    .on_press(Message::RemoveKeywordClicked(keyword.clone()))
-                    .style(crate::theme::ghost_button)
-                    .padding([0, 4]),
-            ]
-            .spacing(2)
-            .align_y(iced::Center),
-        );
-    }
-
-    let add_row = row![
-        text_input("Add keyword...", &app.keyword_draft)
-            .on_input(Message::KeywordDraftChanged)
-            .on_submit(Message::AddKeywordClicked)
-            .padding(6)
-            .size(13)
-            .width(Length::Fixed(220.0)),
-        button(text("Add").size(12)).on_press(Message::AddKeywordClicked).padding([6, 10]),
+/// Own account row pinned under the room list — click opens Settings
+/// (relocated here from a top-bar gear icon, so there's no bar taking up
+/// space above the room list at all).
+fn own_profile_bar(app: &App) -> Element<'_, Message> {
+    let label = app.own_user_id.as_deref().unwrap_or("Account");
+    let label_row = row![
+        crate::media_cache::avatar(&app.media, None, label, 24),
+        text(label).size(13).width(Length::Fill),
     ]
-    .spacing(6)
+    .spacing(8)
     .align_y(iced::Center);
 
     container(
-        column![
-            text("Keyword highlights — you'll be notified when these words are mentioned")
-                .size(12),
-            chips,
-            add_row,
-        ]
-        .spacing(6),
+        button(label_row)
+            .on_press(Message::ToggleSettings)
+            .width(Length::Fill)
+            .padding([8, 12])
+            .style(crate::theme::ghost_button),
     )
-    .padding([8, 12])
-    .width(Length::Fill)
     .style(crate::theme::panel)
     .into()
 }

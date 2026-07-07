@@ -107,12 +107,10 @@ impl CallManager {
             },
         );
 
-        let sweep_client = client.clone();
-        let sweep_tx = event_tx.clone();
         tokio::spawn(async move {
-            for room in sweep_client.rooms() {
+            for room in client.rooms() {
                 if room.state() == RoomState::Joined && room.has_active_room_call() {
-                    let _ = sweep_tx.send(ClientEvent::CallStateUpdated(snapshot(&room).await));
+                    let _ = event_tx.send(ClientEvent::CallStateUpdated(snapshot(&room).await));
                 }
             }
         });

@@ -90,8 +90,6 @@ fn client_events(client: Client, profile: String) -> Subscription<Message> {
     Subscription::run_with_id(
         "matrix-sync-worker",
         iced::stream::channel(64, move |mut output| {
-            let client = client.clone();
-            let profile = profile.clone();
             async move {
                 let cache_dir = match client_core::store::AppPaths::for_profile(&profile) {
                     Ok(paths) => paths.media_cache_dir(),

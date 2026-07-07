@@ -105,10 +105,6 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             }
             Task::none()
         }
-        Message::RoomList(screens::room_list::Message::FilterChanged(filter)) => {
-            app.room_list.filter = filter;
-            Task::none()
-        }
 
         Message::ConfirmLeaveRoom(room_id) => {
             app.pending_room_action = None;
@@ -282,10 +278,34 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::EscapePressed => {
-            // Only the lightbox: it's the one overlay whose surface eats
-            // clicks (the image viewer pans/zooms), so it needs a keyboard
-            // exit. Everything else keeps its explicit close affordances.
+            // Only the lightbox: a press on the image itself is swallowed
+            // rather than closing it, so it needs a keyboard exit too.
+            // Everything else keeps its explicit close affordances.
             app.zoomed_image = None;
+            Task::none()
+        }
+        Message::LightboxZoomed(delta) => {
+            if let Some(zoom) = &mut app.zoomed_image {
+                // Direction-only, like a typical wheel-zoom — Lines and
+                // Pixels both just drive a fixed step so a trackpad's tiny
+                // per-event deltas don't zoom differently than a mouse's
+                // notches.
+                const MIN_SCALE: f32 = 1.0;
+                const MAX_SCALE: f32 = 8.0;
+                const SCALE_STEP: f32 = 0.25;
+                let y = match delta {
+                    iced::mouse::ScrollDelta::Lines { y, .. } => y,
+                    iced::mouse::ScrollDelta::Pixels { y, .. } => y,
+                };
+                let factor = if y > 0.0 {
+                    1.0 + SCALE_STEP
+                } else if y < 0.0 {
+                    1.0 / (1.0 + SCALE_STEP)
+                } else {
+                    1.0
+                };
+                zoom.scale = (zoom.scale * factor).clamp(MIN_SCALE, MAX_SCALE);
+            }
             Task::none()
         }
 
@@ -331,27 +351,6 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             }
             Task::none()
         }
-        Message::ToggleKeywordPanel => {
-            app.show_keyword_panel = !app.show_keyword_panel;
-            Task::none()
-        }
-        Message::KeywordDraftChanged(draft) => {
-            app.keyword_draft = draft;
-            Task::none()
-        }
-        Message::AddKeywordClicked => {
-            let keyword = app.keyword_draft.trim().to_string();
-            if !keyword.is_empty() {
-                app.keyword_draft.clear();
-                send_cmd(app, ClientCommand::AddKeywordHighlight { keyword, request_id: Uuid::new_v4() });
-            }
-            Task::none()
-        }
-        Message::RemoveKeywordClicked(keyword) => {
-            send_cmd(app, ClientCommand::RemoveKeywordHighlight { keyword, request_id: Uuid::new_v4() });
-            Task::none()
-        }
-
         Message::SettingsResizeStarted => {
             app.settings_resize_drag = Some(crate::state::ResizeDrag {
                 size_at_start: app.settings_panel_size,
@@ -604,8 +603,8 @@ fn apply_timeline_effect(app: &mut App, effect: screens::timeline::Effect) -> Ta
             }
             Task::none()
         }
-        screens::timeline::Effect::ZoomImage(url) => {
-            app.zoomed_image = Some(url);
+        screens::timeline::Effect::ZoomImage { url, width, height } => {
+            app.zoomed_image = Some(crate::state::ZoomedImage { url, width, height, scale: 1.0 });
             Task::none()
         }
         screens::timeline::Effect::OpenDirectMessage(user_id) => {
@@ -1538,7 +1537,6 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
             app.media.pending.clear();
             app.media.pending_urls.clear();
             app.notification_modes.clear();
-            app.keyword_highlights.clear();
             app.emoji_packs.clear();
             app.emoji_shortcode_index.clear();
             app.zoomed_image = None;
@@ -1952,9 +1950,6 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
         }
         ClientEvent::RoomNotificationModeCleared { room_id } => {
             app.notification_modes.remove(&room_id);
-        }
-        ClientEvent::KeywordHighlightsUpdated(keywords) => {
-            app.keyword_highlights = keywords;
         }
         ClientEvent::DefaultNotificationModesUpdated { direct_messages, group_chats } => {
             app.default_notification_modes = (direct_messages, group_chats);

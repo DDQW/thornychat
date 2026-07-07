@@ -39,8 +39,8 @@ impl std::fmt::Debug for OpaqueCmdSender {
 }
 
 // `Clone` because iced's `button::on_press`/`text_input::on_submit` take
-// the message by value and require it — root-shell controls (top bar,
-// keyword panel) hand this enum to widgets directly.
+// the message by value and require it — root-shell controls (the own-profile
+// row) hand this enum to widgets directly.
 #[derive(Debug, Clone)]
 pub enum Message {
     /// Every event the sync worker emits, forwarded verbatim through the
@@ -102,9 +102,12 @@ pub enum Message {
 
     /// Dismiss the fullscreen image lightbox.
     CloseZoom,
-    /// Escape pressed anywhere — dismisses the image lightbox (which eats
-    /// clicks over the image for pan/zoom, so it needs a keyboard exit).
+    /// Escape pressed anywhere — dismisses the image lightbox (a press on
+    /// the image itself is swallowed rather than closing it, so this is the
+    /// guaranteed keyboard exit).
     EscapePressed,
+    /// Mouse wheel over the open lightbox — zooms the image in/out.
+    LightboxZoomed(iced::mouse::ScrollDelta),
 
     // --- inline video player (native webview glued over the playing
     // card's stage — see `video_player`) ---
@@ -129,12 +132,8 @@ pub enum Message {
     /// Dismiss the leave/forget prompt without doing anything.
     CancelRoomAction,
 
-    // --- top-bar controls (owned by the root shell, not any one screen) ---
+    // --- root shell controls (not owned by any one screen) ---
     ToggleSettings,
-    ToggleKeywordPanel,
-    KeywordDraftChanged(String),
-    AddKeywordClicked,
-    RemoveKeywordClicked(String),
 
     // --- Settings panel resize (drag handle, bottom-right corner) ---
     /// Press on the grip: arms a drag, but the panel's size doesn't change

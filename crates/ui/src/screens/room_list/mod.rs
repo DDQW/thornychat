@@ -1,15 +1,15 @@
 //! Room list sidebar: one group per joined space — the space renders as a
 //! header (clicking it opens the explorer overlay; a space has no timeline
 //! of its own) with its joined rooms nested beneath, Cinny-style — then
-//! flat DM/room sections for everything spaceless, with a local filter box
-//! on top. Child sets come from `ClientEvent::SpaceChildrenFetched`
-//! (hierarchy sweep at startup/join); a joined subspace groups as its own
-//! top-level header rather than nesting deeper.
+//! flat DM/room sections for everything spaceless. Child sets come from
+//! `ClientEvent::SpaceChildrenFetched` (hierarchy sweep at startup/join); a
+//! joined subspace groups as its own top-level header rather than nesting
+//! deeper.
 
 use std::collections::{HashMap, HashSet};
 
 use client_core::events::{NotificationMode, RoomSummary};
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Element, Length};
 
 #[derive(Debug, Clone, Default)]
@@ -19,7 +19,6 @@ pub struct State {
     /// the space hierarchy) — what nests a joined room under its space.
     pub space_children: HashMap<String, Vec<String>>,
     pub selected_room_id: Option<String>,
-    pub filter: String,
 }
 
 #[derive(Debug, Clone)]
@@ -32,7 +31,6 @@ pub enum Message {
     /// prompt (handled at the app level, which knows the room's display
     /// name).
     RoomRightClicked(String),
-    FilterChanged(String),
 }
 
 pub fn view<'a>(
@@ -41,10 +39,6 @@ pub fn view<'a>(
     calls: &'a crate::screens::call::State,
     media: &'a crate::media_cache::State,
 ) -> Element<'a, Message> {
-    let filter = state.filter.trim().to_lowercase();
-    let visible =
-        |room: &RoomSummary| filter.is_empty() || room.name.to_lowercase().contains(&filter);
-
     let mut list = column![].spacing(2).padding(8);
 
     // Space groups first: the space is a container, so it sits *above* the
@@ -71,15 +65,8 @@ pub fn view<'a>(
             .collect();
         claimed.extend(children.iter().map(|r| r.room_id.as_str()));
 
-        // Under a filter, the group shows while the space itself or any of
-        // its rooms matches — and only matching rooms render.
-        let shown: Vec<&RoomSummary> =
-            children.iter().copied().filter(|r| visible(r)).collect();
-        if !visible(space) && shown.is_empty() {
-            continue;
-        }
         list = list.push(space_row(space, media));
-        for room in shown {
+        for room in children {
             list = list.push(
                 container(room_row(state, room, notification_modes, calls, media)).padding(
                     iced::Padding { left: 18.0, ..iced::Padding::ZERO },
@@ -88,13 +75,11 @@ pub fn view<'a>(
         }
     }
 
-    let dms: Vec<&RoomSummary> =
-        state.rooms.iter().filter(|r| r.is_dm && !r.is_space).filter(|r| visible(r)).collect();
+    let dms: Vec<&RoomSummary> = state.rooms.iter().filter(|r| r.is_dm && !r.is_space).collect();
     let rooms: Vec<&RoomSummary> = state
         .rooms
         .iter()
         .filter(|r| !r.is_dm && !r.is_space && !claimed.contains(r.room_id.as_str()))
-        .filter(|r| visible(r))
         .collect();
     for (label, group) in [("Direct messages", dms), ("Rooms", rooms)] {
         if group.is_empty() {
@@ -106,20 +91,14 @@ pub fn view<'a>(
         }
     }
 
-    let search = text_input("Filter rooms...", &state.filter)
-        .on_input(Message::FilterChanged)
-        .padding(6)
-        .size(13);
-
-    container(column![
-        container(search).padding(8),
+    container(
         scrollable(list)
             .height(Length::Fill)
             .direction(iced::widget::scrollable::Direction::Vertical(
                 iced::widget::scrollable::Scrollbar::new().width(6).scroller_width(6),
             ))
             .style(crate::theme::thin_scrollbar),
-    ])
+    )
     .width(Length::Fixed(240.0))
     .height(Length::Fill)
     .style(crate::theme::panel)

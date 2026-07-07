@@ -38,8 +38,6 @@ pub mod icon {
     pub const CLOSE: &str = "\u{E8BB}";
     /// U+E717 Phone — call banner / start-call button.
     pub const CALL: &str = "\u{E717}";
-    /// U+E713 Settings (gear) — opens the appearance/settings overlay.
-    pub const SETTINGS: &str = "\u{E713}";
     /// U+E723 Attach (paperclip) — composer attachment picker.
     pub const ATTACH: &str = "\u{E723}";
     /// U+E724 Send — composer send button.
@@ -48,10 +46,6 @@ pub mod icon {
     pub const SEARCH: &str = "\u{E721}";
     /// U+E716 People — room member panel toggle.
     pub const MEMBERS: &str = "\u{E716}";
-    /// U+E8EC Tag — keyword-highlights panel.
-    pub const KEYWORDS: &str = "\u{E8EC}";
-    /// U+EA18 Shield — device/user verification.
-    pub const VERIFY: &str = "\u{EA18}";
     /// U+E7ED Ringer (bell) — room notification-mode menu.
     pub const NOTIFY: &str = "\u{E7ED}";
     /// U+E708 QuietHours (bell + moon) — shown when the room is muted.

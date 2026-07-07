@@ -184,13 +184,10 @@ pub fn spawn_forwarder(
             while let Ok(Some(_)) =
                 tokio::time::timeout(std::time::Duration::ZERO, diffs.next()).await
             {}
-            loop {
-                match info_updates.try_recv() {
-                    Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
-                    // Empty (or Closed, which the next recv() handles).
-                    Err(_) => break,
-                }
-            }
+            // Drains until Empty (or Closed, which the next recv() handles).
+            while let Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) =
+                info_updates.try_recv()
+            {}
 
             // Re-read `m.direct` each rebuild so a DM created/marked after
             // startup starts classifying correctly.

@@ -34,8 +34,6 @@ fn main() -> iced::Result {
     let runtime = tokio::runtime::Runtime::new().expect("failed to build tokio runtime");
     let _runtime_guard = runtime.enter();
 
-    let boot_profile = profile.clone();
-
     // Loaded synchronously, before the window opens — the only exception to
     // this app's usual "defer I/O to async tasks" rule, because the font
     // family has to reach `.default_font()` below, which iced only accepts
@@ -68,5 +66,5 @@ fn main() -> iced::Result {
             if scale.is_finite() { scale.clamp(0.8, 1.5) as f64 } else { 1.0 }
         })
         .default_font(default_font)
-        .run_with(move || ui::boot(boot_profile.clone(), theme, minimized))
+        .run_with(move || ui::boot(profile.clone(), theme, minimized))
 }

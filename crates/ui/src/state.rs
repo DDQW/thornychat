@@ -34,6 +34,19 @@ pub struct ResizeDrag {
     pub anchor: Option<iced::Point>,
 }
 
+/// The image open in the fullscreen lightbox. `width`/`height` are the
+/// sender-declared intrinsic dimensions (when the event carried them) —
+/// what the zoom scales from; `None` just means this particular image can't
+/// zoom past its initial contain-fit size. `scale` resets to 1.0 every time
+/// a new image opens (see `Effect::ZoomImage`'s handler).
+#[derive(Debug, Clone)]
+pub struct ZoomedImage {
+    pub url: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub scale: f32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
     /// No session yet; showing the login screen.
@@ -75,9 +88,6 @@ pub struct App {
     /// the same client-core watcher, including changes from other devices.
     pub default_notification_modes:
         (client_core::events::NotificationMode, client_core::events::NotificationMode),
-    pub keyword_highlights: Vec<String>,
-    pub keyword_draft: String,
-    pub show_keyword_panel: bool,
     /// Active color/typography/density theme — persisted globally (across
     /// all profiles) and editable from the Appearance settings tab.
     pub theme: crate::theme_config::ThemeConfig,
@@ -107,8 +117,8 @@ pub struct App {
     /// Present while the user is actively dragging the resize grip — also
     /// what gates the mouse-tracking subscription in `subscriptions.rs`.
     pub settings_resize_drag: Option<ResizeDrag>,
-    /// `mxc://` URL of the image currently open in the fullscreen lightbox.
-    pub zoomed_image: Option<String>,
+    /// The image currently open in the fullscreen lightbox, if any.
+    pub zoomed_image: Option<ZoomedImage>,
     /// Present while the leave/forget confirmation modal is open (raised by
     /// right-clicking a room in the sidebar).
     pub pending_room_action: Option<RoomActionPrompt>,
@@ -218,9 +228,6 @@ impl App {
                 client_core::events::NotificationMode::AllMessages,
                 client_core::events::NotificationMode::AllMessages,
             ),
-            keyword_highlights: Vec::new(),
-            keyword_draft: String::new(),
-            show_keyword_panel: false,
             theme,
             built_theme,
             privacy: {

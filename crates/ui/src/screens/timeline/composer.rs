@@ -190,9 +190,11 @@ pub enum Message {
     Send,
     ToggleEmojiPicker,
     ToggleStickerPicker,
+    /// Dismiss the emoji/sticker picker (a click outside the floating panel).
+    ClosePicker,
     SelectPickerTab(PickerTab),
     EmojiPicked(&'static str),
-    CustomEmojiPicked { shortcode: String, mxc_url: String },
+    CustomEmojiPicked { shortcode: String },
     /// A sticker was picked from the sticker tab — sent immediately as an
     /// `m.sticker` (the picker stays open so several can go out in a row).
     StickerPicked { url: String, body: String, width: Option<u32>, height: Option<u32> },
@@ -241,7 +243,9 @@ pub enum Effect {
     SendSticker { url: String, body: String, width: Option<u32>, height: Option<u32> },
     /// An emoji was used — the root dispatcher bumps the usage history
     /// that feeds the picker's "Frequently used" section. Key: the glyph
-    /// for unicode, the `mxc://` URL for custom emoji.
+    /// for unicode, the `:shortcode:` form for custom emoji (matching how
+    /// custom reactions are keyed; legacy `mxc://` keys from older history
+    /// still resolve too).
     EmojiUsed(String),
 }
 
@@ -377,6 +381,10 @@ pub fn update(
             };
             (Task::none(), effect)
         }
+        Message::ClosePicker => {
+            state.show_emoji_picker = false;
+            (Task::none(), Effect::None)
+        }
         Message::StickerPicked { url, body, width, height } => {
             // Fire-and-forget, like a reaction: the picker stays open so a
             // few stickers can go out in a row.
@@ -391,11 +399,14 @@ pub fn update(
             state.spell.recompute(&state.body, spell);
             (Task::none(), Effect::EmojiUsed(glyph.to_string()))
         }
-        Message::CustomEmojiPicked { shortcode, mxc_url } => {
+        Message::CustomEmojiPicked { shortcode } => {
             state.body.push_str(&format!(":{shortcode}: "));
             state.spell.pending_revert = None;
             state.spell.recompute(&state.body, spell);
-            (Task::none(), Effect::EmojiUsed(mxc_url))
+            // Record usage by the `:shortcode:` key — the same form custom
+            // reactions use, so an emoji's frequency is one tally across both
+            // and the "Frequently used" row shows it once.
+            (Task::none(), Effect::EmojiUsed(format!(":{shortcode}:")))
         }
         Message::MentionCandidateClicked(user_id, display_name) => {
             if let Some(at_pos) = state.body.rfind('@') {
@@ -903,10 +914,7 @@ pub(super) fn picker_panel<'a>(
             media,
             packs,
             Message::EmojiPicked,
-            |emoji| Message::CustomEmojiPicked {
-                shortcode: emoji.shortcode.clone(),
-                mxc_url: emoji.mxc_url.clone(),
-            },
+            |emoji| Message::CustomEmojiPicked { shortcode: emoji.shortcode.clone() },
         ),
     };
 

@@ -313,7 +313,7 @@ async fn handle_command(
                     // sync echo, and opening the room in that window would
                     // show "Join" mid-call.
                     let call_event_tx = event_tx.clone();
-                    let call_room = room.clone();
+                    let call_room = room;
                     let call_manager = call_manager.clone();
                     tokio::spawn(async move {
                         let state = call_manager.snapshot_for(&call_room).await;
@@ -896,38 +896,6 @@ async fn handle_command(
                         let _ = event_tx.send(ClientEvent::RoomNotificationModeCleared {
                             room_id: parsed_room_id.to_string(),
                         });
-                        succeed(&event_tx, request_id);
-                    }
-                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
-                }
-            });
-        }
-
-        ClientCommand::AddKeywordHighlight { keyword, request_id } => {
-            let client = client.clone();
-            let event_tx = event_tx.clone();
-            tokio::spawn(async move {
-                let settings = client.notification_settings().await;
-                match settings.add_keyword(keyword).await {
-                    Ok(()) => {
-                        let keywords = settings.enabled_keywords().await.into_iter().collect();
-                        let _ = event_tx.send(ClientEvent::KeywordHighlightsUpdated(keywords));
-                        succeed(&event_tx, request_id);
-                    }
-                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
-                }
-            });
-        }
-
-        ClientCommand::RemoveKeywordHighlight { keyword, request_id } => {
-            let client = client.clone();
-            let event_tx = event_tx.clone();
-            tokio::spawn(async move {
-                let settings = client.notification_settings().await;
-                match settings.remove_keyword(&keyword).await {
-                    Ok(()) => {
-                        let keywords = settings.enabled_keywords().await.into_iter().collect();
-                        let _ = event_tx.send(ClientEvent::KeywordHighlightsUpdated(keywords));
                         succeed(&event_tx, request_id);
                     }
                     Err(error) => fail(&event_tx, request_id, &error.to_string()),

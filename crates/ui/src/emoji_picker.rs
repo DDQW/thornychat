@@ -93,21 +93,40 @@ pub fn view<'a, M: Clone + 'a>(
         crate::media_cache::mxc_visual(media, &emoji.mxc_url, 24, Some(24))
             .unwrap_or_else(|| text(format!(":{}:", emoji.shortcode)).size(10).into())
     };
+    // A custom-emoji cell carrying a hover tooltip with its `:shortcode:` —
+    // the one place hover earns its keep, since a custom image's shortcode
+    // (what you type to send it, and the key it reacts with) isn't otherwise
+    // visible. Unicode cells get no tooltip: their glyph is self-evident.
+    let custom_cell = |emoji: &'a CustomEmoji| -> Element<'a, M> {
+        iced::widget::tooltip(
+            cell(custom_visual(emoji), on_custom(emoji)),
+            container(text(format!(":{}:", emoji.shortcode)).size(12))
+                .padding([2, 6])
+                .style(crate::theme::floating_panel),
+            iced::widget::tooltip::Position::Top,
+        )
+        .into()
+    };
 
     let mut sections = column![].spacing(8);
 
-    // Frequently used: the user's own history, most-used first. Unicode
-    // keys resolve back to their 'static glyph via the emojis crate;
-    // custom keys are mxc URLs resolved against the loaded packs.
+    // Frequently used: the user's own history, most-used first. Keys come in
+    // three shapes: unicode glyphs (resolve via the emojis crate), custom
+    // `mxc://` URLs (composer inserts — resolved against the packs), and
+    // `:shortcode:` (how custom-emoji *reactions* are keyed — also resolved
+    // against the packs). The last two both land on a custom emoji cell.
     let mut frequent: Vec<(&String, &u32)> = usage.iter().collect();
     frequent.sort_by(|a, b| b.1.cmp(a.1));
-    // One pass over the packs instead of a linear scan per frequent mxc key
-    // per view rebuild (this runs every frame while the picker is open).
-    // entry().or_insert keeps the FIRST match on duplicate urls across
-    // packs, matching the old find() semantics.
+    // One pass over the packs instead of a linear scan per frequent key per
+    // view rebuild (this runs every frame while the picker is open).
+    // entry().or_insert keeps the FIRST match on duplicate keys across packs,
+    // matching the old find() semantics. Shortcodes are lowercased, as
+    // everywhere else the app resolves them case-insensitively.
     let mut custom_by_url: HashMap<&str, &CustomEmoji> = HashMap::new();
+    let mut custom_by_shortcode: HashMap<String, &CustomEmoji> = HashMap::new();
     for e in packs.iter().flat_map(|p| &p.emojis).filter(|e| e.is_emoticon) {
         custom_by_url.entry(e.mxc_url.as_str()).or_insert(e);
+        custom_by_shortcode.entry(e.shortcode.to_ascii_lowercase()).or_insert(e);
     }
     let mut frequent_cells: Vec<Element<'a, M>> = Vec::new();
     for (key, _count) in frequent {
@@ -116,7 +135,12 @@ pub fn view<'a, M: Clone + 'a>(
         }
         if key.starts_with("mxc://") {
             if let Some(&emoji) = custom_by_url.get(key.as_str()) {
-                frequent_cells.push(cell(custom_visual(emoji), on_custom(emoji)));
+                frequent_cells.push(custom_cell(emoji));
+            }
+        } else if key.len() > 2 && key.starts_with(':') && key.ends_with(':') {
+            if let Some(&emoji) = custom_by_shortcode.get(&key[1..key.len() - 1].to_ascii_lowercase())
+            {
+                frequent_cells.push(custom_cell(emoji));
             }
         } else if let Some(emoji) = emojis::get(key) {
             let glyph = emoji.as_str();
@@ -148,15 +172,12 @@ pub fn view<'a, M: Clone + 'a>(
     for pack in sorted_packs {
         // Only the emoticon-usage images belong in the emoji picker; a
         // sticker-only pack (e.g. HQ's stickers) contributes nothing here and
-        // shouldn't render an empty header. Deduped by image url: alias
-        // shortcodes for the same image (common in MSC2545 packs) still work
-        // typed as :alias:, but shouldn't fill the grid with duplicates.
-        let mut seen = std::collections::HashSet::new();
-        let emoticons: Vec<&CustomEmoji> = pack
-            .emojis
-            .iter()
-            .filter(|e| e.is_emoticon && seen.insert(e.mxc_url.as_str()))
-            .collect();
+        // shouldn't render an empty header. Every entry is shown — including
+        // several shortcodes that resolve to the same picture — because each
+        // shortcode is its own reactable thing (Cinny parity), and reactions
+        // key on the shortcode, so collapsing them would make this client
+        // react with a different alias than the rest of the room.
+        let emoticons: Vec<&CustomEmoji> = pack.emojis.iter().filter(|e| e.is_emoticon).collect();
         if emoticons.is_empty() {
             continue;
         }
@@ -165,7 +186,7 @@ pub fn view<'a, M: Clone + 'a>(
         for chunk in emoticons.chunks(PER_ROW) {
             let mut grid_row = row![].spacing(2);
             for emoji in chunk {
-                grid_row = grid_row.push(cell(custom_visual(emoji), on_custom(emoji)));
+                grid_row = grid_row.push(custom_cell(emoji));
             }
             grid = grid.push(grid_row);
         }
@@ -308,13 +329,12 @@ pub fn sticker_view<'a, M: Clone + 'a>(
     let mut sorted_packs: Vec<&EmojiPack> = packs.iter().collect();
     sorted_packs.sort_by(|a, b| b.emojis.len().cmp(&a.emojis.len()).then(a.name.cmp(&b.name)));
     for pack in sorted_packs {
-        // Alias shortcodes pointing at the same image are common in MSC2545
-        // packs — show the image once (first alias wins), not once per alias.
-        let mut seen = std::collections::HashSet::new();
+        // Every sticker entry is shown, including repeats that resolve to the
+        // same picture — each is a distinct pack shortcode (Cinny parity).
         let cells: Vec<Element<'a, M>> = pack
             .emojis
             .iter()
-            .filter(|e| e.is_sticker && seen.insert(e.mxc_url.as_str()))
+            .filter(|e| e.is_sticker)
             .map(|e| {
                 cell(
                     visual(&e.mxc_url, e.width, e.height),

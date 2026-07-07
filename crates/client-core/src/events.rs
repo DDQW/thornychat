@@ -95,7 +95,6 @@ pub enum ClientEvent {
     /// Sent by the same watcher as `RoomNotificationModesUpdated`, so it
     /// stays current with changes made from other devices too.
     DefaultNotificationModesUpdated { direct_messages: NotificationMode, group_chats: NotificationMode },
-    KeywordHighlightsUpdated(Vec<String>),
     SearchResults { request_id: RequestId, results: Vec<SearchResult> },
 
     // --- Phase 5: calls (MatrixRTC signaling) ---

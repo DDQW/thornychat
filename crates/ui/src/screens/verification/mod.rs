@@ -1,7 +1,8 @@
-//! Security banners: cross-signing bootstrap fallback, SAS device
-//! verification wizard, and key backup/recovery setup + restore. Rendered
-//! as a stack of cards below the sync-status line rather than a modal
-//! overlay — simpler, and none of these need to block the rest of the app.
+//! Security banners: cross-signing bootstrap fallback and the SAS device
+//! verification wizard, rendered as a stack of cards above the room list
+//! rather than a modal overlay — simpler, and none of these need to block
+//! the rest of the app. Key backup/recovery and starting a new verification
+//! live in Settings → Security (`recovery_settings_view`) instead.
 
 use client_core::events::{RecoveryEnableStage, SasState};
 use iced::widget::{button, column, container, row, text, text_input};
@@ -28,10 +29,6 @@ pub struct State {
 
     pub sas: Option<SasState>,
     pub verify_user_id_input: String,
-    /// The verify form is collapsed behind a small button by default —
-    /// verification is an occasional task and the always-open form ate a
-    /// full-width bar of every session.
-    pub show_verify_form: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -49,7 +46,6 @@ pub enum Message {
     DismissRecoveryError,
 
     VerifyUserIdChanged(String),
-    ToggleVerifyForm,
     StartVerification,
     AcceptVerification,
     DeclineVerification,
@@ -115,7 +111,6 @@ pub fn update(state: &mut State, message: Message) -> Effect {
         Message::DismissRecoveryError => state.recovery_error = None,
 
         Message::VerifyUserIdChanged(v) => state.verify_user_id_input = v,
-        Message::ToggleVerifyForm => state.show_verify_form = !state.show_verify_form,
         Message::StartVerification => {
             // Blank is a real input here — the placeholder promises
             // "blank = verify this device"; the dispatcher maps an empty id
@@ -149,7 +144,7 @@ pub fn update(state: &mut State, message: Message) -> Effect {
     Effect::None
 }
 
-pub fn view<'a>(state: &'a State, own_user_id: Option<&'a str>) -> Element<'a, Message> {
+pub fn view(state: &State) -> Element<'_, Message> {
     let mut cards = column![].spacing(8);
 
     if let Some(error) = &state.cross_signing_error {
@@ -181,29 +176,6 @@ pub fn view<'a>(state: &'a State, own_user_id: Option<&'a str>) -> Element<'a, M
 
     if let Some(sas) = &state.sas {
         cards = cards.push(sas_card(sas));
-    }
-
-    // Collapsed to a small toggle unless the user opened the form or a SAS
-    // flow is active (in which case the wizard card above already shows).
-    if own_user_id.is_some() && state.show_verify_form && state.sas.is_none() {
-        cards = cards.push(card(column![
-            row![
-                text("Device / user verification").size(14).width(Length::Fill),
-                button(text("Hide").size(12))
-                    .on_press(Message::ToggleVerifyForm)
-                    .style(crate::theme::ghost_button)
-                    .padding(4),
-            ]
-            .align_y(iced::Center),
-            row![
-                text_input("@user:server (blank = verify this device)", &state.verify_user_id_input)
-                    .on_input(Message::VerifyUserIdChanged)
-                    .padding(6)
-                    .width(Length::Fill),
-                button(text("Verify")).on_press(Message::StartVerification).padding(6),
-            ]
-            .spacing(6),
-        ]));
     }
 
     cards.into()
@@ -300,23 +272,30 @@ pub fn recovery_settings_view(state: &State) -> Element<'_, Message> {
         ]));
     }
 
-    cards.into()
-}
-
-/// Small toggle for the collapsed verify form, meant for the app's top
-/// status bar (rendered there by `view.rs` so it doesn't occupy a card row
-/// of its own).
-pub fn verify_toggle(state: &State) -> Option<Element<'_, Message>> {
-    if state.show_verify_form || state.sas.is_some() {
-        return None;
+    // An incoming request shows up on its own (see `view`'s SAS card) — this
+    // is only for starting one. Hidden while a SAS flow is already active so
+    // there's never a second one in flight.
+    if state.sas.is_none() {
+        cards = cards.push(card(column![
+            text("Device verification").size(14),
+            text(
+                "Verify another session or a contact so they show as trusted. Leave the \
+                 field blank to verify this device instead.",
+            )
+            .size(12)
+            .style(text::secondary),
+            row![
+                text_input("@user:server (blank = verify this device)", &state.verify_user_id_input)
+                    .on_input(Message::VerifyUserIdChanged)
+                    .padding(6)
+                    .width(Length::Fill),
+                button(text("Verify")).on_press(Message::StartVerification).padding(6),
+            ]
+            .spacing(6),
+        ]));
     }
-    Some(
-        button(crate::theme::icon_text(crate::theme::icon::VERIFY, 14))
-            .on_press(Message::ToggleVerifyForm)
-            .style(crate::theme::ghost_button)
-            .padding([4, 8])
-            .into(),
-    )
+
+    cards.into()
 }
 
 fn sas_card(sas: &SasState) -> Element<'_, Message> {

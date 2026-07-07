@@ -1,12 +1,12 @@
 //! Read-side of notification settings: pushes the account's per-room
-//! notification overrides and keyword-highlight list to the UI, both at
-//! startup and whenever the account's push rules change (the SDK's
-//! `subscribe_to_changes` fires on every `m.push_rules` account-data event
-//! from sync, which covers changes made locally *and* from other devices).
+//! notification overrides to the UI, both at startup and whenever the
+//! account's push rules change (the SDK's `subscribe_to_changes` fires on
+//! every `m.push_rules` account-data event from sync, which covers changes
+//! made locally *and* from other devices).
 //!
-//! The write-side (set/clear mode, add/remove keyword) lives in `sync.rs`'s
-//! command handlers. Push-rule *evaluation* (feeding
-//! `ClientEvent::Notification` for native toasts) is still Phase 7.
+//! The write-side (set/clear mode) lives in `sync.rs`'s command handlers.
+//! Push-rule *evaluation* (feeding `ClientEvent::Notification` for native
+//! toasts) is still Phase 7.
 
 use matrix_sdk::notification_settings::{
     IsEncrypted, IsOneToOne, NotificationSettings, RoomNotificationMode,
@@ -56,10 +56,8 @@ async fn emit_snapshot(
     event_tx: &mpsc::UnboundedSender<ClientEvent>,
 ) -> bool {
     let modes = snapshot_modes(settings).await;
-    let keywords: Vec<String> = settings.enabled_keywords().await.into_iter().collect();
     let (direct_messages, group_chats) = snapshot_defaults(settings).await;
     event_tx.send(ClientEvent::RoomNotificationModesUpdated(modes)).is_ok()
-        && event_tx.send(ClientEvent::KeywordHighlightsUpdated(keywords)).is_ok()
         && event_tx
             .send(ClientEvent::DefaultNotificationModesUpdated { direct_messages, group_chats })
             .is_ok()
