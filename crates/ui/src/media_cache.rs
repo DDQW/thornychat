@@ -54,6 +54,28 @@ pub struct State {
     /// entirely.
     pub web_images: HashMap<String, image::Handle>,
     pub web_pending: HashSet<String>,
+
+    /// Media decoded during a burst but not yet promoted into the visible
+    /// caches above. `view()` reads only the visible maps, so staging keeps the
+    /// rendered element tree byte-identical until one `FlushStagedMedia`
+    /// promotes the whole batch at once. That collapses a storm of per-fetch
+    /// reflows — each of which retriggered the timeline's scroll-anchor
+    /// correction cascade and blew past iced's 3-consecutive-redraw layout
+    /// settle budget — into a single reflow per coalescing window. Staged URLs
+    /// stay in `pending_urls`, so `is_known` keeps suppressing re-fetches while
+    /// they wait.
+    pub staged: Vec<StagedMedia>,
+    /// Armed between scheduling a flush and it firing, so a burst starts the
+    /// coalescing timer exactly once.
+    pub flush_scheduled: bool,
+}
+
+/// One decoded item parked in [`State::staged`] until the next flush promotes
+/// it into the matching visible cache.
+pub enum StagedMedia {
+    Raster(String, image::Handle),
+    Svg(String, svg::Handle),
+    Gif(String, std::sync::Arc<crate::animated_image::Frames>),
 }
 
 impl State {
@@ -73,6 +95,33 @@ impl State {
 
     pub fn is_web_image_known(&self, url: &str) -> bool {
         self.web_images.contains_key(url) || self.web_pending.contains(url)
+    }
+
+    /// Promote every staged item into its visible cache and clear the staging
+    /// area (dropping each URL from `pending_urls`, since it now lives in a
+    /// real cache). Returns whether anything moved, so the flush handler can
+    /// skip a redundant redraw when the batch was already drained.
+    pub fn flush_staged(&mut self) -> bool {
+        if self.staged.is_empty() {
+            return false;
+        }
+        for item in std::mem::take(&mut self.staged) {
+            match item {
+                StagedMedia::Raster(url, handle) => {
+                    self.pending_urls.remove(&url);
+                    self.images.insert(url, handle);
+                }
+                StagedMedia::Svg(url, handle) => {
+                    self.pending_urls.remove(&url);
+                    self.mxc_svgs.insert(url, handle);
+                }
+                StagedMedia::Gif(url, frames) => {
+                    self.pending_urls.remove(&url);
+                    self.mxc_gifs.insert(url, frames);
+                }
+            }
+        }
+        true
     }
 }
 

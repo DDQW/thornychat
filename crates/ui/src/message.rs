@@ -170,5 +170,13 @@ pub enum Message {
     SettingsResizeDragged(iced::Point),
     SettingsResizeReleased,
 
+    /// The media-coalescing timer fired: promote everything staged since it was
+    /// armed into the visible caches in one shot. Batching a burst's media into
+    /// a single reflow keeps iced's redraw settle loop converging — a per-fetch
+    /// reflow storm otherwise retriggers the timeline's scroll-anchor
+    /// correction cascade past its 3-consecutive-redraw budget. See
+    /// [`crate::media_cache::State::staged`].
+    FlushStagedMedia,
+
     Noop,
 }

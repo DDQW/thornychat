@@ -33,8 +33,18 @@ pub fn init(profile: &str) -> Option<WorkerGuard> {
     // (tens of thousands of lines a day). Dropping just that target to `error`
     // keeps genuine backup failures visible. A caller-set RUST_LOG still
     // overrides all of this via the env path above.
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,matrix_sdk_crypto::backups=error"));
+    //
+    // Also silence `matrix_sdk::latest_events` entirely (`=off`, not `=error`,
+    // because it logs at ERROR): `SyncService`'s sliding-sync "room-list"
+    // connection subscribes to per-room "latest events" before the room object
+    // is registered in the client store, so it logs "Room is unknown" for every
+    // room on the first sync — plus equally useless INFO "Timer … finished"
+    // lines. The app never uses that SDK feature (no `latest_event` reference
+    // anywhere, and no Cargo feature or builder option controls it), so the
+    // whole module is pure noise.
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("info,matrix_sdk_crypto::backups=error,matrix_sdk::latest_events=off")
+    });
 
     tracing_subscriber::registry()
         .with(EnvFilter::clone(&filter))

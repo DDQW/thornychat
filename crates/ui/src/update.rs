@@ -191,7 +191,9 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
         }
 
         Message::GifDecoded(url, result) => {
-            app.media.pending_urls.remove(&url);
+            // Stage rather than insert into the visible cache directly, keeping
+            // the url in `pending_urls` until the flush promotes it — the same
+            // coalescing path raster/svg take in `dispatch_client_event`.
             match result {
                 Ok(frames) => {
                     // Cross-reference against "emoji pack entry" (ground truth
@@ -205,14 +207,21 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                         size = ?frames.first_frame_size(),
                         "gif decoded"
                     );
-                    app.media.mxc_gifs.insert(url, frames);
+                    app.media.staged.push(crate::media_cache::StagedMedia::Gif(url, frames));
                 }
                 // Corrupt GIF: fall back to the (first-frame-only) raster path.
                 Err(raster) => {
                     tracing::warn!(url = %url, "gif decode failed, falling back to static raster");
-                    app.media.images.insert(url, raster);
+                    app.media.staged.push(crate::media_cache::StagedMedia::Raster(url, raster));
                 }
             }
+            schedule_media_flush(app)
+        }
+        Message::FlushStagedMedia => {
+            app.media.flush_scheduled = false;
+            // One state mutation promoting the whole staged batch → a single
+            // view rebuild / reflow for the burst instead of one per fetch.
+            app.media.flush_staged();
             Task::none()
         }
 
@@ -1787,6 +1796,23 @@ fn forget_open_room(app: &mut App, room_id: &str) -> Task<Message> {
 /// counts, tray badge, open timeline). Fanning it out here in one explicit
 /// function keeps that "god object" surface named and contained, rather
 /// than smeared across the root `match`.
+/// Arm the media-coalescing timer if it isn't already armed. Media decoded
+/// during a burst is staged (see [`crate::media_cache::State::staged`]) and
+/// promoted as one batch when this fires, so a room-open storm reflows the
+/// timeline once per window instead of once per fetch — the per-fetch reflow
+/// was what kept iced's redraw settle loop from converging. Idempotent within a
+/// window: later stages just add to the batch the pending timer will flush.
+fn schedule_media_flush(app: &mut App) -> Task<Message> {
+    if app.media.flush_scheduled {
+        return Task::none();
+    }
+    app.media.flush_scheduled = true;
+    Task::future(async {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        Message::FlushStagedMedia
+    })
+}
+
 fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
     match event {
         ClientEvent::SyncStateChanged(state) => {
@@ -1807,6 +1833,8 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
             app.call = Default::default();
             app.media.pending.clear();
             app.media.pending_urls.clear();
+            app.media.staged.clear();
+            app.media.flush_scheduled = false;
             app.notification_modes.clear();
             app.emoji_packs.clear();
             app.emoji_shortcode_index.clear();
@@ -2220,7 +2248,6 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                 });
             }
             if let Some(url) = app.media.pending.remove(&request_id) {
-                app.media.pending_urls.remove(&url);
                 // Logged for every branch below: url + byte length + content
                 // fingerprint, so a "wrong image shown" report can be
                 // diagnosed from the log file alone. Cross-reference against
@@ -2228,16 +2255,24 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                 // to) and, for gifs, the "gif decoded" line that follows.
                 let len = bytes.len();
                 let fingerprint = crate::media_cache::fingerprint(&bytes);
+                // The url is deliberately *not* dropped from `pending_urls`
+                // here: it stays "known" (so it isn't re-requested) while it is
+                // staged or mid-decode, and only leaves when a flush promotes it
+                // or it fails below. Raster/svg are staged rather than inserted
+                // straight into the visible cache so a burst reflows once, not
+                // once per fetch — see media_cache::State::staged.
                 if crate::media_cache::looks_like_svg(&bytes) {
                     tracing::info!(url, len, fingerprint, kind = "svg", "media fetched");
-                    app.media.mxc_svgs.insert(url, iced::widget::svg::Handle::from_memory(bytes));
+                    app.media.staged.push(crate::media_cache::StagedMedia::Svg(
+                        url,
+                        iced::widget::svg::Handle::from_memory(bytes),
+                    ));
+                    return schedule_media_flush(app);
                 } else if crate::media_cache::looks_like_gif(&bytes) {
                     tracing::info!(url, len, fingerprint, kind = "gif", "media fetched, decoding");
                     // Frame decode is CPU-heavy (full RGBA per frame; a chat
-                    // GIF is easily 100ms+) — run it off the update thread.
-                    // The url stays in pending_urls until GifDecoded lands so
-                    // it isn't re-requested mid-decode.
-                    app.media.pending_urls.insert(url.clone());
+                    // GIF is easily 100ms+) — run it off the update thread. The
+                    // GifDecoded handler stages the result and arms the flush.
                     return Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
@@ -2259,10 +2294,15 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                     // the same way a failed fetch would, so the caller falls
                     // back to the initials avatar instead.
                     tracing::warn!(url, len, fingerprint, "media is AVIF/HEIC — no decoder compiled in, falling back");
+                    app.media.pending_urls.remove(&url);
                     app.media.failed_mxc.insert(url);
                 } else {
                     tracing::info!(url, len, fingerprint, kind = "raster", "media fetched");
-                    app.media.images.insert(url, iced::widget::image::Handle::from_bytes(bytes));
+                    app.media.staged.push(crate::media_cache::StagedMedia::Raster(
+                        url,
+                        iced::widget::image::Handle::from_bytes(bytes),
+                    ));
+                    return schedule_media_flush(app);
                 }
             }
         }

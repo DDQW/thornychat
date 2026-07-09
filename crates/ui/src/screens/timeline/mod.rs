@@ -449,6 +449,36 @@ fn sticker_display_size(width: Option<u32>, height: Option<u32>) -> (u16, u16) {
     }
 }
 
+/// A fixed `w×h` faint box that reserves a small thumbnail's footprint before
+/// its bytes arrive (reply-quote thumb, Steam/tweet card avatars, inline and
+/// reaction custom emoji). Same reasoning as [`image_display_size`]: with the
+/// box reserved up front, a finishing download is a pure content swap instead
+/// of an element that pops into existence and reflows its row — the reflow that
+/// tripped iced's "consecutive RedrawRequested produced layout invalidation"
+/// warning. Uses the same recessed `panel` style as the image/sticker
+/// "loading…" boxes.
+fn media_placeholder<'a, M: 'a>(w: u16, h: u16) -> Element<'a, M> {
+    container(iced::widget::Space::new())
+        .width(Length::Fixed(w as f32))
+        .height(Length::Fixed(h as f32))
+        .style(crate::theme::panel)
+        .into()
+}
+
+/// The dark 16:9 (360×202) stage a video/link/tweet card shows before its
+/// thumbnail lands. The loaded image is drawn into the *same* 360×202 box
+/// (letterboxed by the default `Contain` fit), so the card holds its shape from
+/// first paint and the image's arrival never changes layout.
+fn card_image_placeholder<'a, M: 'a>() -> Element<'a, M> {
+    container(iced::widget::Space::new().width(360.0).height(202.0))
+        .style(|_theme: &iced::Theme| iced::widget::container::Style {
+            background: Some(iced::Color::from_rgb8(0x10, 0x10, 0x10).into()),
+            border: iced::border::rounded(4),
+            ..iced::widget::container::Style::default()
+        })
+        .into()
+}
+
 /// The event id of the item at `index`, or of the nearest item that has one
 /// (dividers and local echoes don't) — searching outward in both directions.
 fn nearest_event_id(items: &[TimelineItem], index: usize) -> Option<String> {
@@ -2094,11 +2124,11 @@ fn render_item<'a>(
         ]
         .spacing(1);
         let mut quote = row![].spacing(6).align_y(iced::Center);
-        if let Some(thumb) = reply
-            .image_url
-            .as_deref()
-            .and_then(|url| crate::media_cache::mxc_visual(media, url, 36, Some(36)))
-        {
+        // Reserve the 36×36 slot whenever the quoted message carries an image,
+        // so the thumb fades in without shoving the quote text sideways.
+        if let Some(url) = reply.image_url.as_deref() {
+            let thumb = crate::media_cache::mxc_visual(media, url, 36, Some(36))
+                .unwrap_or_else(|| media_placeholder(36, 36));
             quote = quote.push(thumb);
         }
         quote = quote.push(texts);
@@ -2474,17 +2504,11 @@ fn embed_video_card<'a>(
 
     let thumb: Element<'a, Message> = preview
         .and_then(|p| p.image_mxc.as_deref())
-        .and_then(|mxc| crate::media_cache::mxc_visual(media, mxc, 360, None))
-        .unwrap_or_else(|| {
-            // No thumbnail (yet) — a dark 16:9 stage keeps the card's shape.
-            container(iced::widget::Space::new().width(360.0).height(202.0))
-                .style(|_theme: &iced::Theme| iced::widget::container::Style {
-                    background: Some(iced::Color::from_rgb8(0x10, 0x10, 0x10).into()),
-                    border: iced::border::rounded(4),
-                    ..iced::widget::container::Style::default()
-                })
-                .into()
-        });
+        // Fixed 360×202 for both states — the loaded image is letterboxed into
+        // the same box the placeholder holds, so its arrival can't resize the
+        // card (which is what tripped the layout-invalidation warning).
+        .and_then(|mxc| crate::media_cache::mxc_visual(media, mxc, 360, Some(202)))
+        .unwrap_or_else(card_image_placeholder);
 
     let play_badge = container(
         text(crate::theme::icon::PLAY)
@@ -2627,11 +2651,11 @@ fn generic_preview<'a>(
     }
 
     let mut card = row![].spacing(8).align_y(iced::Center);
-    if let Some(thumb) = preview
-        .image_mxc
-        .as_deref()
-        .and_then(|mxc| crate::media_cache::mxc_visual(media, mxc, 72, None))
-    {
+    // Reserve the 72×72 square whenever the card has an image, so the thumb
+    // swaps in without the text block jumping to the side.
+    if let Some(mxc) = preview.image_mxc.as_deref() {
+        let thumb = crate::media_cache::mxc_visual(media, mxc, 72, Some(72))
+            .unwrap_or_else(|| media_placeholder(72, 72));
         card = card.push(thumb);
     }
     card = card.push(details);
@@ -2754,11 +2778,11 @@ fn tweet_card<'a>(
 
     let mut author_row = row![].spacing(8).align_y(iced::Center);
     if is_avatar {
-        if let Some(avatar) = preview
-            .image_mxc
-            .as_deref()
-            .and_then(|mxc| crate::media_cache::mxc_visual(media, mxc, 36, Some(36)))
-        {
+        // Reserve the 36×36 avatar slot so the header doesn't jump when the
+        // picture lands.
+        if let Some(mxc) = preview.image_mxc.as_deref() {
+            let avatar = crate::media_cache::mxc_visual(media, mxc, 36, Some(36))
+                .unwrap_or_else(|| media_placeholder(36, 36));
             author_row = author_row.push(avatar);
         }
     }
@@ -2774,12 +2798,12 @@ fn tweet_card<'a>(
         card = card.push(remote_text(tweet.text).size(14));
     }
     if !is_avatar {
-        if let Some(media) = preview
-            .image_mxc
-            .as_deref()
-            .and_then(|mxc| crate::media_cache::mxc_visual(media, mxc, 360, None))
-        {
-            card = card.push(media);
+        // Fixed 360×202 stage (same box for placeholder and loaded photo) so
+        // the tweet's image doesn't resize the card when it downloads.
+        if let Some(mxc) = preview.image_mxc.as_deref() {
+            let photo = crate::media_cache::mxc_visual(media, mxc, 360, Some(202))
+                .unwrap_or_else(card_image_placeholder);
+            card = card.push(photo);
         }
     }
     card = card.push(text("X").size(11).style(text::secondary));
@@ -3362,8 +3386,11 @@ fn render_text_body<'a>(
     }
 
     let emoji_widget = |emoji: &'a client_core::events::CustomEmoji, size: u16| -> Element<'a, Message> {
+        // Hold a fixed size×size box while loading rather than the old
+        // variable-width `:shortcode:` text, which rewrapped emoji-heavy lines
+        // as each image landed — the glyph now swaps in with no reflow.
         crate::media_cache::mxc_visual(media, &emoji.mxc_url, size, Some(size))
-            .unwrap_or_else(|| remote_text(format!(":{}:", emoji.shortcode)).size(15).into())
+            .unwrap_or_else(|| media_placeholder(size, size))
     };
     let link_widget = |url: &str| -> Element<'a, Message> {
         button(remote_text(url.to_string()).size(15))
@@ -3471,21 +3498,25 @@ fn resolve_reaction_visual<'a>(
     media: &'a crate::media_cache::State,
     shortcode_index: &'a HashMap<String, client_core::events::CustomEmoji>,
 ) -> Element<'a, Message> {
-    if let Some(visual) = crate::media_cache::mxc_visual(media, key, 18, Some(18)) {
-        return visual;
+    // Custom-emoji reactions are keyed directly by the `mxc://` URL. Hold an
+    // 18×18 box while the image loads instead of falling through to render the
+    // raw URL as emoji-font text — that both looked wrong and reflowed the pill
+    // row when the image finally swapped in.
+    if key.starts_with("mxc://") {
+        return crate::media_cache::mxc_visual(media, key, 18, Some(18))
+            .unwrap_or_else(|| media_placeholder(18, 18));
     }
-    // Hash lookup instead of a full pack scan — this runs per reaction pill
-    // per view rebuild, and unicode keys (the common case) never matched
-    // anyway. Now case-insensitive like the message tokenizer.
+    // Some clients key on `:shortcode:` instead — resolve against the room's
+    // packs (hash lookup, not a full scan: this runs per pill per view rebuild;
+    // case-insensitive like the message tokenizer) and reserve the same box.
     if !shortcode_index.is_empty() {
         let shortcode = key.trim_matches(':');
         if let Some(emoji) = shortcode_index.get(&shortcode.to_ascii_lowercase()) {
-            if let Some(visual) = crate::media_cache::mxc_visual(media, &emoji.mxc_url, 18, Some(18))
-            {
-                return visual;
-            }
+            return crate::media_cache::mxc_visual(media, &emoji.mxc_url, 18, Some(18))
+                .unwrap_or_else(|| media_placeholder(18, 18));
         }
     }
+    // Unicode emoji (or an unknown key rendered as text).
     crate::emoji_picker::emoji_visual(media, key, 20)
 }
 
