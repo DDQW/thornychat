@@ -102,7 +102,7 @@ pub fn stage_bounds_probe() -> iced::Task<Option<(iced::Rectangle, Option<iced::
                 .viewport
                 .intersection(&(bounds + self.translation))
                 .unwrap_or(Rectangle::new(Point::ORIGIN, Size::ZERO));
-            self.translation = self.translation - translation;
+            self.translation -= translation;
             self.viewport = visible;
         }
 

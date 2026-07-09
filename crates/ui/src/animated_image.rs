@@ -39,9 +39,9 @@ impl std::fmt::Debug for Frames {
 }
 
 impl Frames {
-    /// Decode animated [`Frames`] from raw GIF bytes. `Err(())` on any decode
+    /// Decode animated [`Frames`] from raw GIF bytes. `None` on any decode
     /// failure — the caller falls back to a static raster handle.
-    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ()> {
+    pub fn from_bytes(bytes: Vec<u8>) -> Option<Self> {
         // The decode trait (`into_frames`) is on the `image` crate; refer to it
         // by its crate-root path so it isn't shadowed by the `iced::advanced::image`
         // import above.
@@ -56,16 +56,16 @@ impl Frames {
             hasher.finish()
         };
 
-        let decoder = ::image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes))
-            .map_err(|_| ())?;
+        let decoder =
+            ::image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).ok()?;
         let frames = decoder
             .into_frames()
             .map(|result| result.map(Frame::from))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| ())?;
-        let first = frames.first().cloned().ok_or(())?;
+            .ok()?;
+        let first = frames.first().cloned()?;
 
-        Ok(Frames { id, first, frames })
+        Some(Frames { id, first, frames })
     }
 
     /// Content-hash identity used for widget change-detection — log this

@@ -72,7 +72,7 @@ fn main() -> iced::Result {
         // iced (it would divide the viewport into a degenerate size).
         .scale_factor(|state: &ui::App| {
             let scale = state.theme.ui_scale;
-            if scale.is_finite() { scale.clamp(0.8, 1.5) as f32 } else { 1.0 }
+            if scale.is_finite() { scale.clamp(0.8, 1.5) } else { 1.0 }
         })
         .default_font(default_font)
         // cosmic-text's glyph-fallback walk (default font -> per-script

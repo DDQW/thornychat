@@ -1132,7 +1132,7 @@ fn fetch_emoji_svg_task(cache_dir: std::path::PathBuf, emoji: String) -> Task<Me
     let emoji_for_message = emoji.clone();
     Task::perform(
         async move { crate::twemoji::fetch(&cache_dir, &emoji).await.map_err(|e| e.to_string()) },
-        move |result| Message::EmojiSvgFetched(emoji_for_message.clone(), result),
+        move |result| Message::EmojiSvgFetched(emoji_for_message, result),
     )
 }
 
@@ -1416,7 +1416,7 @@ fn request_url_previews(
                 let url_for_message = url.clone();
                 tasks.push(Task::perform(
                     async move { crate::tweets::fetch(api_url).await.map_err(|e| e.to_string()) },
-                    move |result| Message::TweetFetched(url_for_message.clone(), result),
+                    move |result| Message::TweetFetched(url_for_message, result),
                 ));
             }
         } else if let Some(api_url) = crate::steam::steam_api_url(url) {
@@ -1425,7 +1425,7 @@ fn request_url_previews(
                 let url_for_message = url.clone();
                 tasks.push(Task::perform(
                     async move { crate::steam::fetch(api_url).await.map_err(|e| e.to_string()) },
-                    move |result| Message::SteamFetched(url_for_message.clone(), result),
+                    move |result| Message::SteamFetched(url_for_message, result),
                 ));
             }
         } else if !app.url_previews.contains_key(url) {
@@ -1448,7 +1448,7 @@ fn ensure_web_images(app: &mut App, urls: impl IntoIterator<Item = String>) -> T
         let url_for_message = url.clone();
         tasks.push(Task::perform(
             async move { crate::tweets::fetch_image(url).await.map_err(|e| e.to_string()) },
-            move |result| Message::WebImageFetched(url_for_message.clone(), result),
+            move |result| Message::WebImageFetched(url_for_message, result),
         ));
     }
     Task::batch(tasks)
@@ -1522,7 +1522,7 @@ fn paste_clipboard_task(room_id: String) -> Task<Message> {
                 // Nothing attachable — the everyday text paste. Stay silent.
                 Message::Noop
             } else {
-                Message::AttachmentsReadFor { room_id: room_id.clone(), files, failed }
+                Message::AttachmentsReadFor { room_id, files, failed }
             }
         },
     )
@@ -1598,7 +1598,7 @@ fn paste_menu_task(room_id: String) -> Task<Message> {
                 if files.is_empty() && failed == 0 {
                     Message::Noop
                 } else {
-                    Message::AttachmentsReadFor { room_id: room_id.clone(), files, failed }
+                    Message::AttachmentsReadFor { room_id, files, failed }
                 }
             }
             PasteRoute::Nothing => Message::Noop,
@@ -1632,11 +1632,7 @@ fn dropped_file_task(room_id: String, path: std::path::PathBuf) -> Task<Message>
                 }
             }
         },
-        move |(files, failed)| Message::AttachmentsReadFor {
-            room_id: room_id.clone(),
-            files,
-            failed,
-        },
+        move |(files, failed)| Message::AttachmentsReadFor { room_id, files, failed },
     )
 }
 
@@ -1664,7 +1660,7 @@ fn pick_attachment_task(room_id: String) -> Task<Message> {
                 // pin above the composer.
                 Message::Noop
             } else {
-                Message::AttachmentsReadFor { room_id: room_id.clone(), files, failed: 0 }
+                Message::AttachmentsReadFor { room_id, files, failed: 0 }
             }
         },
     )
@@ -2247,14 +2243,14 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                             tokio::task::spawn_blocking(move || {
                                 crate::animated_image::Frames::from_bytes(bytes.clone())
                                     .map(std::sync::Arc::new)
-                                    .map_err(|_| iced::widget::image::Handle::from_bytes(bytes))
+                                    .ok_or_else(|| iced::widget::image::Handle::from_bytes(bytes))
                             })
                             .await
                             .unwrap_or_else(|_| {
                                 Err(iced::widget::image::Handle::from_bytes(Vec::new()))
                             })
                         },
-                        move |result| Message::GifDecoded(url.clone(), result),
+                        move |result| Message::GifDecoded(url, result),
                     );
                 } else if crate::media_cache::looks_like_unsupported_container(&bytes) {
                     // Fetched fine, but our raster decoder can't read AVIF/HEIC —
