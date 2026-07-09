@@ -81,14 +81,15 @@ pub struct State {
     /// otherwise each linear-scanned the whole roster per lookup per frame.
     pub member_index: std::collections::HashMap<String, usize>,
     /// Item indices matching the active search, recomputed on query edits
-    /// and timeline snapshots (`recompute_search_matches`) — view() only
+    /// and timeline changes (`recompute_search_matches`) — view() only
     /// tests membership, instead of lowercasing every message body and
     /// sender name per item per frame for the whole life of a search.
     pub search_matches: std::collections::HashSet<usize>,
     /// First URL of each item's text body, index-parallel to `items` and
-    /// set in the same place (`TimelineUpdated` in update.rs) — view()
-    /// reads it instead of re-running a linkify scan + String allocation
-    /// per URL-bearing message per rebuild.
+    /// maintained in lockstep with it by `apply_timeline_diffs` (cleared in
+    /// select_room), so the two can't drift apart — view() reads it instead
+    /// of re-running a linkify scan + String allocation per URL-bearing
+    /// message per rebuild.
     pub first_urls: Vec<Option<String>>,
     pub editing: Option<EditingState>,
     pub confirm_delete: Option<String>,
@@ -1534,21 +1535,14 @@ pub fn view<'a>(
             // right edge lands just left of the list.
             .padding(iced::Padding { top: 0.0, right: 206.0, bottom: 0.0, left: 0.0 })
     });
-    // The composer's right-click edit menu floats here in the outer stack
-    // (not in `chat_area`): a `stack` short-circuits event dispatch on the
-    // first layer that captures, so the pick/dismiss click is swallowed before
-    // it can reach the sibling composer and unfocus it — a `column` would let
-    // the click fall through to the input and drop the selection Cut/Copy need.
-    let composer_menu = state
-        .composer
-        .context_menu
-        .map(|anchor| composer::context_menu(anchor).map(Message::Composer));
+    // NOTE: the composer's right-click edit menu is NOT layered here — it
+    // anchors at the window-global cursor, so it's rendered in the root
+    // full-window stack (`view::view`). This inner stack's origin is offset by
+    // the room-list sidebar, which would shove the menu down-right of the
+    // pointer.
     let mut root = iced::widget::stack![layout.height(Length::Fill)];
     if let Some(flyout) = member_flyout {
         root = root.push(flyout);
-    }
-    if let Some(menu) = composer_menu {
-        root = root.push(menu);
     }
     root.into()
 }
@@ -1762,7 +1756,7 @@ pub fn recompute_search_matches(state: &mut State, show_membership_events: bool)
 
 fn item_matches(item: &TimelineItem, query_lower: &str) -> bool {
     let content_text = match &item.content {
-        TimelineItemContent::Text(body) => Some(body.as_str()),
+        TimelineItemContent::Text(body) | TimelineItemContent::Emote(body) => Some(body.as_str()),
         TimelineItemContent::Image { caption, .. } => caption.as_deref(),
         TimelineItemContent::Sticker { body, .. } => Some(body.as_str()),
         TimelineItemContent::File { filename, .. } => Some(filename.as_str()),
@@ -2010,6 +2004,13 @@ fn render_item<'a>(
 
     let body_line: Element<'a, Message> = match &item.content {
         TimelineItemContent::Text(body) => render_text_body(body, shortcode_index, media),
+        // `/me` action text, tinted with the configurable emote color. The
+        // sender's name is prepended below (the standalone name header is
+        // suppressed for emotes). `remote_text` for the CJK-fallback path —
+        // the body is server-authored.
+        TimelineItemContent::Emote(action) => {
+            remote_text(action.as_str()).size(15).style(colored_text(crate::theme::emote_color())).into()
+        }
         TimelineItemContent::Image { url, caption, width, height } => {
             // The row's footprint is fixed *before* the bytes arrive —
             // sender-declared dimensions when the event carries them,
@@ -2099,7 +2100,10 @@ fn render_item<'a>(
         None => styled_name().into(),
     };
     let mut block = column![].spacing(2);
-    if show_header {
+    // Emotes render `<name> <action>` inline (see the final push below), so a
+    // standalone name header would just duplicate the name — suppress it.
+    let is_emote = matches!(item.content, TimelineItemContent::Emote(_));
+    if show_header && !is_emote {
         let sender_line: Element<'a, Message> = row![
             sender_name,
             text(format_timestamp(item.timestamp_ms)).size(11).style(text::secondary),
@@ -2134,7 +2138,7 @@ fn render_item<'a>(
         quote = quote.push(texts);
         // The whole quote is a button: click to jump to the quoted post.
         block = block.push(
-            button(container(quote).padding([3, 8]).style(crate::theme::panel))
+            button(container(quote).padding([3, 8]))
                 .on_press(Message::JumpToEvent(reply.event_id.clone()))
                 .style(crate::theme::ghost_button)
                 .padding(0),
@@ -2167,7 +2171,18 @@ fn render_item<'a>(
         return with_avatar(avatar, block.into());
     }
 
-    block = block.push(body_line);
+    // Emotes prepend the sender's name (in its normal tag color) to the
+    // action on one line: "alice vibe codes with claude". The name matches
+    // the action's text size so the two read as one phrase, not a header.
+    block = block.push(if is_emote {
+        let emote_name = remote_text(sender.to_string())
+            .size(15)
+            .font(crate::theme::SEMIBOLD_FONT)
+            .style(colored_text(name_color));
+        row![emote_name, body_line].spacing(6).align_y(iced::Center).into()
+    } else {
+        body_line
+    });
 
     // Preview card for the message's first link: a playable card for
     // YouTube/Vimeo/Dailymotion/Rumble/Kick videos, a rich FxTwitter card
@@ -2473,12 +2488,73 @@ fn preview_card<'a>(
     .into()
 }
 
-/// Video-platform link card: OG title/thumbnail (from the homeserver's
-/// preview proxy, once resolved) under a centered play badge, with a
-/// platform-tinted accent strip. Clicking starts the player *inline*: the
-/// card re-renders as [`inline_player_card`] and the native webview is
-/// glued over its stage — the link never opens a browser. Renders even
-/// before/without OG data since the video id alone is enough to play.
+/// Fixed height of a video card's title row. Making it constant keeps the
+/// header the same height in the preview and playing states so clicking
+/// play never reflows the timeline; sized to clear the play state's
+/// size-11 Watch/✕ buttons.
+const VIDEO_CARD_HEADER_HEIGHT: f32 = 26.0;
+
+/// The black 448×252 stage both video-card states show — the preview's
+/// thumbnail and the live webview occupy the exact same box, so playback
+/// swaps in without a resize.
+fn video_stage_style(_theme: &iced::Theme) -> iced::widget::container::Style {
+    iced::widget::container::Style {
+        background: Some(iced::Color::BLACK.into()),
+        border: iced::border::rounded(4),
+        ..iced::widget::container::Style::default()
+    }
+}
+
+/// A video card's title row, fixed at [`VIDEO_CARD_HEADER_HEIGHT`]: the
+/// title (single line, so a long one can't grow the header) plus any
+/// trailing controls — the play state's Watch/✕ buttons, none in preview.
+fn video_card_header<'a>(
+    title: String,
+    trailing: Vec<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let mut row = row![remote_text(title)
+        .size(12)
+        .font(crate::theme::SEMIBOLD_FONT)
+        .wrapping(text::Wrapping::None)
+        .width(Length::Fill)]
+    .spacing(6)
+    .align_y(iced::Center)
+    .height(Length::Fixed(VIDEO_CARD_HEADER_HEIGHT));
+    for control in trailing {
+        row = row.push(control);
+    }
+    // Clip so the single-line title truncates at the buttons instead of
+    // overflowing the fixed-height header.
+    container(row).clip(true).into()
+}
+
+/// A video card's outer chrome: platform accent strip, panel, and the
+/// `[header, stage]` column. Preview and playing states share it, so the
+/// row's footprint is identical either way.
+fn video_card_frame<'a>(
+    platform: crate::video_player::Platform,
+    header: Element<'a, Message>,
+    stage: Element<'a, Message>,
+) -> Element<'a, Message> {
+    container(
+        container(column![header, stage].spacing(6)).padding(8).style(crate::theme::panel),
+    )
+    .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 3.0 })
+    .max_width(480)
+    .style(move |_theme: &iced::Theme| iced::widget::container::Style {
+        background: Some(platform.accent().into()),
+        border: iced::border::rounded(3),
+        ..iced::widget::container::Style::default()
+    })
+    .into()
+}
+
+/// Video-platform link card: OG title over a play badge on the platform's
+/// thumbnail, with a platform-tinted accent strip. Clicking starts the
+/// player *inline*, swapping this for [`inline_player_card`] — which shares
+/// [`video_card_frame`] and the same 448×252 stage, so the click never
+/// resizes the row. Renders even before/without OG data since the video id
+/// alone is enough to play.
 fn embed_video_card<'a>(
     video: crate::video_player::EmbedVideo,
     preview: Option<&'a UrlPreview>,
@@ -2496,20 +2572,6 @@ fn embed_video_card<'a>(
     let title = preview.and_then(|p| p.title.clone()).or_else(|| video.file_name());
     let platform = video.platform;
 
-    let mut details =
-        column![text(platform.label()).size(11).style(text::secondary)].spacing(2);
-    if let Some(title) = title.clone() {
-        details = details.push(remote_text(title).size(13).font(crate::theme::SEMIBOLD_FONT));
-    }
-
-    let thumb: Element<'a, Message> = preview
-        .and_then(|p| p.image_mxc.as_deref())
-        // Fixed 360×202 for both states — the loaded image is letterboxed into
-        // the same box the placeholder holds, so its arrival can't resize the
-        // card (which is what tripped the layout-invalidation warning).
-        .and_then(|mxc| crate::media_cache::mxc_visual(media, mxc, 360, Some(202)))
-        .unwrap_or_else(card_image_placeholder);
-
     let play_badge = container(
         text(crate::theme::icon::PLAY)
             .font(crate::theme::ICON_FONT)
@@ -2523,8 +2585,30 @@ fn embed_video_card<'a>(
         ..iced::widget::container::Style::default()
     });
 
-    let visual = iced::widget::stack![thumb, iced::widget::center(play_badge)];
-    let card = column![details, visual].spacing(6);
+    // Thumbnail contain-fit into the same 448×252 box the webview fills (the
+    // OG image is letterboxed onto the black stage, matching the player).
+    let stage_inner: Element<'a, Message> = match preview
+        .and_then(|p| p.image_mxc.as_deref())
+        .and_then(|mxc| {
+            crate::media_cache::mxc_visual(
+                media,
+                mxc,
+                crate::video_player::STAGE_WIDTH as u16,
+                Some(crate::video_player::STAGE_HEIGHT as u16),
+            )
+        }) {
+        Some(thumb) => iced::widget::stack![thumb, iced::widget::center(play_badge)].into(),
+        None => iced::widget::center(play_badge).into(),
+    };
+    let stage = container(stage_inner)
+        .center_x(Length::Fixed(crate::video_player::STAGE_WIDTH))
+        .center_y(Length::Fixed(crate::video_player::STAGE_HEIGHT))
+        .clip(true)
+        .style(video_stage_style);
+
+    let header =
+        video_card_header(title.clone().unwrap_or_else(|| platform.label().to_string()), Vec::new());
+    let card = video_card_frame(platform, header, stage.into());
 
     // Inline playback needs the event id to know which card is the player;
     // a message without one (a local echo still in flight) can't play yet.
@@ -2534,58 +2618,33 @@ fn embed_video_card<'a>(
         title,
     });
 
-    button(
-        container(container(card).padding(8).style(crate::theme::panel))
-            .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 3.0 })
-            .max_width(480)
-            .style(move |_theme: &iced::Theme| iced::widget::container::Style {
-                // Platform-tinted accent strip (same construction as `preview_card`).
-                background: Some(platform.accent().into()),
-                border: iced::border::rounded(3),
-                ..iced::widget::container::Style::default()
-            }),
-    )
-    .on_press_maybe(play)
-    .style(crate::theme::ghost_button)
-    .padding(0)
-    .into()
+    button(card).on_press_maybe(play).style(crate::theme::ghost_button).padding(0).into()
 }
 
-/// The playing state of a video card: a header row (title, "Watch on
-/// {platform}", ✕) over the stage the native webview covers. The stage
-/// container carries `video_player::stage_id`, which the root dispatcher
-/// probes every update to keep the webview glued through scrolls — iced
-/// only ever draws the black backing (visible for the moment WebView2
-/// takes to start) or the error fallback if it couldn't.
+/// The playing state of a video card: a header row (title, ✕) over the
+/// stage the native webview covers. The stage container carries
+/// `video_player::stage_id`, which the root dispatcher probes every update
+/// to keep the webview glued through scrolls — iced only ever draws the
+/// black backing (visible for the moment WebView2 takes to start) or the
+/// error fallback if it couldn't.
+///
+/// No "watch externally" button here on purpose: the platform's own player
+/// overlay (the YouTube logo, etc.) already offers that, and a header
+/// duplicate is redundant. The error stage below keeps its own "Watch in
+/// browser" fallback for when nothing loaded — the one case the overlay
+/// isn't there.
 fn inline_player_card(inline: &InlineVideo) -> Element<'_, Message> {
     let platform = inline.video.platform;
     let label = platform.label();
-    // "Watch on Video" doesn't read as a platform name the way "Watch on
-    // YouTube" does — a direct file link isn't hosted anywhere in
-    // particular, so the escape hatch is framed as opening it rather than
-    // watching it "on" something.
-    let watch_text = if platform == crate::video_player::Platform::File {
-        "Open externally".to_string()
-    } else {
-        format!("Watch on {label}")
-    };
 
-    let header = row![
-        remote_text(inline.title.as_deref().unwrap_or(label))
-            .size(12)
-            .font(crate::theme::SEMIBOLD_FONT)
-            .width(Length::Fill),
-        button(text(watch_text).size(11))
-            .on_press(Message::OpenVideoExternally(inline.video.watch_url()))
-            .style(crate::theme::ghost_button)
-            .padding([2, 6]),
-        button(text(crate::theme::icon::CLOSE).font(crate::theme::ICON_FONT).size(11))
+    let header = video_card_header(
+        inline.title.clone().unwrap_or_else(|| label.to_string()),
+        vec![button(text(crate::theme::icon::CLOSE).font(crate::theme::ICON_FONT).size(11))
             .on_press(Message::StopVideo)
             .style(crate::theme::ghost_button)
-            .padding([2, 6]),
-    ]
-    .spacing(6)
-    .align_y(iced::Center);
+            .padding([2, 6])
+            .into()],
+    );
 
     let stage_content: Element<'_, Message> = if let Some(reason) = &inline.error {
         column![
@@ -2610,23 +2669,9 @@ fn inline_player_card(inline: &InlineVideo) -> Element<'_, Message> {
         .id(crate::video_player::stage_id())
         .center_x(Length::Fixed(crate::video_player::STAGE_WIDTH))
         .center_y(Length::Fixed(crate::video_player::STAGE_HEIGHT))
-        .style(|_theme: &iced::Theme| iced::widget::container::Style {
-            background: Some(iced::Color::BLACK.into()),
-            border: iced::border::rounded(4),
-            ..iced::widget::container::Style::default()
-        });
+        .style(video_stage_style);
 
-    container(
-        container(column![header, stage].spacing(6)).padding(8).style(crate::theme::panel),
-    )
-    .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 0.0, left: 3.0 })
-    .max_width(480)
-    .style(move |_theme: &iced::Theme| iced::widget::container::Style {
-        background: Some(platform.accent().into()),
-        border: iced::border::rounded(3),
-        ..iced::widget::container::Style::default()
-    })
-    .into()
+    video_card_frame(platform, header, stage.into())
 }
 
 fn generic_preview<'a>(
@@ -3147,7 +3192,7 @@ fn format_timestamp(timestamp_ms: u64) -> String {
 fn ui_snippet(content: &TimelineItemContent) -> String {
     const LIMIT: usize = 90;
     match content {
-        TimelineItemContent::Text(body) => {
+        TimelineItemContent::Text(body) | TimelineItemContent::Emote(body) => {
             let flat = body.replace('\n', " ");
             if flat.chars().count() > LIMIT {
                 format!("{}…", flat.chars().take(LIMIT).collect::<String>())

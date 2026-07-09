@@ -1153,6 +1153,13 @@ fn send_message(
 ) {
     let Some(room_id) = app.timeline.room_id.clone() else { return };
     let Some(cmd_tx) = &app.cmd_tx else { return };
+    // `/me <action>` sends an IRC-style emote (`m.emote`) — the standard
+    // command across Matrix clients. Only the exact `/me ` prefix triggers it,
+    // so an ordinary message like "/method" still sends as text.
+    let (emote, body) = match body.strip_prefix("/me ") {
+        Some(action) => (true, action.to_string()),
+        None => (false, body),
+    };
     let request_id = Uuid::new_v4();
     app.timeline.composer.pending_request = Some(request_id);
     let _ = cmd_tx.send(ClientCommand::SendMessage {
@@ -1160,6 +1167,7 @@ fn send_message(
         body,
         mentioned_user_ids,
         reply_to_event_id,
+        emote,
         request_id,
     });
 }
@@ -1445,6 +1453,80 @@ fn request_url_previews(
     (Task::batch(tasks), first_urls)
 }
 
+/// Applies a batch of [`client_core::events::TimelineDiff`]s to the open room's
+/// timeline, keeping `first_urls` (the per-item first-link cache, index-parallel
+/// to `items`) in lockstep so the two can never drift apart.
+fn apply_timeline_diffs(
+    items: &mut Vec<client_core::events::TimelineItem>,
+    first_urls: &mut Vec<Option<String>>,
+    diffs: Vec<client_core::events::TimelineDiff>,
+) {
+    use client_core::events::{TimelineDiff as D, TimelineItemContent};
+    fn first_of(item: &client_core::events::TimelineItem) -> Option<String> {
+        match &item.content {
+            TimelineItemContent::Text(body) => screens::timeline::first_url_in(body),
+            _ => None,
+        }
+    }
+    for diff in diffs {
+        match diff {
+            D::Append(new_items) => {
+                for item in new_items {
+                    first_urls.push(first_of(&item));
+                    items.push(item);
+                }
+            }
+            D::Clear => {
+                items.clear();
+                first_urls.clear();
+            }
+            D::PushFront(item) => {
+                first_urls.insert(0, first_of(&item));
+                items.insert(0, item);
+            }
+            D::PushBack(item) => {
+                first_urls.push(first_of(&item));
+                items.push(item);
+            }
+            D::PopFront => {
+                if !items.is_empty() {
+                    items.remove(0);
+                    first_urls.remove(0);
+                }
+            }
+            D::PopBack => {
+                items.pop();
+                first_urls.pop();
+            }
+            D::Insert { index, item } => {
+                let index = index.min(items.len());
+                first_urls.insert(index, first_of(&item));
+                items.insert(index, item);
+            }
+            D::Set { index, item } => {
+                if index < items.len() {
+                    first_urls[index] = first_of(&item);
+                    items[index] = item;
+                }
+            }
+            D::Remove { index } => {
+                if index < items.len() {
+                    items.remove(index);
+                    first_urls.remove(index);
+                }
+            }
+            D::Truncate { length } => {
+                items.truncate(length);
+                first_urls.truncate(length);
+            }
+            D::Reset(new_items) => {
+                *first_urls = new_items.iter().map(first_of).collect();
+                *items = new_items;
+            }
+        }
+    }
+}
+
 /// Kicks off fetches for plain-HTTPS images (tweet avatars/photos) not yet
 /// cached or in flight.
 fn ensure_web_images(app: &mut App, urls: impl IntoIterator<Item = String>) -> Task<Message> {
@@ -1472,7 +1554,8 @@ fn unicode_reaction_keys(
     media: &crate::media_cache::State,
 ) -> Vec<String> {
     // One pass over the packs instead of a rescan per reaction key — this
-    // runs on every TimelineUpdated (i.e. every sync tick of the open room).
+    // runs for every timeline diff batch (i.e. every sync tick of the open
+    // room), over just the items that changed.
     // Filter on borrowed strs and clone last (same shape as
     // image_urls_in_timeline above): after warmup nearly every key is
     // already cached and would be cloned only to be dropped.
@@ -1917,46 +2000,73 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                 }
             }
         }
-        ClientEvent::TimelineUpdated { room_id, items } => {
+        ClientEvent::TimelineDiffs { room_id, diffs } => {
             if app.timeline.room_id.as_deref() == Some(room_id.as_str()) {
-                let urls = image_urls_in_timeline(&items, &app.media);
-                let mut candidate_emojis =
-                    unicode_reaction_keys(&items, &app.emoji_packs, &app.media);
-                candidate_emojis.extend(unicode_body_emojis(&items, &app.media));
-
-                // A sync gap makes the SDK clear and re-seed the timeline:
-                // the previous window is gone wholesale (its first event no
-                // longer exists in the new snapshot — appends, prepends,
-                // edits and receipts all keep it). Should be rare now that
-                // the open room is subscribed (see `OpenRoom` in the sync
-                // worker), but still happens after sleep/reconnect or a
-                // >20-event burst. The old scroll offset points into a list
-                // that no longer exists; land at the live edge predictably
-                // instead of wherever the clamp happens to fall.
-                let reset = {
-                    let old_first = app.timeline.items.iter().find_map(|i| i.event_id.as_deref());
-                    match old_first {
-                        Some(old_first) => {
-                            !items.iter().any(|i| i.event_id.as_deref() == Some(old_first))
+                // Items this batch adds or replaces — the grow-only harvests
+                // (media, custom/unicode emoji, stickers, link previews) only
+                // need to look at what changed, not the whole list.
+                let mut touched: Vec<client_core::events::TimelineItem> = Vec::new();
+                for diff in &diffs {
+                    use client_core::events::TimelineDiff as D;
+                    match diff {
+                        D::Append(items) | D::Reset(items) => {
+                            touched.extend(items.iter().cloned());
                         }
-                        None => false,
+                        D::PushFront(item)
+                        | D::PushBack(item)
+                        | D::Insert { item, .. }
+                        | D::Set { item, .. } => touched.push(item.clone()),
+                        D::Clear | D::PopFront | D::PopBack | D::Remove { .. }
+                        | D::Truncate { .. } => {}
                     }
-                };
+                }
 
-                // Grow the sticker collection with anything new in this
-                // snapshot (before `items` is moved into state below).
-                let stickers_changed = harvest_stickers(app, &items);
-                let (preview_task, first_urls) = request_url_previews(app, &items);
-                app.timeline.items = items;
-                // Index-parallel to items — set only here and cleared in
-                // select_room, so the two can't drift apart.
-                app.timeline.first_urls = first_urls;
-                // Membership set is index-based; a new snapshot invalidates
-                // it (no-op when no search is active).
+                let urls = image_urls_in_timeline(&touched, &app.media);
+                let mut candidate_emojis =
+                    unicode_reaction_keys(&touched, &app.emoji_packs, &app.media);
+                candidate_emojis.extend(unicode_body_emojis(&touched, &app.media));
+                // Grow the sticker collection with anything new (before the
+                // diffs are consumed by `apply_timeline_diffs` below).
+                let stickers_changed = harvest_stickers(app, &touched);
+                // Kick off link-preview fetches for the newly-seen items
+                // (idempotent — already-requested URLs are skipped). Its
+                // first_urls vec is discarded; `apply_timeline_diffs` keeps the
+                // real index-parallel one in lockstep with `items`.
+                let (preview_task, _) = request_url_previews(app, &touched);
+
+                // A sync gap makes the SDK clear and re-seed the window: the
+                // previous first event is gone wholesale (appends, prepends,
+                // edits and receipts all keep it). Detected exactly as the
+                // snapshot path did — by whether the old first event survives —
+                // so the snap-to-live-edge behaviour is unchanged.
+                let old_first = app
+                    .timeline
+                    .items
+                    .iter()
+                    .find_map(|i| i.event_id.as_deref())
+                    .map(str::to_owned);
+
+                apply_timeline_diffs(
+                    &mut app.timeline.items,
+                    &mut app.timeline.first_urls,
+                    diffs,
+                );
+
+                // Membership set is index-based; a changed list invalidates it
+                // (no-op when no search is active).
                 screens::timeline::recompute_search_matches(
                     &mut app.timeline,
                     app.chat.show_membership_events,
                 );
+
+                let reset = match old_first {
+                    Some(old_first) => !app
+                        .timeline
+                        .items
+                        .iter()
+                        .any(|i| i.event_id.as_deref() == Some(old_first.as_str())),
+                    None => false,
+                };
                 let reset_task = if reset {
                     tracing::info!(
                         len = app.timeline.items.len(),
@@ -1973,8 +2083,7 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                 };
                 ensure_media_fetched(app, urls);
                 let emoji_task = ensure_emoji_fetched(app, candidate_emojis);
-                // Diagnostic: the receiving end of the pipeline — a new
-                // tail event proves snapshots reach the UI, and `at_bottom`
+                // A new tail event proves updates reach the UI, and `at_bottom`
                 // at that instant is the sole gate for marking read.
                 let newest_changed = {
                     let newest =
@@ -1988,11 +2097,6 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                         .iter()
                         .rev()
                         .find_map(|i| i.event_id.clone());
-                    tracing::debug!(
-                        at_bottom = app.timeline.at_bottom,
-                        len = app.timeline.items.len(),
-                        "timeline snapshot applied (new tail event)"
-                    );
                     // A genuinely new message while scrolled up: the unread
                     // boundary is meaningful again.
                     if !app.timeline.at_bottom {

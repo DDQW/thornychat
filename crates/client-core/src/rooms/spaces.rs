@@ -6,8 +6,9 @@
 //!
 //! Also owns joined-space *discovery* ([`spawn_joined_spaces_subscriber`]):
 //! sliding sync filters `m.space` rooms out entirely, so the spaces the
-//! account belongs to have to be found over REST and force-fed into the
-//! store via room subscriptions before the sidebar can list them.
+//! account belongs to have to be found over REST and reported to the sync
+//! worker, which subscribes to them (force-feeding them into the store) so the
+//! sidebar can list them.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -142,15 +143,22 @@ pub async fn emit_space_children(
 /// `not_room_types: ["m.space"]` into its sliding sync list, so a joined
 /// space never arrives through sync alone; room *subscriptions* bypass list
 /// filters, so this task discovers the account's joined spaces server-side
-/// once at startup and subscribes to them. From there the normal machinery
-/// takes over (store insert → room-list forwarder → sidebar).
+/// once at startup and reports them over `pin_tx` to the sync worker, which
+/// owns the session subscription set and subscribes to them. From there the
+/// normal machinery takes over (store insert → room-list forwarder → sidebar).
+///
+/// The worker (not this task) issues the subscription because since
+/// matrix-sdk-ui 0.17 `subscribe_to_rooms` REPLACES its set — a subscription
+/// issued here would clobber the open rooms' subscriptions and vice-versa, so
+/// the set has to be owned in one place.
 ///
 /// Spaces joined mid-session from the explorer are covered by the `JoinRoom`
-/// handler subscribing to whatever it joins; a space joined from *another*
-/// client mid-session only shows up on the next start.
+/// handler pinning whatever it joins; a space joined from *another* client
+/// mid-session only shows up on the next start.
 pub fn spawn_joined_spaces_subscriber(
     client: Client,
     room_list_service: Arc<RoomListService>,
+    pin_tx: mpsc::UnboundedSender<Vec<OwnedRoomId>>,
     event_tx: mpsc::UnboundedSender<ClientEvent>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -211,9 +219,12 @@ pub fn spawn_joined_spaces_subscriber(
         if space_ids.is_empty() {
             return;
         }
-        let refs: Vec<&RoomId> = space_ids.iter().map(std::ops::Deref::deref).collect();
-        room_list_service.subscribe_to_rooms(&refs).await;
-        tracing::info!(count = refs.len(), "subscribed to joined spaces");
+        // Hand the discovered spaces to the sync worker, which owns the
+        // session subscription set and subscribes them alongside the open
+        // rooms. (Subscribing here would clobber that set — 0.17+ replace
+        // semantics.)
+        tracing::info!(count = space_ids.len(), "discovered joined spaces");
+        let _ = pin_tx.send(space_ids.clone());
 
         // With the spaces subscribed, fetch each one's child ids so the
         // sidebar can nest joined rooms under their space instead of

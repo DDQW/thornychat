@@ -27,6 +27,9 @@ pub enum ClientCommand {
         mentioned_user_ids: Vec<String>,
         /// When set, sends as a rich reply quoting this event.
         reply_to_event_id: Option<String>,
+        /// `true` sends an IRC-style action (`m.emote`) instead of a normal
+        /// `m.text` — the UI sets this after stripping a `/me ` prefix.
+        emote: bool,
         request_id: RequestId,
     },
     EditMessage { room_id: String, event_id: String, new_body: String, request_id: RequestId },

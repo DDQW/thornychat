@@ -23,10 +23,11 @@ pub enum ColorRole {
     AccentText,
     Success,
     Danger,
+    Emote,
 }
 
 impl ColorRole {
-    pub const ALL: [ColorRole; 9] = [
+    pub const ALL: [ColorRole; 10] = [
         ColorRole::Background,
         ColorRole::Surface,
         ColorRole::SurfaceStrong,
@@ -36,6 +37,7 @@ impl ColorRole {
         ColorRole::AccentText,
         ColorRole::Success,
         ColorRole::Danger,
+        ColorRole::Emote,
     ];
 
     fn label(self) -> &'static str {
@@ -49,6 +51,7 @@ impl ColorRole {
             ColorRole::AccentText => "Text on accent",
             ColorRole::Success => "Success",
             ColorRole::Danger => "Danger",
+            ColorRole::Emote => "Emote / action text",
         }
     }
 
@@ -63,6 +66,7 @@ impl ColorRole {
             ColorRole::AccentText => theme.accent_text,
             ColorRole::Success => theme.success,
             ColorRole::Danger => theme.danger,
+            ColorRole::Emote => theme.emote,
         }
     }
 
@@ -77,6 +81,7 @@ impl ColorRole {
             ColorRole::AccentText => theme.accent_text = color,
             ColorRole::Success => theme.success = color,
             ColorRole::Danger => theme.danger = color,
+            ColorRole::Emote => theme.emote = color,
         }
     }
 }

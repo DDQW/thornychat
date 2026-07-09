@@ -1,6 +1,7 @@
 pub mod appearance;
 pub mod encryption;
 pub mod general;
+pub mod manual;
 pub mod notifications;
 pub mod privacy;
 pub mod room_admin;
@@ -24,6 +25,9 @@ pub enum Tab {
     RoomAdmin,
     Appearance,
     Security,
+    /// The user manual. Deliberately omitted from `TABS` (below) so it shows no
+    /// text tab; it is reached only via the "?" button on the tab strip.
+    Manual,
 }
 
 const TABS: [(Tab, &str); 7] = [
@@ -161,6 +165,15 @@ pub fn view<'a>(
         );
     }
 
+    // A lone "?" opens the manual (a hidden tab, so it's not in `TABS`). The
+    // Fill spacer stretches the strip so the button lands on the trailing edge.
+    let manual_style =
+        if state.tab == Tab::Manual { crate::theme::selected_ghost_button } else { crate::theme::ghost_button };
+    tabs = tabs.push(iced::widget::space::horizontal());
+    tabs = tabs.push(
+        button(text("?").size(13)).on_press(Message::TabSelected(Tab::Manual)).style(manual_style).padding([6, 12]),
+    );
+
     let body: Element<'_, Message> = match state.tab {
         Tab::General => general::view(&state.general, account, spellcheck, chat).map(Message::General),
         Tab::Privacy => privacy::view(privacy).map(Message::Privacy),
@@ -169,6 +182,7 @@ pub fn view<'a>(
         Tab::RoomAdmin => room_admin::view(),
         Tab::Appearance => appearance::view(&state.appearance, theme).map(Message::Appearance),
         Tab::Security => verification::recovery_settings_view(verification).map(Message::Security),
+        Tab::Manual => manual::view(),
     };
 
     column![tabs, body].spacing(16).into()

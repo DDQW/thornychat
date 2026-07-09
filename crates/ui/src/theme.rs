@@ -101,6 +101,23 @@ fn corner_radius() -> f32 {
     f32::from_bits(CORNER_RADIUS_BITS.load(Ordering::Relaxed))
 }
 
+/// Emote (`/me` action) text color. Same rationale as `corner_radius` above:
+/// the timeline's emote render needs it, but iced's `Palette` has no slot for
+/// a bespoke color, so it's synced once per frame from `view()` via
+/// `sync_emote_color`. Packed RGBA8 (`0xRRGGBBAA`); seeded to the dark
+/// preset's emote color so it reads sanely before the first sync.
+static EMOTE_COLOR_BITS: AtomicU32 = AtomicU32::new(0xC3_9B_E8_FF);
+
+pub fn sync_emote_color(color: Color) {
+    let [r, g, b, a] = color.into_rgba8();
+    EMOTE_COLOR_BITS.store(u32::from_be_bytes([r, g, b, a]), Ordering::Relaxed);
+}
+
+pub fn emote_color() -> Color {
+    let [r, g, b, a] = EMOTE_COLOR_BITS.load(Ordering::Relaxed).to_be_bytes();
+    Color::from_rgba8(r, g, b, f32::from(a) / 255.0)
+}
+
 /// Quiet button: no chrome at rest, soft rounded highlight on hover.
 /// Replaces iced's `button::primary` default (a solid accent-blue slab)
 /// everywhere a control shouldn't shout — room rows, toolbars, pickers.

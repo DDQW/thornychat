@@ -7,7 +7,7 @@
 //! so the worker lives entirely outside iced's executor and communicates
 //! purely through `ClientCommand` (in) / `ClientEvent` (out).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -26,8 +26,8 @@ use matrix_sdk::ruma::events::room::ImageInfo;
 use matrix_sdk::ruma::events::sticker::StickerEventContent;
 use matrix_sdk::ruma::events::{AnyMessageLikeEventContent, Mentions, ToDeviceEvent};
 use matrix_sdk::ruma::{
-    EventId, OwnedMxcUri, OwnedServerName, OwnedUserId, RoomId, RoomOrAliasId, ServerName, UInt,
-    UserId,
+    EventId, OwnedMxcUri, OwnedRoomId, OwnedServerName, OwnedUserId, RoomId, RoomOrAliasId,
+    ServerName, UInt, UserId,
 };
 use matrix_sdk::Client;
 use matrix_sdk_ui::sync_service::{self, SyncService};
@@ -61,6 +61,12 @@ impl Drop for RoomHandles {
 /// request/response of a single command.
 struct WorkerState {
     open_rooms: HashMap<String, RoomHandles>,
+    /// Room ids kept subscribed for the whole session no matter what is open:
+    /// joined spaces (which sliding sync's list filter keeps out of the store
+    /// unless subscribed) and rooms joined this session. Unioned with the open
+    /// rooms on every [`resubscribe`], which explains why the whole set has to
+    /// be re-sent each time.
+    pinned_subscriptions: HashSet<OwnedRoomId>,
     /// The single active SAS verification flow, if any (self-verification
     /// or verifying another user/incoming request) — see the project plan
     /// for why only one flow at a time is supported.
@@ -114,6 +120,14 @@ async fn run(
     let _room_list_handle = room_list::spawn_forwarder(client.clone(), event_tx.clone());
     let _notification_watcher = crate::push::spawn_watcher(client.clone(), event_tx.clone());
     let call_manager = crate::calls::CallManager::spawn(client.clone(), event_tx.clone());
+    // Rooms the worker keeps subscribed for the session flow in here: the
+    // joined-space discovery below reports the spaces it finds, and `JoinRoom`
+    // reports what it joins. The worker owns the single active subscription
+    // set (see `resubscribe`); components no longer subscribe on their own,
+    // because since matrix-sdk-ui 0.17 each `subscribe_to_rooms` REPLACES the
+    // set and would clobber the others.
+    let (pin_tx, mut pin_rx) = mpsc::unbounded_channel::<Vec<OwnedRoomId>>();
+
     // One-shot rather than lifetime, but detached for the same reason:
     // sliding sync never delivers `m.space` rooms (list filter), so joined
     // spaces have to be discovered over REST and subscribed to explicitly or
@@ -121,6 +135,7 @@ async fn run(
     let _space_discovery = crate::rooms::spaces::spawn_joined_spaces_subscriber(
         client.clone(),
         sync_service.room_list_service(),
+        pin_tx.clone(),
         event_tx.clone(),
     );
 
@@ -136,6 +151,7 @@ async fn run(
 
     let mut worker_state = WorkerState {
         open_rooms: HashMap::new(),
+        pinned_subscriptions: HashSet::new(),
         verification: None,
         pending_cross_signing_session,
     };
@@ -165,12 +181,28 @@ async fn run(
                 }
             }
 
+            Some(room_ids) = pin_rx.recv() => {
+                // A component (space discovery or a join) asked to keep these
+                // rooms subscribed for the session; record them and re-send
+                // the whole active set.
+                for id in room_ids {
+                    worker_state.pinned_subscriptions.insert(id);
+                }
+                resubscribe(
+                    &sync_service,
+                    &worker_state.pinned_subscriptions,
+                    &worker_state.open_rooms,
+                    None,
+                )
+                .await;
+            }
+
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else {
                     // UI dropped its sender; shut down cleanly.
                     break;
                 };
-                handle_command(&client, &sync_service, &call_manager, &mut worker_state, cmd, &event_tx, &media_cache_dir).await;
+                handle_command(&client, &sync_service, &call_manager, &mut worker_state, cmd, &event_tx, &media_cache_dir, &pin_tx).await;
             }
         }
     }
@@ -214,6 +246,39 @@ fn register_verification_handlers(client: &Client, tx: mpsc::UnboundedSender<Ver
     });
 }
 
+/// Re-sends the full active room-subscription set. Since matrix-sdk-ui 0.17
+/// `subscribe_to_rooms` REPLACES the previous set ("All previous room
+/// subscriptions will be forgotten"), so every call must carry the whole set
+/// we want live: the session-pinned rooms (joined spaces + rooms joined this
+/// session, which sliding sync's list filter would otherwise keep out of the
+/// store) plus every currently-open room (each needs a real timeline window so
+/// live events append instead of resetting), plus an optional room being
+/// opened right now that isn't recorded in `open_rooms` yet.
+async fn resubscribe(
+    sync_service: &SyncService,
+    pinned: &HashSet<OwnedRoomId>,
+    open_rooms: &HashMap<String, RoomHandles>,
+    opening: Option<&RoomId>,
+) {
+    let mut set: HashSet<OwnedRoomId> = pinned.clone();
+    for key in open_rooms.keys() {
+        if let Ok(id) = RoomId::parse(key) {
+            set.insert(id);
+        }
+    }
+    if let Some(id) = opening {
+        set.insert(id.to_owned());
+    }
+    if set.is_empty() {
+        return;
+    }
+    let refs: Vec<&RoomId> = set.iter().map(std::ops::Deref::deref).collect();
+    sync_service.room_list_service().subscribe_to_rooms(&refs).await;
+}
+
+// One parameter per worker-owned resource a command can touch; bundling them
+// into a context struct would just move the same list one level down.
+#[allow(clippy::too_many_arguments)]
 async fn handle_command(
     client: &Client,
     sync_service: &SyncService,
@@ -222,6 +287,7 @@ async fn handle_command(
     cmd: ClientCommand,
     event_tx: &mpsc::UnboundedSender<ClientEvent>,
     media_cache_dir: &std::path::Path,
+    pin_tx: &mpsc::UnboundedSender<Vec<OwnedRoomId>>,
 ) {
     match cmd {
         ClientCommand::Logout => {
@@ -251,11 +317,20 @@ async fn handle_command(
             // boundary — the "timeline randomly jumps back up to some old
             // post" bug. Subscribing upgrades the open room to a real
             // timeline window (limit 20 + full required state), so live
-            // updates append instead of resetting. This SDK version has no
-            // unsubscribe; subscriptions simply last the session, like
-            // Element X.
+            // updates append instead of resetting. Since matrix-sdk-ui 0.17
+            // `subscribe_to_rooms` REPLACES its set ("All previous room
+            // subscriptions will be forgotten"), so re-send the whole active
+            // set (pinned spaces + every open room + this one) — subscribing
+            // to just this room would silently drop the joined-space
+            // subscriptions and empty the sidebar.
             if let Ok(parsed_room_id) = RoomId::parse(&room_id) {
-                sync_service.room_list_service().subscribe_to_rooms(&[&parsed_room_id]).await;
+                resubscribe(
+                    sync_service,
+                    &worker_state.pinned_subscriptions,
+                    &worker_state.open_rooms,
+                    Some(&parsed_room_id),
+                )
+                .await;
             }
             match timeline::open(client, room_id.clone(), event_tx.clone()).await {
                 Ok((timeline, timeline_task)) => {
@@ -355,6 +430,15 @@ async fn handle_command(
 
         ClientCommand::CloseRoom { room_id } => {
             worker_state.open_rooms.remove(&room_id);
+            // Relinquish the closed room's subscription slot (kept only if it
+            // is pinned) by re-sending the now-smaller active set.
+            resubscribe(
+                sync_service,
+                &worker_state.pinned_subscriptions,
+                &worker_state.open_rooms,
+                None,
+            )
+            .await;
         }
 
         ClientCommand::OpenDirectMessage { user_id, encrypted, request_id } => {
@@ -418,13 +502,20 @@ async fn handle_command(
             });
         }
 
-        ClientCommand::SendMessage { room_id, body, mentioned_user_ids, reply_to_event_id, request_id } => {
+        ClientCommand::SendMessage { room_id, body, mentioned_user_ids, reply_to_event_id, emote, request_id } => {
             let Some(handles) = worker_state.open_rooms.get(&room_id) else {
                 fail(event_tx, request_id, "room is not open");
                 return;
             };
 
-            let mut content = RoomMessageEventContent::text_markdown(body);
+            // `/me` actions ride as `m.emote`; everything else is `m.text`.
+            // Both take the same markdown body and the same mentions/reply
+            // handling below.
+            let mut content = if emote {
+                RoomMessageEventContent::emote_markdown(body)
+            } else {
+                RoomMessageEventContent::text_markdown(body)
+            };
             if !mentioned_user_ids.is_empty() {
                 match parse_user_ids(&mentioned_user_ids) {
                     Ok(ids) => content = content.add_mentions(Mentions::with_user_ids(ids)),
@@ -1113,18 +1204,21 @@ async fn handle_command(
                 via.iter().filter_map(|s| ServerName::parse(s).ok()).collect();
             let client = client.clone();
             let event_tx = event_tx.clone();
-            let room_list_service = sync_service.room_list_service();
+            let pin_tx = pin_tx.clone();
             tokio::spawn(async move {
                 match client.join_room_by_id_or_alias(&alias, &via).await {
                     Ok(room) => {
-                        // Subscribe unconditionally: if what was joined is a
+                        // Pin what we just joined for the session: if it's a
                         // space, sliding sync will never deliver it (list
-                        // filter) — and its type isn't knowable locally yet
+                        // filter), and its type isn't knowable locally yet
                         // (the join response is just a room id; the create
-                        // event only arrives via the subscription itself).
-                        // For plain rooms this merely fronts the subscription
-                        // that opening them would establish anyway.
-                        room_list_service.subscribe_to_rooms(&[room.room_id()]).await;
+                        // event only arrives via the subscription itself), so
+                        // we can't tell a space from a plain room here — pin
+                        // either way (harmless for a plain room). The worker
+                        // folds it into the active set; subscribing directly
+                        // here would clobber the spaces/open rooms (0.17+
+                        // replace semantics).
+                        let _ = pin_tx.send(vec![room.room_id().to_owned()]);
                         succeed(&event_tx, request_id);
                         // Same uncertainty about the type: sweep children so
                         // a just-joined space groups its rooms in the

@@ -108,6 +108,9 @@ pub struct ThemeConfig {
     pub accent_text: ThemeColor,
     pub success: ThemeColor,
     pub danger: ThemeColor,
+    /// `/me` action-message ("emote") text. The sender's name keeps its own
+    /// per-user color; only the action text uses this tint.
+    pub emote: ThemeColor,
 
     /// `None` keeps iced's default font. Takes effect on next launch —
     /// iced's `.default_font()` is a static builder-time setting, not a
@@ -148,6 +151,7 @@ impl ThemeConfig {
             accent_text: ThemeColor::new(0xFF, 0xFF, 0xFF),
             success: ThemeColor::new(0x3F, 0xB8, 0x68),
             danger: ThemeColor::new(0xEF, 0x6B, 0x6B),
+            emote: ThemeColor::new(0xC3, 0x9B, 0xE8),
             font_family: None,
             ui_scale: 1.0,
             corner_radius: 6.0,
@@ -172,6 +176,7 @@ impl ThemeConfig {
             accent_text: ThemeColor::new(0xFF, 0xFF, 0xFF),
             success: ThemeColor::new(0x1F, 0x9D, 0x57),
             danger: ThemeColor::new(0xD9, 0x3B, 0x3B),
+            emote: ThemeColor::new(0x7A, 0x4F, 0xB0),
             font_family: None,
             ui_scale: 1.0,
             corner_radius: 6.0,

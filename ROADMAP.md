@@ -1,7 +1,7 @@
 # ThornyChat (Matrix client, Rust + iced) — Remaining Work
 
 Windows-first Matrix client at `C:\Users\Office\thornychat`. Workspace: `client-core`
-(matrix-sdk 0.13 wrapper, no iced), `ui` (iced 0.13 views, no matrix-sdk types),
+(matrix-sdk 0.18 wrapper, no iced), `ui` (iced 0.14 views, no matrix-sdk types),
 `app` (binary). Tested against a real account on `matrix.org` (SSO login).
 Release builds: `cargo build --release` → `target/x86_64-pc-windows-msvc/release/thornychat.exe`.
 
@@ -110,8 +110,8 @@ Remaining (media):
 - Media/emoji disk caches have no eviction.
 - Round avatar clipping (iced can't clip images; would need CPU pre-rounding).
 - Jump-to-quote scroll is index-estimated, not pixel-exact.
-- Repo hygiene: not a git repo yet, no CI, near-zero tests (plan called for
-  wiremock-based client-core tests + update() logic tests).
+- Repo hygiene: no CI, near-zero tests (plan called for wiremock-based
+  client-core tests + update() logic tests).
 
 ## Environment notes for a fresh chat
 - rustup toolchain, target `x86_64-pc-windows-msvc`; build logs pattern:

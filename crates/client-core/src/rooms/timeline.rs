@@ -1,10 +1,11 @@
-//! Per-room `matrix_sdk_ui::timeline::Timeline` wrapper. Like the room list,
-//! forwards a full snapshot on every update rather than translating
-//! `matrix-sdk-ui`'s `VectorDiff` batches into an incremental UI-side patch
-//! — correct and simple for the timeline sizes a chat client renders at
-//! once; can be optimized into real diffing later without changing the
-//! `ClientEvent` shape (`TimelineUpdated` already just carries the full
-//! item list).
+//! Per-room `matrix_sdk_ui::timeline::Timeline` wrapper. Consumes the SDK's
+//! *windowed* timeline subscription and forwards its `VectorDiff` batches to
+//! the UI as [`TimelineDiff`]s (see [`open`]) — only the items that actually
+//! changed cross the boundary each sync tick, and a room opens with just the
+//! newest ~20 items, revealing older ones as the user paginates. The one
+//! wrinkle the translator handles: the SDK's content-less `TimelineStart`
+//! marker converts to nothing, so diff indices are renumbered into the UI
+//! list's space (see `kept` / `translate_diff`).
 
 use std::sync::Arc;
 
@@ -22,19 +23,21 @@ use matrix_sdk_ui::timeline::{
 use matrix_sdk_ui::timeline::{
     InReplyToDetails, MsgLikeKind, TimelineDetails, TimelineEventShieldState,
 };
+use matrix_sdk_ui::eyeball_im::VectorDiff;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
 use crate::events::{
-    friendly_user_id, ClientEvent, ReactionGroup, ReplyPreview, TimelineItem, TimelineItemContent,
-    TrustShield,
+    friendly_user_id, ClientEvent, ReactionGroup, ReplyPreview, TimelineDiff, TimelineItem,
+    TimelineItemContent, TrustShield,
 };
 
 /// Opens (or re-opens) the timeline for `room_id_str` and spawns a task that
-/// forwards a full snapshot whenever it changes. Returns the shared
-/// `Timeline` handle too, so the caller can also call `.send()`/`.edit()`/
+/// forwards the SDK's windowed `VectorDiff` stream as [`TimelineDiff`]
+/// batches. Returns the shared `Timeline` handle too, so the caller can also
+/// call `.send()`/`.edit()`/
 /// `.redact()`/`.send_attachment()`/`.toggle_reaction()` on the exact same
 /// instance whose changes are already being forwarded — `Timeline` isn't
 /// `Clone`, so it's wrapped in an `Arc` for both sides to hold onto.
@@ -52,82 +55,188 @@ pub async fn open(
     let timeline = Arc::new(room.timeline().await?);
     let own_user_id = client.user_id().map(ToOwned::to_owned);
 
-    // subscribe()'s initial vector is a skip-windowed view (at most the last
-    // 20 cached items in SDK 0.13), but every later snapshot below reads
-    // `items()` — the FULL unskipped list. Mixing the two made the item
-    // count jump on the first diff after re-opening a room with cached
-    // history ("content changed by itself"). Use items() for the initial
-    // snapshot too; the subscription is only the wakeup stream.
-    let (_, mut diff_stream) = timeline.subscribe().await;
-    let initial_items = timeline.items().await;
+    // Consume the SDK's *windowed* timeline subscription: `subscribe()` yields
+    // an initial vector (the newest ~20 cached items) plus a stream of
+    // `VectorDiff` batches that keep that window — and its growth under
+    // back-pagination — in sync. Forward those as `TimelineDiff`s rather than
+    // re-reading and re-converting the whole list each tick.
+    //
+    // `convert_item` drops the SDK's content-less `TimelineStart` marker, which
+    // would misalign every later indexed diff; `kept` records which SDK
+    // positions survive conversion so `translate_diff` can renumber indices
+    // into the UI list's space.
+    let (initial, mut diff_stream) = timeline.subscribe().await;
     let mut reply_details_requested = std::collections::HashSet::new();
-    request_missing_reply_details(&timeline, initial_items.iter(), &mut reply_details_requested);
-    let _ = event_tx.send(ClientEvent::TimelineUpdated {
+    request_missing_reply_details(&timeline, initial.iter(), &mut reply_details_requested);
+
+    let mut kept: Vec<bool> = Vec::with_capacity(initial.len());
+    let mut initial_items: Vec<TimelineItem> = Vec::new();
+    for item in initial.iter() {
+        match convert_item(item, own_user_id.as_deref()) {
+            Some(converted) => {
+                kept.push(true);
+                initial_items.push(converted);
+            }
+            None => kept.push(false),
+        }
+    }
+    let _ = event_tx.send(ClientEvent::TimelineDiffs {
         room_id: room_id_str.clone(),
-        items: convert_items(initial_items.iter(), own_user_id.as_deref()),
+        diffs: vec![TimelineDiff::Reset(initial_items)],
     });
 
     let forward_timeline = Arc::clone(&timeline);
     let handle = tokio::spawn(async move {
-        let mut last_forwarded_newest: Option<String> = None;
-        while diff_stream.next().await.is_some() {
-            // Coalesce diff bursts (initial back-pagination, decryption
-            // catch-up): each snapshot below is a full convert+clone pass
-            // that the UI fully reprocesses, and only the last one of a
-            // burst is ever visible. Diffs in a burst arrive milliseconds
-            // apart — not necessarily pre-queued — so absorb until a short
-            // quiet window passes (`items()` reads current state, skipping
-            // intermediate wakeups is safe). Hard cap so a room with a
-            // steady event drizzle still ships snapshots promptly.
-            let absorb_started = std::time::Instant::now();
-            while absorb_started.elapsed() < std::time::Duration::from_millis(400) {
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(80),
-                    diff_stream.next(),
-                )
-                .await
-                {
-                    // Another batch landed inside the quiet window — keep
-                    // absorbing.
-                    Ok(Some(_)) => continue,
-                    // Stream closed (room closing) — snapshot what we have;
-                    // the outer loop exits on its next poll.
-                    Ok(None) => break,
-                    // The quiet window passed with no new diffs — the burst
-                    // is over.
-                    Err(_) => break,
+        while let Some(batch) = diff_stream.next().await {
+            // Reply previews load lazily; kick off a fetch for any quoted event
+            // an item in this batch still hasn't resolved (over the raw SDK
+            // items, before conversion drops anything).
+            for vdiff in &batch {
+                match vdiff {
+                    VectorDiff::Append { values } | VectorDiff::Reset { values } => {
+                        request_missing_reply_details(
+                            &forward_timeline,
+                            values.iter(),
+                            &mut reply_details_requested,
+                        );
+                    }
+                    VectorDiff::PushFront { value }
+                    | VectorDiff::PushBack { value }
+                    | VectorDiff::Insert { value, .. }
+                    | VectorDiff::Set { value, .. } => {
+                        request_missing_reply_details(
+                            &forward_timeline,
+                            std::iter::once(value),
+                            &mut reply_details_requested,
+                        );
+                    }
+                    _ => {}
                 }
             }
-            let items = forward_timeline.items().await;
-            request_missing_reply_details(
-                &forward_timeline,
-                items.iter(),
-                &mut reply_details_requested,
-            );
-            let converted = convert_items(items.iter(), own_user_id.as_deref());
-            // Diagnostic: proves whether new events flow through this
-            // forwarder at all (vs. the stream silently stalling), and at
-            // what rate. Logged only when the newest event changes.
-            let newest = converted.iter().rev().find_map(|item| item.event_id.clone());
-            if newest != last_forwarded_newest {
-                tracing::debug!(
-                    len = converted.len(),
-                    newest = newest.as_deref().unwrap_or("-"),
-                    "timeline snapshot forwarded (new tail event)"
-                );
-                last_forwarded_newest = newest;
+
+            let diffs: Vec<TimelineDiff> = batch
+                .into_iter()
+                .filter_map(|vdiff| translate_diff(vdiff, own_user_id.as_deref(), &mut kept))
+                .collect();
+            if diffs.is_empty() {
+                continue;
             }
-            let event = ClientEvent::TimelineUpdated {
-                room_id: room_id_str.clone(),
-                items: converted,
-            };
-            if event_tx.send(event).is_err() {
+            if event_tx
+                .send(ClientEvent::TimelineDiffs { room_id: room_id_str.clone(), diffs })
+                .is_err()
+            {
                 break;
             }
         }
     });
 
     Ok((timeline, handle))
+}
+
+/// Translates one SDK `VectorDiff` — over the *windowed* timeline, whose
+/// indices include the content-less `TimelineStart` marker — into a UI
+/// [`TimelineDiff`] whose indices are in the converted list's space. `kept`
+/// mirrors, per SDK position, whether that item survives conversion, and is
+/// updated in place. Returns `None` when the diff only touched a dropped item
+/// (so it has no UI effect).
+fn translate_diff(
+    diff: VectorDiff<Arc<SdkTimelineItem>>,
+    own_user_id: Option<&UserId>,
+    kept: &mut Vec<bool>,
+) -> Option<TimelineDiff> {
+    // UI index for SDK index `i`: the count of kept positions strictly before it.
+    fn ui_index(kept: &[bool], i: usize) -> usize {
+        kept[..i.min(kept.len())].iter().filter(|k| **k).count()
+    }
+    match diff {
+        VectorDiff::Append { values } => {
+            let mut items = Vec::new();
+            for value in &values {
+                match convert_item(value, own_user_id) {
+                    Some(item) => {
+                        kept.push(true);
+                        items.push(item);
+                    }
+                    None => kept.push(false),
+                }
+            }
+            (!items.is_empty()).then_some(TimelineDiff::Append(items))
+        }
+        VectorDiff::Clear => {
+            kept.clear();
+            Some(TimelineDiff::Clear)
+        }
+        VectorDiff::PushFront { value } => {
+            let converted = convert_item(&value, own_user_id);
+            kept.insert(0, converted.is_some());
+            converted.map(TimelineDiff::PushFront)
+        }
+        VectorDiff::PushBack { value } => {
+            let converted = convert_item(&value, own_user_id);
+            kept.push(converted.is_some());
+            converted.map(TimelineDiff::PushBack)
+        }
+        VectorDiff::PopFront => {
+            let was_kept = if kept.is_empty() { false } else { kept.remove(0) };
+            was_kept.then_some(TimelineDiff::PopFront)
+        }
+        VectorDiff::PopBack => {
+            let was_kept = kept.pop().unwrap_or(false);
+            was_kept.then_some(TimelineDiff::PopBack)
+        }
+        VectorDiff::Insert { index, value } => {
+            let index = index.min(kept.len());
+            let ui = ui_index(kept, index);
+            let converted = convert_item(&value, own_user_id);
+            kept.insert(index, converted.is_some());
+            converted.map(|item| TimelineDiff::Insert { index: ui, item })
+        }
+        VectorDiff::Set { index, value } => {
+            if index >= kept.len() {
+                return None;
+            }
+            let ui = ui_index(kept, index);
+            match (kept[index], convert_item(&value, own_user_id)) {
+                (true, Some(item)) => Some(TimelineDiff::Set { index: ui, item }),
+                (true, None) => {
+                    kept[index] = false;
+                    Some(TimelineDiff::Remove { index: ui })
+                }
+                (false, Some(item)) => {
+                    kept[index] = true;
+                    Some(TimelineDiff::Insert { index: ui, item })
+                }
+                (false, None) => None,
+            }
+        }
+        VectorDiff::Remove { index } => {
+            if index >= kept.len() {
+                return None;
+            }
+            let ui = ui_index(kept, index);
+            let was_kept = kept.remove(index);
+            was_kept.then_some(TimelineDiff::Remove { index: ui })
+        }
+        VectorDiff::Truncate { length } => {
+            let ui_len = ui_index(kept, length);
+            kept.truncate(length);
+            Some(TimelineDiff::Truncate { length: ui_len })
+        }
+        VectorDiff::Reset { values } => {
+            kept.clear();
+            let mut items = Vec::new();
+            for value in &values {
+                match convert_item(value, own_user_id) {
+                    Some(item) => {
+                        kept.push(true);
+                        items.push(item);
+                    }
+                    None => kept.push(false),
+                }
+            }
+            Some(TimelineDiff::Reset(items))
+        }
+    }
 }
 
 /// The SDK only resolves a reply's quoted-event details when that event
@@ -185,13 +294,6 @@ pub fn spawn_typing_forwarder(
             }
         }
     })
-}
-
-fn convert_items<'a>(
-    items: impl Iterator<Item = &'a Arc<SdkTimelineItem>>,
-    own_user_id: Option<&UserId>,
-) -> Vec<TimelineItem> {
-    items.filter_map(|item| convert_item(item, own_user_id)).collect()
 }
 
 fn convert_item(item: &SdkTimelineItem, own_user_id: Option<&UserId>) -> Option<TimelineItem> {
@@ -293,7 +395,7 @@ fn convert_reply_preview(details: &InReplyToDetails) -> ReplyPreview {
 fn summarize_content(content: &SdkTimelineItemContent, sender: &str) -> String {
     const LIMIT: usize = 90;
     match convert_content(content, sender, None) {
-        TimelineItemContent::Text(body) => {
+        TimelineItemContent::Text(body) | TimelineItemContent::Emote(body) => {
             let flat = body.replace('\n', " ");
             if flat.chars().count() > LIMIT {
                 let cut: String = flat.chars().take(LIMIT).collect();
@@ -510,6 +612,9 @@ fn convert_message(message: &matrix_sdk_ui::timeline::Message) -> TimelineItemCo
                 TimelineItemContent::Text(format!("[encrypted file: {}]", message.body()))
             }
         },
+        // `/me` actions: the body carries only the action text; the UI
+        // prepends the sender's name.
+        MessageType::Emote(emote) => TimelineItemContent::Emote(emote.body.clone()),
         _ => TimelineItemContent::Text(message.body().to_string()),
     }
 }

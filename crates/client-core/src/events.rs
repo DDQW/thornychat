@@ -50,11 +50,13 @@ pub enum ClientEvent {
     /// ...) — custom member-list groups defined by the room. Sorted by
     /// power level, highest first. Sent when a room is opened.
     PowerLevelTagsUpdated { room_id: String, tags: Vec<PowerLevelTag> },
-    /// The full, current set of timeline items for `room_id`. Phase 1 always
-    /// sends a full snapshot rather than an incremental diff — simple and
-    /// correct for the room sizes a chat client deals with; revisit only if
-    /// profiling shows it matters.
-    TimelineUpdated { room_id: String, items: Vec<TimelineItem> },
+    /// Incremental updates to the open room's timeline: an ordered batch of
+    /// structural changes ([`TimelineDiff`]) to apply to the UI's item list.
+    /// The worker consumes matrix-sdk-ui's *windowed* (virtualized) diff
+    /// stream, so only changed items cross the boundary each sync tick, and a
+    /// room opens showing the newest ~20 items — older ones arrive as
+    /// `PushFront`/`Insert` diffs when the user paginates up.
+    TimelineDiffs { room_id: String, diffs: Vec<TimelineDiff> },
     TypingUpdated { room_id: String, user_ids: Vec<String> },
     ReceiptsUpdated { room_id: String },
     /// Back-pagination hit the very first event of the room — no more
@@ -251,6 +253,37 @@ pub struct TimelineItem {
     pub in_reply_to: Option<ReplyPreview>,
 }
 
+/// One structural change to a room's timeline window, mirroring the SDK's
+/// `eyeball_im::VectorDiff` over already-converted [`TimelineItem`]s (indices
+/// are in the UI list's space — the worker has already dropped the SDK's
+/// content-less `TimelineStart` marker and renumbered accordingly). Applied in
+/// order by the UI; see [`ClientEvent::TimelineDiffs`].
+#[derive(Debug, Clone)]
+pub enum TimelineDiff {
+    /// Append items at the back.
+    Append(Vec<TimelineItem>),
+    /// Drop every item.
+    Clear,
+    /// Insert one item at the front.
+    PushFront(TimelineItem),
+    /// Append one item at the back.
+    PushBack(TimelineItem),
+    /// Remove the front item.
+    PopFront,
+    /// Remove the back item.
+    PopBack,
+    /// Insert at `index`, shifting later items right.
+    Insert { index: usize, item: TimelineItem },
+    /// Replace the item at `index` in place.
+    Set { index: usize, item: TimelineItem },
+    /// Remove the item at `index`.
+    Remove { index: usize },
+    /// Keep the first `length` items, drop the rest.
+    Truncate { length: usize },
+    /// Replace the whole list (SDK reset / lag catch-up).
+    Reset(Vec<TimelineItem>),
+}
+
 /// OpenGraph-style link preview, as returned by the homeserver's
 /// `/media/preview_url` endpoint. `image_mxc` is an `mxc://` URI (the
 /// homeserver re-hosts the remote image), fetchable through the normal
@@ -369,6 +402,12 @@ pub enum TrustShield {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TimelineItemContent {
     Text(String),
+    /// An IRC-style action message (`m.emote`, sent via `/me`). Holds only the
+    /// action text — the sender's name is prepended at render time, per the
+    /// Matrix spec ("prefixed by the name of the sender"). Kept distinct from
+    /// `Text` so the UI can render it inline with the name in the configurable
+    /// emote color, and so search / reply-snippets treat it correctly.
+    Emote(String),
     /// `width`/`height` are the sender-declared intrinsic dimensions from
     /// the event's `info` block (when present). The UI uses them to reserve
     /// the image's exact display footprint *before* the bytes arrive —

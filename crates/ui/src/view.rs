@@ -13,6 +13,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // a small global once per frame here, ahead of anything that reads it
     // (`ghost_button`/`overlay_button`/`selected_ghost_button`).
     crate::theme::sync_corner_radius(app.theme.corner_radius);
+    // Same story for the emote-text color (no palette slot); read by the
+    // timeline's `/me` render arm.
+    crate::theme::sync_emote_color(app.theme.emote.color());
 
     match app.route {
         Route::Login => screens::login::view(&app.login).map(Message::Login),
@@ -21,6 +24,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
             // widget type would reset the whole tree's state (scroll
             // positions, input focus) every time the lightbox opens.
             let mut layers = stack![main_shell(app)];
+            // The composer's right-click edit menu anchors at the window-
+            // global cursor, so it lives in THIS full-window stack rather than
+            // the timeline's inner one (whose origin is offset by the sidebar,
+            // which shifted the menu down-right of the pointer). A root stack
+            // still short-circuits the pick/dismiss click before it reaches
+            // the composer, preserving the focus Cut/Copy depend on.
+            if let Some(anchor) = app.timeline.composer.context_menu {
+                layers = layers.push(
+                    screens::timeline::composer::context_menu(anchor)
+                        .map(screens::timeline::Message::Composer)
+                        .map(Message::Timeline),
+                );
+            }
             if let Some(url) = &app.zoomed_image {
                 layers = layers.push(lightbox(app, url));
             }
