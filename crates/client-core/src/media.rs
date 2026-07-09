@@ -31,7 +31,23 @@ pub async fn fetch(client: &Client, cache_dir: &Path, mxc_url: &str) -> anyhow::
     // Temp-file + rename: `fs::write` truncates first, so a crash or full
     // disk mid-write would otherwise leave a corrupt file that the cache-hit
     // path above then serves forever.
-    let tmp_path = cache_path.with_extension("tmp");
+    //
+    // The temp name must be derived by APPENDING to the real filename, not
+    // via `Path::with_extension` — `cache_path_for`'s filenames are
+    // `<server>_<media-id>` (e.g. `matrix.org_TQtMBGzGjgtdYfjYIMtXSLjZ`), and
+    // `with_extension` replaces everything after the *first* dot. Since the
+    // server name itself contains a dot, that collapsed every mxc URL from
+    // the same homeserver to the identical temp path (`matrix.tmp`). A pack
+    // load fires a dozen-plus concurrent fetches for the same server, so
+    // those writes raced on that one shared file; whichever fetch renamed
+    // last could carry a *different* URL's bytes into its own permanent
+    // cache slot — and since the cache-hit path above never revalidates,
+    // that wrong association stuck forever. (Confirmed: two custom emoji
+    // with different mxc URLs were shown to return byte-identical content
+    // — same length, same hash — despite being visually distinct in Cinny.)
+    let mut tmp_name = cache_path.file_name().expect("cache_path always has a file name").to_os_string();
+    tmp_name.push(".tmp");
+    let tmp_path = cache_path.with_file_name(tmp_name);
     if tokio::fs::write(&tmp_path, &bytes).await.is_ok() {
         let _ = tokio::fs::rename(&tmp_path, &cache_path).await;
     }
