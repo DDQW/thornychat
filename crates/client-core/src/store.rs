@@ -95,4 +95,17 @@ impl AppPaths {
     pub fn logs_dir(&self) -> PathBuf {
         self.root.join("logs")
     }
+
+    /// The log file most recently written to — the one the running process
+    /// is currently appending to (daily rotation via `tracing_appender`,
+    /// named `thornychat.log.<date>`). `None` if the log directory doesn't
+    /// exist yet or holds no files.
+    pub fn latest_log_file(&self) -> Option<PathBuf> {
+        std::fs::read_dir(self.logs_dir())
+            .ok()?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
+            .max_by_key(|entry| entry.metadata().and_then(|m| m.modified()).ok())
+            .map(|entry| entry.path())
+    }
 }

@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use matrix_sdk::ruma::api::client::state::get_state_events_for_key;
+use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
 use matrix_sdk::ruma::events::{GlobalAccountDataEventType, StateEventType};
 use matrix_sdk::{Client, Room};
 use serde::Deserialize;
@@ -100,6 +100,24 @@ fn pack_content_to_emoji_pack(fallback_name: String, content: PackContent) -> Op
             CustomEmoji { shortcode, mxc_url: image.url, is_emoticon, is_sticker, width, height }
         })
         .collect();
+    // Full per-emoji manifest at info (not debug — the default log filter is
+    // "info", so a debug! here would never reach the file the user copies
+    // over when reporting a "wrong image shown" bug). Ground truth for what
+    // *should* render, cross-referenced against the media-fetch/decode/
+    // widget-mismatch logs below when diagnosing a report made on a machine
+    // we can't inspect directly.
+    for emoji in &emojis {
+        tracing::info!(
+            pack = %name,
+            shortcode = %emoji.shortcode,
+            url = %emoji.mxc_url,
+            emoticon = emoji.is_emoticon,
+            sticker = emoji.is_sticker,
+            width = ?emoji.width,
+            height = ?emoji.height,
+            "emoji pack entry"
+        );
+    }
     tracing::info!(pack = %name, count = emojis.len(), "resolved custom emoji pack");
     Some(EmojiPack { name, emojis })
 }
@@ -120,7 +138,7 @@ async fn fetch_user_pack(client: &Client) -> Result<Option<EmojiPack>, ()> {
             return Err(());
         }
     };
-    let content: PackContent = match raw.deserialize_as() {
+    let content: PackContent = match raw.deserialize_as_unchecked() {
         Ok(content) => content,
         Err(error) => {
             tracing::warn!(%error, "failed to deserialize im.ponies.user_emotes content");
@@ -146,7 +164,7 @@ async fn fetch_enabled_room_packs(client: &Client) -> Result<Vec<EmojiPack>, ()>
             return Err(());
         }
     };
-    let content = match raw.deserialize_as::<EmoteRoomsContent>() {
+    let content = match raw.deserialize_as_unchecked::<EmoteRoomsContent>() {
         Ok(content) => content,
         Err(error) => {
             tracing::warn!(%error, "failed to deserialize im.ponies.emote_rooms content");
@@ -188,13 +206,16 @@ async fn fetch_enabled_room_packs(client: &Client) -> Result<Vec<EmojiPack>, ()>
 /// `Err(())` = transport failure; `Ok(None)` = no such pack (404, empty, or
 /// undeserializable content).
 pub async fn fetch_room_pack(room: &Room, state_key: &str) -> Result<Option<EmojiPack>, ()> {
-    let request = get_state_events_for_key::v3::Request::new(
+    let request = get_state_event_for_key::v3::Request::new(
         room.room_id().to_owned(),
         StateEventType::from("im.ponies.room_emotes"),
         state_key.to_owned(),
     );
-    let raw = match room.client().send(request).await {
-        Ok(response) => response.content,
+    // 0.18/ruma-0.16: the get_state_event_for_key response now carries raw
+    // JSON (`event_or_content`) rather than a typed `Raw<content>`; wrap it back
+    // into a `Raw` of the content we're about to read.
+    let raw: matrix_sdk::ruma::serde::Raw<PackContent> = match room.client().send(request).await {
+        Ok(response) => matrix_sdk::ruma::serde::Raw::from_json(response.event_or_content),
         Err(error) => {
             let not_found =
                 error.as_client_api_error().is_some_and(|e| e.status_code.as_u16() == 404);
@@ -211,7 +232,7 @@ pub async fn fetch_room_pack(room: &Room, state_key: &str) -> Result<Option<Emoj
         }
     };
 
-    let content: PackContent = match raw.deserialize_as() {
+    let content: PackContent = match raw.deserialize_as_unchecked() {
         Ok(content) => content,
         Err(error) => {
             tracing::warn!(room_id = %room.room_id(), %error, "failed to deserialize im.ponies.room_emotes content");

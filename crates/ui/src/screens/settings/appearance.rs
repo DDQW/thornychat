@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use iced::widget::{
-    button, column, container, horizontal_space, row, scrollable, slider, text, text_input,
+    button, column, container, row, scrollable, slider, space, text, text_input,
 };
 use iced::{Element, Length, Task};
 
@@ -315,7 +315,9 @@ fn color_row<'a>(role: ColorRole, state: &'a State, theme: &'a ThemeConfig) -> E
     let is_valid = parsed.is_some();
     let swatch_color = parsed.unwrap_or_else(|| role.get(theme)).color();
 
-    let swatch = container(iced::widget::Space::new(Length::Fixed(20.0), Length::Fixed(20.0)))
+    let swatch = container(
+        iced::widget::Space::new().width(Length::Fixed(20.0)).height(Length::Fixed(20.0)),
+    )
         .style(move |_theme: &iced::Theme| container::Style {
             background: Some(swatch_color.into()),
             border: iced::border::rounded(4),
@@ -337,7 +339,7 @@ fn color_row<'a>(role: ColorRole, state: &'a State, theme: &'a ThemeConfig) -> E
                 }
                 style
             }),
-        horizontal_space(),
+        space::horizontal(),
         swatch,
     ]
     .spacing(8)

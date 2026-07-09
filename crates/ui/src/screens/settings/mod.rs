@@ -8,6 +8,7 @@ pub mod room_admin;
 use iced::widget::{button, column, row, text};
 use iced::{Element, Task};
 
+use crate::chat_config::ChatConfig;
 use crate::encryption_config::EncryptionConfig;
 use crate::privacy_config::PrivacyConfig;
 use crate::screens::verification;
@@ -99,12 +100,15 @@ pub enum Effect {
     Verification(verification::Message),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update(
     state: &mut State,
     theme: &mut ThemeConfig,
     privacy: &mut PrivacyConfig,
     encryption: &mut EncryptionConfig,
     spellcheck: &mut SpellcheckConfig,
+    chat: &mut ChatConfig,
+    profile: &str,
     message: Message,
 ) -> (Task<Message>, Effect) {
     match message {
@@ -113,7 +117,7 @@ pub fn update(
             (Task::none(), Effect::None)
         }
         Message::General(msg) => {
-            let (task, effect) = general::update(&mut state.general, spellcheck, msg);
+            let (task, effect) = general::update(&mut state.general, spellcheck, chat, profile, msg);
             (task.map(Message::General), effect)
         }
         Message::Privacy(msg) => {
@@ -143,6 +147,7 @@ pub fn view<'a>(
     privacy: &'a PrivacyConfig,
     encryption: &'a EncryptionConfig,
     spellcheck: &'a SpellcheckConfig,
+    chat: &'a ChatConfig,
     account: general::AccountInfo<'a>,
     default_modes: (client_core::events::NotificationMode, client_core::events::NotificationMode),
     verification: &'a verification::State,
@@ -157,7 +162,7 @@ pub fn view<'a>(
     }
 
     let body: Element<'_, Message> = match state.tab {
-        Tab::General => general::view(&state.general, account, spellcheck).map(Message::General),
+        Tab::General => general::view(&state.general, account, spellcheck, chat).map(Message::General),
         Tab::Privacy => privacy::view(privacy).map(Message::Privacy),
         Tab::Encryption => encryption::view(encryption).map(Message::Encryption),
         Tab::Notifications => notifications::view(&state.notifications, default_modes).map(Message::Notifications),

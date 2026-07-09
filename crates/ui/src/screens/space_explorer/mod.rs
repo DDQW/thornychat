@@ -147,7 +147,7 @@ pub fn view<'a>(
 ) -> Element<'a, Message> {
     // The stack is never left empty by update(), but don't panic on it.
     let Some(level) = state.stack.last() else {
-        return iced::widget::Space::new(0, 0).into();
+        return iced::widget::Space::new().into();
     };
 
     let backdrop = |_theme: &iced::Theme| iced::widget::container::Style {
@@ -166,7 +166,7 @@ pub fn view<'a>(
     }
     header = header.push(
         column![
-            text(level.name.clone()).size(16).font(crate::theme::SEMIBOLD_FONT),
+            crate::theme::remote_text(level.name.clone()).size(16).font(crate::theme::SEMIBOLD_FONT),
             text("Browse this space's rooms — click to open, or join.")
                 .size(11)
                 .style(text::secondary),
@@ -264,7 +264,9 @@ fn child_row<'a>(
     let join_pending =
         state.pending_join.as_ref().is_some_and(|(_, id)| id == &child.room_id);
 
-    let mut name_line = row![text(display_name.clone()).size(13)].spacing(6).align_y(iced::Center);
+    let mut name_line = row![crate::theme::remote_text(display_name.clone()).size(13)]
+        .spacing(6)
+        .align_y(iced::Center);
     if child.is_space {
         name_line = name_line.push(
             container(text("Space").size(10)).padding([1, 6]).style(crate::theme::pill_badge),
@@ -289,7 +291,8 @@ fn child_row<'a>(
         None => members,
     };
 
-    let mut info = column![name_line, text(secondary).size(11).style(text::secondary)]
+    let mut info =
+        column![name_line, crate::theme::remote_text(secondary).size(11).style(text::secondary)]
         .spacing(2)
         .width(Length::Fill);
     if let Some((failed_room, error)) = &state.join_error {

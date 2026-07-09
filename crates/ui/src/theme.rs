@@ -56,6 +56,11 @@ pub mod icon {
     pub const BACK: &str = "\u{E72B}";
     /// U+E76C ChevronRight — drill-in affordance on space rows.
     pub const CHEVRON_RIGHT: &str = "\u{E76C}";
+    /// U+E710 Add (plus) — new-room / new-DM buttons on the sidebar section
+    /// headers.
+    pub const ADD: &str = "\u{E710}";
+    /// U+E896 Download — save the open lightbox image to disk.
+    pub const DOWNLOAD: &str = "\u{E896}";
 }
 
 /// An [`icon`] glyph rendered in the Windows icon font. Central so callers
@@ -63,7 +68,20 @@ pub mod icon {
 /// the borrow so the returned `Text` (invariant in its lifetime) unifies with
 /// whatever element lifetime the call site needs.
 pub fn icon_text<'a>(glyph: &'a str, size: u16) -> text::Text<'a> {
-    text(glyph).font(ICON_FONT).size(size)
+    text(glyph).font(ICON_FONT).size(f32::from(size))
+}
+
+/// `text(...)` for strings the app doesn't author — message bodies, display
+/// names, room names, link-preview/tweet/video titles, topics. Uses advanced
+/// shaping so cosmic-text's per-glyph font fallback actually runs: iced's
+/// default `Shaping::Basic` does *no fallback at all* ("will not try to find
+/// missing glyphs in your system fonts"), which renders any script the
+/// default font lacks — all of CJK, for one — as tofu boxes, no matter what
+/// fonts are installed or bundled (the bundled Noto CJK net in app/main.rs
+/// is only reachable through this). Plain `text()` remains right for
+/// app-authored ASCII labels and provably-ASCII hot paths.
+pub fn remote_text<'a>(fragment: impl text::IntoFragment<'a>) -> text::Text<'a> {
+    text(fragment).shaping(text::Shaping::Advanced)
 }
 
 /// Corner radius for `ghost_button`/`overlay_button`/`selected_ghost_button`,
@@ -200,11 +218,12 @@ pub fn thin_scrollbar(
         background: Some(palette.background.weak.color.scale_alpha(0.5).into()),
         border: border::rounded(4),
         scroller: Scroller {
-            color: if engaged {
+            background: if engaged {
                 palette.background.strong.color
             } else {
                 palette.background.strong.color.scale_alpha(0.7)
-            },
+            }
+            .into(),
             border: border::rounded(4),
         },
     };
@@ -213,6 +232,14 @@ pub fn thin_scrollbar(
         vertical_rail: rail,
         horizontal_rail: rail,
         gap: None,
+        // The middle-click autoscroll overlay (0.14) — rarely seen; give it the
+        // rail's own colors rather than leave it unstyled.
+        auto_scroll: iced::widget::scrollable::AutoScroll {
+            background: palette.background.strong.color.into(),
+            border: border::rounded(4),
+            shadow: Default::default(),
+            icon: palette.background.strong.text,
+        },
     }
 }
 
@@ -225,6 +252,6 @@ pub fn thin_scrollbar(
 pub fn slot<'a, M: 'a>(content: Option<Element<'a, M>>) -> Element<'a, M> {
     match content {
         Some(content) => container(content).into(),
-        None => container(iced::widget::Space::new(0, 0)).into(),
+        None => container(iced::widget::Space::new()).into(),
     }
 }

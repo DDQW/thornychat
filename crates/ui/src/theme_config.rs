@@ -191,6 +191,10 @@ impl ThemeConfig {
             primary: self.accent.color(),
             success: self.success.color(),
             danger: self.danger.color(),
+            // iced 0.14 added a `warning` role; this theme doesn't expose it as
+            // a user-editable color, so seed a sane amber and let the extended
+            // palette derive its variants.
+            warning: iced::Color::from_rgb8(0xF5, 0xA6, 0x23),
         };
         let text = self.text.color();
         let surface = self.surface.color();

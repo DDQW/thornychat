@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use matrix_sdk::attachment::AttachmentConfig;
 use matrix_sdk::encryption::verification::VerificationRequest;
 use matrix_sdk::notification_settings::{
     IsEncrypted, IsOneToOne, RoomNotificationMode as SdkNotificationMode,
@@ -20,7 +19,7 @@ use matrix_sdk::room::edit::EditedContent;
 use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
 use matrix_sdk::ruma::events::key::verification::request::ToDeviceKeyVerificationRequestEventContent;
 use matrix_sdk::ruma::events::room::message::{
-    FormattedBody, MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
+    MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
     RoomMessageEventContentWithoutRelation,
 };
 use matrix_sdk::ruma::events::room::ImageInfo;
@@ -37,7 +36,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::commands::{ClientCommand, RequestId};
-use crate::events::{ClientEvent, SyncState};
+use crate::events::{ClientEvent, SyncState, UserSearchResult};
 use crate::rooms::{room_list, timeline};
 use crate::verification::{self, VerificationAction, VerificationSession};
 
@@ -148,7 +147,7 @@ async fn run(
                     sync_service::State::Idle => SyncState::Connecting,
                     sync_service::State::Running => SyncState::Syncing,
                     sync_service::State::Terminated => SyncState::Offline,
-                    sync_service::State::Error => {
+                    sync_service::State::Error(_) => {
                         SyncState::Error("sync service reported an error state".into())
                     }
                     sync_service::State::Offline => SyncState::Offline,
@@ -440,21 +439,17 @@ async fn handle_command(
                     fail(event_tx, request_id, "invalid reply event id");
                     return;
                 };
-                let reply = matrix_sdk::room::reply::Reply {
-                    event_id: reply_event_id,
-                    // Follow the quoted message's threading (reply in the
-                    // main timeline stays in the main timeline).
-                    enforce_thread: matrix_sdk::room::reply::EnforceThread::MaybeThreaded,
-                };
-                // send_reply resolves the quoted event via make_reply_event,
-                // which falls back to a blocking /event fetch when it isn't
-                // in the event cache — spawn it so a slow request doesn't
-                // stall the command loop (same hazard as RedactEvent /
-                // SendAttachment).
+                // 0.18: send_reply takes the reply-target event id directly and
+                // decides threading itself (a reply in the main timeline stays
+                // in the main timeline, matching the old MaybeThreaded). It
+                // resolves the quoted event via make_reply_event, which falls
+                // back to a blocking /event fetch when it isn't in the event
+                // cache — spawn it so a slow request doesn't stall the command
+                // loop (same hazard as RedactEvent / SendAttachment).
                 let timeline = handles.timeline.clone();
                 let event_tx = event_tx.clone();
                 tokio::spawn(async move {
-                    match timeline.send_reply(content.into(), reply).await {
+                    match timeline.send_reply(content.into(), reply_event_id).await {
                         Ok(()) => succeed(&event_tx, request_id),
                         Err(error) => fail(&event_tx, request_id, &error.to_string()),
                     }
@@ -528,36 +523,46 @@ async fn handle_command(
 
             let mime_type: mime::Mime =
                 mime.parse().unwrap_or(mime::APPLICATION_OCTET_STREAM);
-            // Markdown in the caption renders the way a text message's
-            // would (`formatted_caption` carries the HTML; clients without
-            // MSC2530 fall back to the plain `caption` body).
-            let formatted = caption.as_deref().and_then(FormattedBody::markdown);
-            let mut config =
-                AttachmentConfig::new().caption(caption).formatted_caption(formatted);
-            if !mentioned_user_ids.is_empty() {
+            // 0.18: matrix-sdk-ui's Timeline::send_attachment takes ITS OWN
+            // AttachmentConfig — a plain struct (not matrix_sdk's builder).
+            // Caption is a TextMessageEventContent (markdown → body + HTML
+            // formatted_body, MSC2530); the reply is just the target event id
+            // (the SDK derives threading/mentions itself).
+            let caption = caption.map(
+                matrix_sdk::ruma::events::room::message::TextMessageEventContent::markdown,
+            );
+            let mentions = if mentioned_user_ids.is_empty() {
+                None
+            } else {
                 match parse_user_ids(&mentioned_user_ids) {
-                    Ok(ids) => {
-                        config = config.mentions(Some(Mentions::with_user_ids(ids)));
-                    }
+                    Ok(ids) => Some(Mentions::with_user_ids(ids)),
                     Err(error) => {
                         tracing::warn!(
                             %error,
                             "invalid mentioned user id, sending attachment without mentions"
                         );
+                        None
                     }
                 }
-            }
-            if let Some(reply_to) = reply_to_event_id {
-                let Ok(reply_event_id) = EventId::parse(&reply_to) else {
-                    fail(event_tx, request_id, "invalid reply event id");
-                    return;
-                };
-                config = config.reply(Some(matrix_sdk::room::reply::Reply {
-                    event_id: reply_event_id,
-                    // Follow the quoted message's threading, like SendMessage.
-                    enforce_thread: matrix_sdk::room::reply::EnforceThread::MaybeThreaded,
-                }));
-            }
+            };
+            let in_reply_to = match reply_to_event_id {
+                Some(reply_to) => match EventId::parse(&reply_to) {
+                    Ok(id) => Some(id),
+                    Err(_) => {
+                        fail(event_tx, request_id, "invalid reply event id");
+                        return;
+                    }
+                },
+                None => None,
+            };
+            let config = matrix_sdk_ui::timeline::AttachmentConfig {
+                txn_id: None,
+                info: None,
+                thumbnail: None,
+                caption,
+                mentions,
+                in_reply_to,
+            };
 
             // send_attachment performs the full media upload before returning
             // (no send queue for attachments in SDK 0.13) — awaiting it inline
@@ -711,7 +716,8 @@ async fn handle_command(
             };
             let item_id = TimelineEventItemId::EventId(event_id);
             match handles.timeline.toggle_reaction(&item_id, &key).await {
-                Ok(()) => succeed(event_tx, request_id),
+                // 0.18 returns whether the reaction is now set; we only need success.
+                Ok(_) => succeed(event_tx, request_id),
                 Err(error) => fail(event_tx, request_id, &error.to_string()),
             }
         }
@@ -932,6 +938,77 @@ async fn handle_command(
             });
         }
 
+        ClientCommand::SearchUsers { query, request_id } => {
+            let client = client.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                // 20 is plenty for a pick-a-person list; the server also caps
+                // and flags `limited` when it truncates.
+                match client.search_users(&query, 20).await {
+                    Ok(response) => {
+                        let results = response
+                            .results
+                            .into_iter()
+                            .map(|user| UserSearchResult {
+                                user_id: user.user_id.to_string(),
+                                display_name: user.display_name,
+                                avatar_url: user.avatar_url.map(|url| url.to_string()),
+                            })
+                            .collect();
+                        let _ = event_tx.send(ClientEvent::UserSearchResults {
+                            request_id,
+                            results,
+                            limited: response.limited,
+                        });
+                        succeed(&event_tx, request_id);
+                    }
+                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
+                }
+            });
+        }
+
+        ClientCommand::CreateRoom { encrypted, request_id } => {
+            let client = client.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                use matrix_sdk::ruma::api::client::room::create_room;
+                let mut request = create_room::v3::Request::new();
+                // A solo room: no invites, creator is the sole (admin) member.
+                request.is_direct = false;
+                request.preset = Some(create_room::v3::RoomPreset::PrivateChat);
+                if encrypted {
+                    request.initial_state = vec![encryption_initial_state()];
+                }
+                match client.create_room(request).await {
+                    Ok(room) => {
+                        let _ = event_tx.send(ClientEvent::RoomCreated {
+                            room_id: room.room_id().to_string(),
+                        });
+                        succeed(&event_tx, request_id);
+                    }
+                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
+                }
+            });
+        }
+
+        ClientCommand::SetRoomName { room_id, name, request_id } => {
+            let Ok(parsed_room_id) = RoomId::parse(&room_id) else {
+                fail(event_tx, request_id, "invalid room id");
+                return;
+            };
+            let Some(room) = client.get_room(&parsed_room_id) else {
+                fail(event_tx, request_id, "unknown room");
+                return;
+            };
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                match room.set_name(name).await {
+                    Ok(_) => succeed(&event_tx, request_id),
+                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
+                }
+            });
+        }
+
         ClientCommand::InviteUser { room_id, user_id, request_id } => {
             let Ok(parsed_room_id) = RoomId::parse(&room_id) else {
                 fail(event_tx, request_id, "invalid room id");
@@ -1112,7 +1189,7 @@ async fn find_dm_room(client: &Client, user_id: &UserId) -> Option<matrix_sdk::r
             .await
             .ok()
             .flatten()
-            .and_then(|raw| raw.deserialize_as::<DirectEventContent>().ok()),
+            .and_then(|raw| raw.deserialize_as_unchecked::<DirectEventContent>().ok()),
     };
     let content = content?;
     let room_ids = content.get(<&DirectUserIdentifier>::from(user_id))?;
@@ -1133,5 +1210,6 @@ async fn find_dm_room(client: &Client, user_id: &UserId) -> Option<matrix_sdk::r
 fn encryption_initial_state(
 ) -> matrix_sdk::ruma::serde::Raw<matrix_sdk::ruma::events::AnyInitialStateEvent> {
     use matrix_sdk::ruma::events::{room::encryption::RoomEncryptionEventContent, InitialStateEvent};
-    InitialStateEvent::new(RoomEncryptionEventContent::with_recommended_defaults()).to_raw_any()
+    InitialStateEvent::with_empty_state_key(RoomEncryptionEventContent::with_recommended_defaults())
+        .to_raw_any()
 }

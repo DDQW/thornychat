@@ -1,4 +1,5 @@
 pub mod call;
+pub mod dm_search;
 pub mod login;
 pub mod room_list;
 pub mod settings;

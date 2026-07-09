@@ -57,6 +57,55 @@ pub fn read() -> Pasted {
     }
 }
 
+/// What the right-click **Paste** menu item finds on the clipboard. Unlike
+/// [`read`], this one *does* surface text: the menu can't lean on a focused
+/// `text_input` to paste text for it the way a real Ctrl+V does, so it pulls
+/// the text out and appends it to the draft itself. Text still wins over
+/// media (same rule as everywhere else).
+pub enum PastedForMenu {
+    Text(String),
+    Files(Vec<PathBuf>),
+    Image { filename: String, bytes: Vec<u8> },
+    None,
+}
+
+/// Synchronous clipboard probe for the right-click Paste — like [`read`], run
+/// it from `spawn_blocking` (clipboard opens retry-wait; PNG re-encoding is
+/// real work).
+pub fn read_for_menu() -> PastedForMenu {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(error) => {
+            tracing::debug!(%error, "clipboard unavailable");
+            return PastedForMenu::None;
+        }
+    };
+
+    // Text wins — for the menu that means appending it to the composer draft.
+    if let Ok(text) = clipboard.get_text() {
+        if !text.is_empty() {
+            return PastedForMenu::Text(text);
+        }
+    }
+
+    match clipboard.get().file_list() {
+        Ok(paths) if !paths.is_empty() => return PastedForMenu::Files(paths),
+        _ => {}
+    }
+
+    match clipboard.get_image() {
+        Ok(image) => match encode_png(image) {
+            Some(bytes) => {
+                let filename =
+                    format!("pasted-{}.png", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+                PastedForMenu::Image { filename, bytes }
+            }
+            None => PastedForMenu::None,
+        },
+        Err(_) => PastedForMenu::None,
+    }
+}
+
 /// Clipboard bitmaps arrive as raw RGBA. PNG keeps them lossless — they're
 /// usually screenshots (text and UI, where JPEG artifacts show) — and every
 /// Matrix client renders it.

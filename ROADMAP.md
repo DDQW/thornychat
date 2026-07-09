@@ -22,11 +22,13 @@ fetched direct from server, inline `:shortcode:` rendering, animated GIF emotes
 via iced_gif); Twemoji for unicode emoji, light skin tone default, per-user
 frequently-used history (persisted); URL previews via homeserver OG proxy +
 rich tweet cards via FxTwitter API (quoted tweets, media, engagement); in-app
-video playback for YouTube/Vimeo/Dailymotion/Rumble/Kick (platform-tinted
-thumbnail card w/ play badge → lightbox overlay hosting the platform's own
-iframe player in a WebView2 child window via wry — no browser; "Watch on
-{platform}" fallback, resize-synced bounds; Kick is live-channel-only, no
-confirmed embed for a specific VOD/clip); image
+video playback for YouTube/Vimeo/Dailymotion/Rumble/Kick and direct video
+file links (`.mp4`/`.webm`/`.m4v`/`.ogv`) (platform-tinted thumbnail card w/
+play badge → inline stage hosting the platform's own iframe player, or a
+plain `<video>` tag for direct files, in a WebView2 child window via wry —
+no browser, no overlay; "Watch on {platform}"/"Open externally" fallback,
+resize-synced bounds; Kick is live-channel-only, no confirmed embed for a
+specific VOD/clip); image
 zoom lightbox; notification modes per room + keyword highlights (synced both
 ways); member panel grouped by MSC3949 power-level tags ("Red/Purple team",
 full roster fetch) with click-to-DM; local message/room search; dark/light
@@ -108,8 +110,6 @@ Remaining (media):
 - Media/emoji disk caches have no eviction.
 - Round avatar clipping (iced can't clip images; would need CPU pre-rounding).
 - Jump-to-quote scroll is index-estimated, not pixel-exact.
-- Read receipts for others shown as count ("Read by N") — could become mini
-  avatars under own last message like the follower row.
 - Repo hygiene: not a git repo yet, no CI, near-zero tests (plan called for
   wiremock-based client-core tests + update() logic tests).
 

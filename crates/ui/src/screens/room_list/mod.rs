@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 
 use client_core::events::{NotificationMode, RoomSummary};
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, column, container, row, scrollable, space, text};
 use iced::{Element, Length};
 
 #[derive(Debug, Clone, Default)]
@@ -31,6 +31,12 @@ pub enum Message {
     /// prompt (handled at the app level, which knows the room's display
     /// name).
     RoomRightClicked(String),
+    /// The "+" on the Rooms header — create a fresh solo room and open it
+    /// (handled at the app level).
+    NewRoomClicked,
+    /// The "+" on the Direct messages header — opens the user-search overlay
+    /// to start a DM by name (handled at the app level).
+    NewDirectMessageClicked,
 }
 
 pub fn view<'a>(
@@ -81,14 +87,17 @@ pub fn view<'a>(
         .iter()
         .filter(|r| !r.is_dm && !r.is_space && !claimed.contains(r.room_id.as_str()))
         .collect();
-    for (label, group) in [("Direct messages", dms), ("Rooms", rooms)] {
-        if group.is_empty() {
-            continue;
-        }
-        list = list.push(section_header(label));
-        for room in group {
-            list = list.push(room_row(state, room, notification_modes, calls, media));
-        }
+    // Both sections render their header unconditionally (even when empty) so
+    // the "+" affordance is always reachable — the DM one opens the user
+    // search, the Rooms one creates a solo room. Their "+" buttons carry
+    // different messages, so this is two explicit blocks rather than a loop.
+    list = list.push(section_header("Direct messages", Message::NewDirectMessageClicked));
+    for room in dms {
+        list = list.push(room_row(state, room, notification_modes, calls, media));
+    }
+    list = list.push(section_header("Rooms", Message::NewRoomClicked));
+    for room in rooms {
+        list = list.push(room_row(state, room, notification_modes, calls, media));
     }
 
     container(
@@ -105,10 +114,28 @@ pub fn view<'a>(
     .into()
 }
 
-fn section_header(label: &str) -> Element<'_, Message> {
-    container(text(label).size(11).font(crate::theme::SEMIBOLD_FONT).style(text::secondary))
-        .padding([6, 4])
-        .into()
+/// A sidebar section header: the label plus a trailing "+" icon button that
+/// fires `add_message` (new room / new DM depending on the section).
+fn section_header(label: &str, add_message: Message) -> Element<'_, Message> {
+    let add = button(
+        text(crate::theme::icon::ADD).font(crate::theme::ICON_FONT).size(12).style(text::secondary),
+    )
+    .on_press(add_message)
+    .padding([2, 6])
+    .style(crate::theme::ghost_button);
+
+    container(
+        row![
+            text(label).size(11).font(crate::theme::SEMIBOLD_FONT).style(text::secondary),
+            space::horizontal(),
+            add,
+        ]
+        .align_y(iced::Center)
+        .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .padding([6, 4])
+    .into()
 }
 
 /// A space group header: clicking opens the space explorer (browse/join its
@@ -122,7 +149,7 @@ fn space_row<'a>(
 ) -> Element<'a, Message> {
     let label = row![
         crate::media_cache::avatar(media, space.avatar_url.as_deref(), &space.name, 26),
-        text(space.name.clone())
+        crate::theme::remote_text(space.name.clone())
             .size(14)
             .font(crate::theme::SEMIBOLD_FONT)
             .width(Length::Fill),
@@ -160,11 +187,15 @@ fn room_row<'a>(
     let name_size = 14;
     if is_muted {
         label = label.push(
-            text(room.name.clone()).size(name_size).style(text::secondary).width(Length::Fill),
+            crate::theme::remote_text(room.name.clone())
+                .size(name_size)
+                .style(text::secondary)
+                .width(Length::Fill),
         );
         label = label.push(text("muted").size(10).style(text::secondary));
     } else {
-        label = label.push(text(room.name.clone()).size(name_size).width(Length::Fill));
+        label = label
+            .push(crate::theme::remote_text(room.name.clone()).size(name_size).width(Length::Fill));
     }
     if calls.has_active_call(&room.room_id) {
         label = label.push(

@@ -72,6 +72,11 @@ pub struct State {
     /// Spell-check suggestion bar + autocorrect bookkeeping (all plain data;
     /// the Windows speller is only touched in `update`).
     pub spell: SpellState,
+    /// When the input's right-click edit menu (Cut/Copy/Paste/Select All) is
+    /// showing, the window-global cursor point it opened at — the menu anchors
+    /// there. `None` when closed. Rendered by `timeline::view` as a floating
+    /// layer so it can sit at the pointer without resizing the composer.
+    pub context_menu: Option<iced::Point>,
 }
 
 /// A file waiting in the composer to be sent (picked via the dialog or
@@ -194,7 +199,7 @@ pub enum Message {
     ClosePicker,
     SelectPickerTab(PickerTab),
     EmojiPicked(&'static str),
-    CustomEmojiPicked { shortcode: String },
+    CustomEmojiPicked { shortcode: String, mxc_url: String },
     /// A sticker was picked from the sticker tab — sent immediately as an
     /// `m.sticker` (the picker stays open so several can go out in a row).
     StickerPicked { url: String, body: String, width: Option<u32>, height: Option<u32> },
@@ -210,6 +215,22 @@ pub enum Message {
     SpellSuggestionPicked(String),
     /// "Add to dictionary" was clicked for the flagged word.
     SpellAddToDictionary,
+
+    /// Right-clicked the input — show the Cut/Copy/Paste/Select All menu.
+    OpenContextMenu,
+    /// Dismiss that menu (clicked off it, picked an item, or sent).
+    CloseContextMenu,
+    /// Edit-menu actions. Cut/Copy drive the input's own native handlers
+    /// (see [`crate::synthetic_input`]); Paste and Select All are handled
+    /// here / app-side (see the `update` arms).
+    ContextCut,
+    ContextCopy,
+    ContextPaste,
+    ContextSelectAll,
+    /// Append text to the draft — used by the right-click Paste path, which
+    /// reads the clipboard app-side (see [`Effect::PasteFromClipboard`])
+    /// rather than leaning on the focused widget the way Ctrl+V does.
+    InsertText(String),
 
     CancelReply,
 
@@ -243,10 +264,20 @@ pub enum Effect {
     SendSticker { url: String, body: String, width: Option<u32>, height: Option<u32> },
     /// An emoji was used — the root dispatcher bumps the usage history
     /// that feeds the picker's "Frequently used" section. Key: the glyph
-    /// for unicode, the `:shortcode:` form for custom emoji (matching how
-    /// custom reactions are keyed; legacy `mxc://` keys from older history
-    /// still resolve too).
+    /// for unicode, the `mxc://` URL for custom emoji (matching how custom
+    /// reactions are keyed).
     EmojiUsed(String),
+    /// Right-clicked the input: the root dispatcher snapshots the window-
+    /// global cursor into `State::context_menu` so the menu opens at the
+    /// pointer (the composer can't see that coordinate itself).
+    OpenContextMenu,
+    /// Right-click Cut/Copy: drive the focused input's native clipboard
+    /// handler by synthesizing the Ctrl chord (see [`crate::synthetic_input`]).
+    ClipboardEdit(crate::synthetic_input::Edit),
+    /// Right-click Paste: the root dispatcher reads the clipboard and either
+    /// feeds the text back as [`Message::InsertText`] or stages its
+    /// files/image as attachments (matching Ctrl+V).
+    PasteFromClipboard,
 }
 
 pub fn update(
@@ -261,6 +292,9 @@ pub fn update(
             // A stale send/attach error shouldn't pin itself above the
             // composer once the user has moved on.
             state.error = None;
+            // Typing dismisses the edit menu (its backdrop only swallows mouse
+            // events, so the focused input still receives keystrokes).
+            state.context_menu = None;
 
             // Backspace immediately after an autocorrect undoes it (restores
             // the original word) instead of just deleting the space.
@@ -287,6 +321,9 @@ pub fn update(
             (Task::none(), typing)
         }
         Message::Send => {
+            // Enter can fire with the edit menu still up (its backdrop blocks
+            // only mouse); don't leave it floating over a sent message.
+            state.context_menu = None;
             // Attachments staged? Enter sends them, and the typed text (if
             // any) rides along as the first file's caption — one event, not
             // an attachment plus a separate text message.
@@ -399,14 +436,14 @@ pub fn update(
             state.spell.recompute(&state.body, spell);
             (Task::none(), Effect::EmojiUsed(glyph.to_string()))
         }
-        Message::CustomEmojiPicked { shortcode } => {
+        Message::CustomEmojiPicked { shortcode, mxc_url } => {
             state.body.push_str(&format!(":{shortcode}: "));
             state.spell.pending_revert = None;
             state.spell.recompute(&state.body, spell);
-            // Record usage by the `:shortcode:` key — the same form custom
-            // reactions use, so an emoji's frequency is one tally across both
-            // and the "Frequently used" row shows it once.
-            (Task::none(), Effect::EmojiUsed(format!(":{shortcode}:")))
+            // Record usage by the mxc URL — the same key custom reactions use,
+            // so an emoji's frequency is one tally across both and the
+            // "Frequently used" row shows it once.
+            (Task::none(), Effect::EmojiUsed(mxc_url))
         }
         Message::MentionCandidateClicked(user_id, display_name) => {
             if let Some(at_pos) = state.body.rfind('@') {
@@ -490,6 +527,51 @@ pub fn update(
             state.spell.last_checked = None;
             state.spell.recompute(&state.body, spell);
             (Task::none(), Effect::None)
+        }
+        Message::OpenContextMenu => {
+            // The window-global cursor lives in `App`; the root dispatcher
+            // fills `state.context_menu` with it (see `Effect::OpenContextMenu`).
+            (Task::none(), Effect::OpenContextMenu)
+        }
+        Message::CloseContextMenu => {
+            state.context_menu = None;
+            (Task::none(), Effect::None)
+        }
+        Message::ContextCopy => {
+            state.context_menu = None;
+            (Task::none(), Effect::ClipboardEdit(crate::synthetic_input::Edit::Copy))
+        }
+        Message::ContextCut => {
+            state.context_menu = None;
+            (Task::none(), Effect::ClipboardEdit(crate::synthetic_input::Edit::Cut))
+        }
+        Message::ContextPaste => {
+            state.context_menu = None;
+            (Task::none(), Effect::PasteFromClipboard)
+        }
+        Message::ContextSelectAll => {
+            state.context_menu = None;
+            // Focus *then* select: `focus()` snaps the caret to the end, so
+            // selecting must come second or it'd be collapsed. Focusing first
+            // also makes the selection visible and gives a follow-up Copy a
+            // focused target even if the input wasn't focused before.
+            (
+                iced::widget::operation::focus(input_id())
+                    .chain(iced::widget::operation::select_all(input_id())),
+                Effect::None,
+            )
+        }
+        Message::InsertText(text) => {
+            state.body.push_str(&text);
+            // A paste isn't the autocorrect-undo Backspace — drop any pending
+            // revert so a later deletion doesn't misfire (as with emoji).
+            state.spell.pending_revert = None;
+            state.error = None;
+            state.spell.recompute(&state.body, spell);
+            let typing = Effect::Typing(!state.body.trim().is_empty());
+            // Focus so the caret lands after the pasted text, ready to keep
+            // typing without an extra click.
+            (iced::widget::operation::focus(input_id()), typing)
         }
         Message::SendSucceeded => {
             state.body.clear();
@@ -652,8 +734,8 @@ fn typed_trailing_boundary(previous: &str, current: &str) -> bool {
 /// Stable widget id for the composer's text input — lets the root dispatcher
 /// refocus it after staging a pasted/picked attachment, so "paste → type a
 /// caption → Enter" flows without an extra click.
-pub fn input_id() -> text_input::Id {
-    text_input::Id::new("composer-input")
+pub fn input_id() -> iced::widget::Id {
+    iced::widget::Id::from("composer-input")
 }
 
 /// "412 B" / "3.2 KB" / "8.1 MB" — size tag on a staged-attachment chip.
@@ -688,7 +770,7 @@ pub fn view<'a>(
         let mut banner = row![].spacing(8).align_y(iced::Center);
         banner = banner
             .push(text(crate::theme::icon::REPLY).size(12).font(crate::theme::ICON_FONT).style(text::primary))
-            .push(text(format!("Replying to {}", reply.sender)).size(12).style(text::primary));
+            .push(crate::theme::remote_text(format!("Replying to {}", reply.sender)).size(12).style(text::primary));
         if let Some(thumb) = reply
             .image_url
             .as_deref()
@@ -697,7 +779,7 @@ pub fn view<'a>(
             banner = banner.push(thumb);
         }
         banner = banner
-            .push(text(reply.snippet.clone()).size(12).style(text::secondary).width(Length::Fill))
+            .push(crate::theme::remote_text(reply.snippet.clone()).size(12).style(text::secondary).width(Length::Fill))
             .push(
                 button(text("×").size(13))
                     .on_press(Message::CancelReply)
@@ -724,7 +806,7 @@ pub fn view<'a>(
         let mut list = column![].spacing(2);
         for member in matches {
             list = list.push(
-                button(text(member.display_name.clone()).size(13))
+                button(crate::theme::remote_text(member.display_name.clone()).size(13))
                     .on_press(Message::MentionCandidateClicked(
                         member.user_id.clone(),
                         member.display_name.clone(),
@@ -746,7 +828,7 @@ pub fn view<'a>(
             .align_y(iced::Center);
         for suggestion in &flagged.suggestions {
             bar = bar.push(
-                button(text(suggestion.clone()).size(13))
+                button(crate::theme::remote_text(suggestion.clone()).size(13))
                     .on_press(Message::SpellSuggestionPicked(suggestion.clone()))
                     .style(crate::theme::ghost_button)
                     .padding([2, 8]),
@@ -789,7 +871,7 @@ pub fn view<'a>(
                 staged.filename.clone()
             };
             chip = chip
-                .push(text(label).size(12))
+                .push(crate::theme::remote_text(label).size(12))
                 .push(text(human_size(staged.bytes.len())).size(11).style(text::secondary));
             let mut remove = button(text("×").size(13))
                 .style(crate::theme::ghost_button)
@@ -824,13 +906,21 @@ pub fn view<'a>(
     } else {
         "Add a caption… (optional) — Enter sends the attachment"
     };
-    let input: Element<'_, Message> = text_input(placeholder, &state.body)
-        .id(input_id())
-        .on_input(Message::BodyChanged)
-        .on_submit(Message::Send)
-        .padding(6)
-        .width(Length::Fill)
-        .into();
+    // Wrapped in a mouse_area only to catch the right-click that opens the
+    // edit menu. mouse_area delegates to its child first and bails when the
+    // child captures, so the text_input's own left-click caret placement,
+    // drag-select, and Enter-to-send are untouched (it ignores right-clicks,
+    // which is exactly what lets them fall through to `on_right_press`).
+    let input: Element<'_, Message> = iced::widget::mouse_area(
+        text_input(placeholder, &state.body)
+            .id(input_id())
+            .on_input(Message::BodyChanged)
+            .on_submit(Message::Send)
+            .padding(6)
+            .width(Length::Fill),
+    )
+    .on_right_press(Message::OpenContextMenu)
+    .into();
 
     let input_row = row![
         button(crate::theme::icon_text(crate::theme::icon::ATTACH, 15))
@@ -866,6 +956,66 @@ pub fn view<'a>(
     col = col.push(status_line);
 
     container(col).padding([6, 8]).width(Length::Fill).into()
+}
+
+/// The input's right-click edit menu (Cut / Copy / Paste / Select all), opened
+/// at `anchor` — the window-global cursor point captured on right-click.
+///
+/// `timeline::view` renders this as a layer in the *outer* stack — it has to
+/// live there, above the whole shell, because only a `stack` short-circuits
+/// event dispatch on capture. That's what stops the click that picks an item
+/// (or dismisses the menu) from also reaching and unfocusing the input; an
+/// unfocused input would drop the synthesized Cut/Copy chord on the floor.
+///
+/// It opens *upward* from the pointer (the menu's bottom edge sits at the
+/// cursor): the composer is pinned to the window's bottom edge, so a
+/// downward menu would spill off-screen. `MENU_HEIGHT` is the panel's
+/// measured height, used only to place that bottom edge at the cursor.
+pub fn context_menu<'a>(anchor: iced::Point) -> Element<'a, Message> {
+    // 4 items (~28px each) + inter-item spacing + panel padding/border.
+    const MENU_HEIGHT: f32 = 130.0;
+    const MENU_WIDTH: f32 = 150.0;
+
+    let item = |label: &'a str, message: Message| {
+        button(text(label).size(13))
+            .on_press(message)
+            .style(crate::theme::ghost_button)
+            .width(Length::Fill)
+            .padding([5, 10])
+    };
+    let menu = container(
+        column![
+            item("Cut", Message::ContextCut),
+            item("Copy", Message::ContextCopy),
+            item("Paste", Message::ContextPaste),
+            item("Select all", Message::ContextSelectAll),
+        ]
+        .spacing(2),
+    )
+    .width(Length::Fixed(MENU_WIDTH))
+    .padding(4)
+    .style(crate::theme::floating_panel);
+
+    // Anchor at the pointer. iced has no absolute positioning, so a full-size
+    // container places the menu with top/left padding: `top` lifts it so its
+    // bottom lands on the cursor (open upward), `left` puts its left edge
+    // there. Clamped to the top-left so it never pushes off those edges.
+    let top = (anchor.y - MENU_HEIGHT).max(0.0);
+    let left = anchor.x.max(0.0);
+    let positioned = container(iced::widget::opaque(menu))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(iced::Left)
+        .align_y(iced::Top)
+        .padding(iced::Padding { top, right: 0.0, bottom: 0.0, left });
+
+    // Backdrop: a click off the (opaque) menu dismisses it, and wrapping the
+    // whole layer in `opaque` keeps every click on it from falling through to
+    // unfocus the input below — which is what lets Cut/Copy still see the live
+    // selection. Same shape as the emoji picker's dismiss backdrop.
+    iced::widget::opaque(
+        iced::widget::mouse_area(positioned).on_press(Message::CloseContextMenu),
+    )
 }
 
 /// The composer's picker panel: a Sticker | Emoji tab bar over either the
@@ -914,7 +1064,10 @@ pub(super) fn picker_panel<'a>(
             media,
             packs,
             Message::EmojiPicked,
-            |emoji| Message::CustomEmojiPicked { shortcode: emoji.shortcode.clone() },
+            |emoji| Message::CustomEmojiPicked {
+                shortcode: emoji.shortcode.clone(),
+                mxc_url: emoji.mxc_url.clone(),
+            },
         ),
     };
 

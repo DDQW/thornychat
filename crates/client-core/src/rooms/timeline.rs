@@ -8,24 +8,28 @@
 
 use std::sync::Arc;
 
-use matrix_sdk::deserialized_responses::ShieldState as SdkShieldState;
 use matrix_sdk::ruma::events::room::message::MessageType;
 use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::events::sticker::{StickerEventContent, StickerMediaSource};
+use matrix_sdk::ruma::events::StateEventContentChange;
 use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, RoomId, UserId};
 use matrix_sdk::{Client, Room};
 use matrix_sdk_ui::timeline::{
-    ReactionsByKeyBySender, RoomExt, Timeline, TimelineItem as SdkTimelineItem,
-    TimelineItemContent as SdkTimelineItemContent, TimelineItemKind, VirtualTimelineItem,
+    MembershipChange, ReactionsByKeyBySender, RoomExt, RoomMembershipChange, Timeline,
+    TimelineItem as SdkTimelineItem, TimelineItemContent as SdkTimelineItemContent, TimelineItemKind,
+    VirtualTimelineItem,
 };
-use matrix_sdk_ui::timeline::{InReplyToDetails, MsgLikeKind, TimelineDetails};
+use matrix_sdk_ui::timeline::{
+    InReplyToDetails, MsgLikeKind, TimelineDetails, TimelineEventShieldState,
+};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
 use crate::events::{
-    ClientEvent, ReactionGroup, ReplyPreview, TimelineItem, TimelineItemContent, TrustShield,
+    friendly_user_id, ClientEvent, ReactionGroup, ReplyPreview, TimelineItem, TimelineItemContent,
+    TrustShield,
 };
 
 /// Opens (or re-opens) the timeline for `room_id_str` and spawns a task that
@@ -208,6 +212,13 @@ fn convert_item(item: &SdkTimelineItem, own_user_id: Option<&UserId>) -> Option<
                 ),
                 _ => (None, None, None),
             };
+            // Built before the struct literal: it borrows `sender_display_name`,
+            // which the struct then moves into its own field.
+            let content = convert_content(
+                event.content(),
+                event.sender().as_str(),
+                sender_display_name.as_deref(),
+            );
 
             Some(TimelineItem {
                 event_id: event.event_id().map(|id| id.to_string()),
@@ -215,11 +226,11 @@ fn convert_item(item: &SdkTimelineItem, own_user_id: Option<&UserId>) -> Option<
                 sender_display_name,
                 sender_avatar_url,
                 timestamp_ms: u64::from(event.timestamp().get()),
-                content: convert_content(event.content()),
+                content,
                 // Lax mode matches what Element shows by default (doesn't
                 // nag about every never-verified sender, still flags real
                 // problems like a verification violation or sent-in-clear).
-                shield: event.get_shield(false).and_then(convert_shield),
+                shield: convert_shield(event.get_shield(false)),
                 reactions: convert_reactions(event.content().reactions(), own_user_id),
                 thread_root,
                 thread_reply_count,
@@ -264,24 +275,24 @@ fn convert_reply_preview(details: &InReplyToDetails) -> ReplyPreview {
                 TimelineDetails::Ready(profile) => profile
                     .display_name
                     .clone()
-                    .unwrap_or_else(|| embedded.sender.to_string()),
-                _ => embedded.sender.to_string(),
+                    .unwrap_or_else(|| friendly_user_id(embedded.sender.as_str()).to_string()),
+                _ => friendly_user_id(embedded.sender.as_str()).to_string(),
             };
-            let image_url = match convert_content(&embedded.content) {
+            let image_url = match convert_content(&embedded.content, embedded.sender.as_str(), None) {
                 TimelineItemContent::Image { url, .. }
                 | TimelineItemContent::Sticker { url, .. } => Some(url),
                 _ => None,
             };
-            (sender, summarize_content(&embedded.content), image_url)
+            (sender, summarize_content(&embedded.content, embedded.sender.as_str()), image_url)
         }
         _ => (String::new(), "…".to_string(), None),
     };
     ReplyPreview { event_id: details.event_id.to_string(), sender, snippet, image_url }
 }
 
-fn summarize_content(content: &SdkTimelineItemContent) -> String {
+fn summarize_content(content: &SdkTimelineItemContent, sender: &str) -> String {
     const LIMIT: usize = 90;
-    match convert_content(content) {
+    match convert_content(content, sender, None) {
         TimelineItemContent::Text(body) => {
             let flat = body.replace('\n', " ");
             if flat.chars().count() > LIMIT {
@@ -298,6 +309,7 @@ fn summarize_content(content: &SdkTimelineItemContent) -> String {
         TimelineItemContent::Sticker { .. } => "[sticker]".to_string(),
         TimelineItemContent::File { filename, .. } => format!("[file: {filename}]"),
         TimelineItemContent::Redacted => "(message removed)".to_string(),
+        TimelineItemContent::MembershipChange(desc) => desc,
         TimelineItemContent::DateDivider(_) | TimelineItemContent::NewMessagesDivider => {
             String::new()
         }
@@ -320,7 +332,11 @@ fn convert_reactions(
         .collect()
 }
 
-fn convert_content(content: &SdkTimelineItemContent) -> TimelineItemContent {
+fn convert_content(
+    content: &SdkTimelineItemContent,
+    sender: &str,
+    sender_display_name: Option<&str>,
+) -> TimelineItemContent {
     match content {
         SdkTimelineItemContent::MsgLike(msg_like) => match &msg_like.kind {
             MsgLikeKind::Message(message) => convert_message(message),
@@ -330,10 +346,14 @@ fn convert_content(content: &SdkTimelineItemContent) -> TimelineItemContent {
             MsgLikeKind::UnableToDecrypt(_) => {
                 TimelineItemContent::Text("[unable to decrypt]".to_string())
             }
+            MsgLikeKind::Other(_) => TimelineItemContent::Text("(unsupported event)".to_string()),
+            MsgLikeKind::LiveLocation(_) => {
+                TimelineItemContent::Text("(live location)".to_string())
+            }
         },
-        SdkTimelineItemContent::MembershipChange(_) => {
-            TimelineItemContent::Text("(membership change)".to_string())
-        }
+        SdkTimelineItemContent::MembershipChange(change) => TimelineItemContent::MembershipChange(
+            describe_membership_change(change, sender, sender_display_name),
+        ),
         SdkTimelineItemContent::ProfileChange(_) => {
             TimelineItemContent::Text("(profile change)".to_string())
         }
@@ -345,9 +365,74 @@ fn convert_content(content: &SdkTimelineItemContent) -> TimelineItemContent {
             TimelineItemContent::Text("(unsupported event)".to_string())
         }
         SdkTimelineItemContent::CallInvite => TimelineItemContent::Text("(call invite)".to_string()),
-        SdkTimelineItemContent::CallNotify => {
+        // 0.18 renamed CallNotify → RtcNotification.
+        SdkTimelineItemContent::RtcNotification { .. } => {
             TimelineItemContent::Text("(call notification)".to_string())
         }
+    }
+}
+
+/// Renders a membership change into a human sentence for the timeline. The
+/// *actor* (who performed the action) is the event sender; the *target*
+/// (whose membership changed) is `change.user_id()`. For self-performed
+/// changes (join/leave/knock…) the two are the same person, so only the
+/// target is named. Kick/ban reasons are appended when present; invite
+/// reasons are deliberately *not* shown — ruma's own guidance is that an
+/// invite `reason` is an unsolicited-message/abuse vector.
+fn describe_membership_change(
+    change: &RoomMembershipChange,
+    actor: &str,
+    actor_display_name: Option<&str>,
+) -> String {
+    let target = change
+        .display_name()
+        .unwrap_or_else(|| friendly_user_id(change.user_id().as_str()).to_string());
+    let actor_name = actor_display_name
+        .map(str::to_string)
+        .unwrap_or_else(|| friendly_user_id(actor).to_string());
+    let reason = || match change.content() {
+        StateEventContentChange::Original { content, .. } => content.reason.clone(),
+        StateEventContentChange::Redacted(_) => None,
+    };
+    match change.change() {
+        Some(MembershipChange::Joined) => format!("{target} joined the room"),
+        Some(MembershipChange::Left) => format!("{target} left the room"),
+        Some(MembershipChange::Banned) => {
+            with_reason(format!("{actor_name} banned {target}"), reason())
+        }
+        Some(MembershipChange::Unbanned) => format!("{actor_name} unbanned {target}"),
+        Some(MembershipChange::Kicked) => {
+            with_reason(format!("{actor_name} kicked {target}"), reason())
+        }
+        Some(MembershipChange::KickedAndBanned) => {
+            with_reason(format!("{actor_name} kicked and banned {target}"), reason())
+        }
+        Some(MembershipChange::Invited) => format!("{actor_name} invited {target}"),
+        Some(MembershipChange::InvitationAccepted) => format!("{target} accepted the invite"),
+        Some(MembershipChange::InvitationRejected) => format!("{target} rejected the invite"),
+        Some(MembershipChange::InvitationRevoked) => {
+            format!("{actor_name} revoked {target}'s invite")
+        }
+        Some(MembershipChange::Knocked) => format!("{target} requested to join"),
+        Some(MembershipChange::KnockAccepted) => format!("{actor_name} let {target} in"),
+        Some(MembershipChange::KnockRetracted) => {
+            format!("{target} withdrew their request to join")
+        }
+        Some(MembershipChange::KnockDenied) => {
+            format!("{actor_name} rejected {target}'s request to join")
+        }
+        // None / Error / NotImplemented (and any future variant): no reliable
+        // actor/verb, so just note that the target's membership changed.
+        _ => format!("{target}'s membership changed"),
+    }
+}
+
+/// Appends a `: reason` tail to a membership sentence when the moderation
+/// event carried a non-empty reason.
+fn with_reason(sentence: String, reason: Option<String>) -> String {
+    match reason {
+        Some(reason) if !reason.trim().is_empty() => format!("{sentence}: {reason}"),
+        _ => sentence,
     }
 }
 
@@ -429,11 +514,13 @@ fn convert_message(message: &matrix_sdk_ui::timeline::Message) -> TimelineItemCo
     }
 }
 
-fn convert_shield(shield: SdkShieldState) -> Option<TrustShield> {
+fn convert_shield(shield: TimelineEventShieldState) -> Option<TrustShield> {
+    // 0.18 exposes a machine-readable `code` instead of a human message; surface
+    // the code name so the shield tooltip still says why it's shown.
     match shield {
-        SdkShieldState::Red { message, .. } => Some(TrustShield::Red(message.to_string())),
-        SdkShieldState::Grey { message, .. } => Some(TrustShield::Grey(message.to_string())),
-        SdkShieldState::None => None,
+        TimelineEventShieldState::Red { code } => Some(TrustShield::Red(format!("{code:?}"))),
+        TimelineEventShieldState::Grey { code } => Some(TrustShield::Grey(format!("{code:?}"))),
+        TimelineEventShieldState::None => None,
     }
 }
 

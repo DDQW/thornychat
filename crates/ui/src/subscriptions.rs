@@ -25,7 +25,76 @@ pub fn subscription(app: &App) -> Subscription<Message> {
     } else {
         Subscription::none()
     };
-    Subscription::batch([client_events, iced::event::listen_with(window_events), settings_resize])
+    // Browser-style middle-click autoscroll: while it's active, a ~60fps timer
+    // drives the glide and a window-level listener ends it on the next click,
+    // wheel tick, or key press. Both are off entirely otherwise — no idle
+    // timer, no extra event listening.
+    let autoscroll = if app.timeline.autoscroll.is_some() {
+        Subscription::batch([
+            iced::time::every(std::time::Duration::from_millis(16))
+                .map(|_| Message::AutoscrollTick),
+            iced::event::listen_with(autoscroll_cancel_events),
+        ])
+    } else {
+        Subscription::none()
+    };
+    // While a video plays inline, its WebView2 child window seizes Win32
+    // keyboard focus the moment it's clicked, and winit won't reclaim it on
+    // an ordinary click of the app surface — so any press that reaches iced
+    // (i.e. landed off the video) hands focus back to the app window,
+    // keeping the composer typeable. Off entirely when nothing is playing.
+    let video_focus = if app.timeline.inline_video.is_some() {
+        iced::event::listen_with(video_focus_events)
+    } else {
+        Subscription::none()
+    };
+    Subscription::batch([
+        client_events,
+        iced::event::listen_with(window_events),
+        settings_resize,
+        autoscroll,
+        video_focus,
+    ])
+}
+
+/// A press that reaches iced while a video plays landed on the app surface
+/// (presses on the video's own child HWND never reach winit) — the user is
+/// done with the video for now, so keyboard focus returns to the app window
+/// (see `video_player::reclaim_focus`). Only mouse presses can serve as the
+/// trigger: once the webview holds focus, key events don't reach iced at all.
+fn video_focus_events(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _window: iced::window::Id,
+) -> Option<Message> {
+    match event {
+        iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => Some(Message::ReclaimAppFocus),
+        _ => None,
+    }
+}
+
+/// Ends an active middle-click autoscroll on the first click, wheel tick, or
+/// key press — the browser convention. The middle button is deliberately
+/// excluded: it toggles autoscroll off through the message list's own
+/// `mouse_area`, and catching it here too would race that toggle (the two
+/// handlers could re-enable each other depending on delivery order).
+fn autoscroll_cancel_events(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _window: iced::window::Id,
+) -> Option<Message> {
+    match event {
+        iced::Event::Mouse(iced::mouse::Event::ButtonPressed(button))
+            if button != iced::mouse::Button::Middle =>
+        {
+            Some(Message::AutoscrollEnd)
+        }
+        iced::Event::Mouse(iced::mouse::Event::WheelScrolled { .. })
+        | iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { .. }) => {
+            Some(Message::AutoscrollEnd)
+        }
+        _ => None,
+    }
 }
 
 /// Window-level events the app cares about: resizes invalidate the
@@ -41,6 +110,12 @@ fn window_events(
     match event {
         iced::Event::Window(iced::window::Event::Resized(size)) => {
             Some(Message::WindowResized(size))
+        }
+        // Window-global cursor position, so a right-click menu can open at the
+        // pointer: `mouse_area::on_right_press` carries no coordinates and
+        // `on_move` only reports widget-local ones.
+        iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+            Some(Message::CursorMoved(position))
         }
         iced::Event::Window(iced::window::Event::FileDropped(path)) => {
             Some(Message::FileDropped(path))
@@ -87,9 +162,27 @@ fn settings_resize_events(
 }
 
 fn client_events(client: Client, profile: String) -> Subscription<Message> {
-    Subscription::run_with_id(
-        "matrix-sync-worker",
-        iced::stream::channel(64, move |mut output| {
+    use std::hash::{Hash, Hasher};
+
+    struct SyncData {
+        client: Client,
+        profile: String,
+    }
+    // One sync worker per profile. iced 0.14 dedupes subscriptions by hashing
+    // `data` plus the builder fn pointer (0.13 used the "matrix-sync-worker"
+    // id string); the client handle isn't hashable and must not factor into
+    // that identity, so hash only a stable tag and the profile.
+    impl Hash for SyncData {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            "matrix-sync-worker".hash(state);
+            self.profile.hash(state);
+        }
+    }
+
+    Subscription::run_with(SyncData { client, profile }, |data| {
+        let client = data.client.clone();
+        let profile = data.profile.clone();
+        iced::stream::channel(64, move |mut output: iced::futures::channel::mpsc::Sender<Message>| {
             async move {
                 let cache_dir = match client_core::store::AppPaths::for_profile(&profile) {
                     Ok(paths) => paths.media_cache_dir(),
@@ -117,6 +210,6 @@ fn client_events(client: Client, profile: String) -> Subscription<Message> {
                     }
                 }
             }
-        }),
-    )
+        })
+    })
 }

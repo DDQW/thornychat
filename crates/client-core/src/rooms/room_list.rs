@@ -13,20 +13,35 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
-use crate::events::{ClientEvent, RoomMember, RoomSummary};
+use crate::events::{friendly_user_id, ClientEvent, RoomMember, RoomSummary};
 
-pub fn to_summary(room: &Room, dm_rooms: &HashSet<OwnedRoomId>) -> RoomSummary {
+pub fn to_summary(
+    room: &Room,
+    dm_rooms: &HashSet<OwnedRoomId>,
+    own_name: Option<&str>,
+    own_avatar: Option<&str>,
+) -> RoomSummary {
     let room_id = room.room_id().to_string();
     // Classify DMs from the account's global `m.direct` set: on sliding sync
     // the per-room `direct_targets()` is frequently empty even for real DMs
     // (the account-data → per-room propagation lags), so a DM would otherwise
     // show up as a plain room. Keep `direct_targets()` as a secondary signal.
     let is_dm = dm_rooms.contains(room.room_id()) || room.direct_targets_length() != 0;
+    // A room whose only member is you — a self-DM or a solo room you created.
+    let solo = room.joined_members_count() <= 1;
     RoomSummary {
-        name: display_name(room).unwrap_or_else(|| room_id.clone()),
+        // Prefer the SDK's heroes-based name. For a solo/self room with no
+        // explicit name, show your *own* name — the sensible self-chat label,
+        // and overridable by renaming the room. "Empty room" is only the last
+        // resort when even your own name is unknown.
+        name: display_name(room).unwrap_or_else(|| {
+            if solo { own_name } else { None }
+                .map(str::to_string)
+                .unwrap_or_else(|| "Empty room".to_string())
+        }),
         room_id,
         topic: room.topic(),
-        avatar_url: avatar_url(room, is_dm),
+        avatar_url: avatar_url(room, is_dm, solo, own_avatar),
         unread_count: room.num_unread_messages(),
         is_encrypted: room.encryption_state().is_encrypted(),
         is_space: room.is_space(),
@@ -77,7 +92,10 @@ fn hero_names(room: &Room) -> Option<String> {
     let names: Vec<String> = room
         .heroes()
         .into_iter()
-        .map(|hero| hero.display_name.unwrap_or_else(|| hero.user_id.to_string()))
+        .map(|hero| {
+            hero.display_name
+                .unwrap_or_else(|| friendly_user_id(hero.user_id.as_str()).to_string())
+        })
         .collect();
     (!names.is_empty()).then(|| names.join(", "))
 }
@@ -88,9 +106,13 @@ fn hero_names(room: &Room) -> Option<String> {
 /// deliberately get no fallback: an unset room avatar means initials, not a
 /// borrowed member face (a group with no logo showing some random member's
 /// photo as its icon is wrong, not a missing-avatar bug).
-fn avatar_url(room: &Room, is_dm: bool) -> Option<String> {
+fn avatar_url(room: &Room, is_dm: bool, solo: bool, own_avatar: Option<&str>) -> Option<String> {
     if let Some(url) = room.avatar_url() {
         return Some(url.to_string());
+    }
+    if solo {
+        // A chat with only you (self-DM / solo room): your own face.
+        return own_avatar.map(str::to_string);
     }
     if is_dm {
         return room.heroes().into_iter().find_map(|hero| hero.avatar_url.map(|url| url.to_string()));
@@ -110,9 +132,13 @@ pub async fn fetch_members(room: &Room) -> Vec<RoomMember> {
             .into_iter()
             .map(|m| RoomMember {
                 user_id: m.user_id().to_string(),
-                display_name: m.name().to_string(),
+                display_name: friendly_user_id(m.name()).to_string(),
                 avatar_url: m.avatar_url().map(|url| url.to_string()),
-                power_level: m.power_level(),
+                power_level: match m.power_level() {
+                    matrix_sdk::ruma::events::room::power_levels::UserPowerLevel::Int(i) => i.into(),
+                    // Room-creator "infinite" power level (room v12+).
+                    _ => i64::MAX,
+                },
             })
             .collect(),
         Err(error) => {
@@ -147,10 +173,15 @@ pub fn spawn_forwarder(
         // exists (phase 6).
         let (initial, mut diffs) = client.rooms_stream();
         let dm_rooms = direct_room_ids(&client).await;
+        // Your own name/avatar, for labelling self-DMs and solo rooms after
+        // yourself. Fetched once (it rarely changes; the SDK caches it).
+        let own_name = client.account().get_display_name().await.ok().flatten();
+        let own_avatar =
+            client.account().get_avatar_url().await.ok().flatten().map(|u| u.to_string());
         let summaries: Vec<RoomSummary> = initial
             .iter()
             .filter(|room| room.state() == matrix_sdk::RoomState::Joined)
-            .map(|room| to_summary(room, &dm_rooms))
+            .map(|room| to_summary(room, &dm_rooms, own_name.as_deref(), own_avatar.as_deref()))
             .collect();
         if event_tx.send(ClientEvent::RoomListUpdated(summaries)).is_err() {
             return;
@@ -196,7 +227,7 @@ pub fn spawn_forwarder(
                 .rooms()
                 .iter()
                 .filter(|room| room.state() == matrix_sdk::RoomState::Joined)
-                .map(|room| to_summary(room, &dm_rooms))
+                .map(|room| to_summary(room, &dm_rooms, own_name.as_deref(), own_avatar.as_deref()))
                 .collect();
             if event_tx.send(ClientEvent::RoomListUpdated(summaries)).is_err() {
                 break;

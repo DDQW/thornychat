@@ -19,12 +19,15 @@ use matrix_sdk::deserialized_responses::RawSyncOrStrippedState;
 use matrix_sdk::ruma::api::client::delayed_events::{
     delayed_state_event, update_delayed_event, DelayParameters,
 };
-use matrix_sdk::ruma::api::client::discovery::discover_homeserver::{self, RtcFocusInfo};
 use matrix_sdk::ruma::events::call::member::{
     ActiveFocus, ActiveLivekitFocus, Application, CallApplicationContent, CallMemberEventContent,
-    CallMemberStateKey, CallScope, Focus, LivekitFocus,
+    CallMemberStateKey, CallScope, Focus,
 };
-use matrix_sdk::ruma::events::call::notify::{ApplicationType, CallNotifyEventContent, NotifyType};
+// m.call.notify (MSC4075) is deprecated for m.rtc.notification; still used by
+// the call-start ring until the RTC stack (`webrtc_session`) is built out.
+#[allow(deprecated)]
+use matrix_sdk::ruma::events::call::notify::{ApplicationType, CallNotifyEventContent};
+use matrix_sdk::ruma::events::rtc::notification::NotificationType;
 use matrix_sdk::ruma::events::{Mentions, SyncStateEvent};
 use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, OwnedRoomId, RoomId};
 use matrix_sdk::{Client, Room, RoomState};
@@ -181,7 +184,7 @@ impl CallManager {
         }
 
         let state_key =
-            CallMemberStateKey::new(user_id.clone(), Some(device_id.clone()), false);
+            CallMemberStateKey::new(user_id.clone(), Some(device_id.to_string()), false);
 
         // Crash cleanup first: with the delayed leave scheduled before the
         // join is published, a crash between the two can't strand a ghost
@@ -195,7 +198,8 @@ impl CallManager {
             device_id.clone(),
             ActiveFocus::Livekit(ActiveLivekitFocus::new()),
             foci,
-            None,
+            None, // created_ts — let the server stamp it
+            None, // expires — SDK default (4h)
         );
         if let Err(error) = room.send_state_event_for_key(&state_key, content).await {
             if let Some(task) = &heartbeat {
@@ -233,12 +237,15 @@ impl CallManager {
         // other clients show nothing until someone happens to open the room.
         if starting_fresh {
             let notify_type = if room.direct_targets_length() != 0 {
-                NotifyType::Ring
+                NotificationType::Ring
             } else {
-                NotifyType::Notify
+                NotificationType::Notification
             };
             let mut mentions = Mentions::new();
             mentions.room = true;
+            // m.call.notify (MSC4075) is deprecated for m.rtc.notification;
+            // keep it until the RTC stack (`webrtc_session`) is built out.
+            #[allow(deprecated)]
             let notify =
                 CallNotifyEventContent::new(call_id, ApplicationType::Call, notify_type, mentions);
             if let Err(error) = room.send(notify).await {
@@ -267,7 +274,7 @@ impl CallManager {
         let joined = self.joined.lock().await.remove(room.room_id());
 
         let state_key =
-            CallMemberStateKey::new(user_id.clone(), Some(device_id.clone()), false);
+            CallMemberStateKey::new(user_id.clone(), Some(device_id.to_string()), false);
         room.send_state_event_for_key(&state_key, CallMemberEventContent::new_empty(None))
             .await
             .map_err(|e| e.to_string())?;
@@ -394,26 +401,13 @@ async fn existing_call_parameters(room: &Room) -> Option<(String, Vec<Focus>)> {
 /// (`org.matrix.msc4143.rtc_foci`) — used when starting a fresh call so
 /// joining clients have an SFU to converge on. Empty when the server
 /// doesn't advertise any (the call still works as pure signaling).
-async fn well_known_foci(client: &Client, room_id: &RoomId) -> Vec<Focus> {
-    match client.send(discover_homeserver::Request::new()).await {
-        Ok(response) => response
-            .rtc_foci
-            .into_iter()
-            .filter_map(|info| match info {
-                RtcFocusInfo::LiveKit(livekit) => Some(Focus::Livekit(LivekitFocus::new(
-                    // Element Call's convention: the room id names the
-                    // LiveKit session on the SFU.
-                    room_id.to_string(),
-                    livekit.service_url,
-                ))),
-                _ => None,
-            })
-            .collect(),
-        Err(error) => {
-            tracing::debug!(%error, "no .well-known rtc_foci; starting the call without preferred foci");
-            Vec::new()
-        }
-    }
+async fn well_known_foci(_client: &Client, _room_id: &RoomId) -> Vec<Focus> {
+    // Currently always empty. The discovery wire type moved from `RtcFocusInfo`
+    // to a `RtcTransport` whose `LiveKit` variant sits behind an unstable ruma
+    // feature (msc4195) in the 0.18 SDK; calls degrade cleanly to pure
+    // signaling without preferred foci (see above), so this isn't worth pinning
+    // to a churning MSC. Revisit when the RTC stack (`webrtc_session`) lands.
+    Vec::new()
 }
 
 /// Schedules the server-side "left" membership (MSC4140). `None` when the

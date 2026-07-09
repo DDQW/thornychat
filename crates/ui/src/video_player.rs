@@ -1,7 +1,8 @@
 //! In-app video playback for links to YouTube, Vimeo, Dailymotion, Rumble,
-//! and Kick. Clicking a video card starts the platform's own iframe player
-//! *inline in the chat*, in place of the card's thumbnail — no overlay, no
-//! browser window.
+//! Kick, and direct links to video files (`.mp4`, `.webm`, ...). Clicking a
+//! video card starts the platform's own iframe player — or, for a direct
+//! file, a plain `<video>` tag — *inline in the chat*, in place of the
+//! card's thumbnail — no overlay, no browser window.
 //!
 //! The player is a native WebView2 child window (wry), which always
 //! composites above the wgpu surface and knows nothing about iced's
@@ -25,7 +26,7 @@
 //! `iced::window::run_with_handle`, whose closure runs on exactly that
 //! thread.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use raw_window_handle::HasWindowHandle;
 
@@ -38,8 +39,8 @@ pub const STAGE_HEIGHT: f32 = 252.0;
 /// Widget id of the inline player's stage container. There is at most one
 /// playing video, so a single well-known id links the timeline's stage
 /// element to the bounds probe without threading ids around.
-pub fn stage_id() -> iced::widget::container::Id {
-    iced::widget::container::Id::new("inline-video-stage")
+pub fn stage_id() -> iced::widget::Id {
+    iced::widget::Id::new("inline-video-stage")
 }
 
 /// Queries the current geometry of the stage container: `(full, visible)`
@@ -60,64 +61,61 @@ pub fn stage_bounds_probe() -> iced::Task<Option<(iced::Rectangle, Option<iced::
 
     struct StageBounds {
         target: widget::Id,
-        depth: usize,
-        scrollables: Vec<(Vector, Rectangle, usize)>,
+        // (viewport, translation) saved on entry to each node, restored on
+        // exit — mirrors iced 0.14's own `selector` traversal, which drives
+        // child recursion through `traverse` rather than a per-container
+        // callback. A sentinel base entry keeps `last().unwrap()` valid.
+        stack: Vec<(Rectangle, Vector)>,
+        viewport: Rectangle,
+        translation: Vector,
         result: StageResult,
     }
 
     impl Operation<StageResult> for StageBounds {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<StageResult>)) {
+            if self.result.is_some() {
+                return;
+            }
+            self.stack.push((self.viewport, self.translation));
+            operate(self);
+            let _ = self.stack.pop();
+            let (viewport, translation) = *self.stack.last().unwrap();
+            self.viewport = viewport;
+            self.translation = translation;
+        }
+
         fn scrollable(
             &mut self,
-            _state: &mut dyn operation::Scrollable,
             _id: Option<&widget::Id>,
             bounds: Rectangle,
             _content_bounds: Rectangle,
             translation: Vector,
-        ) {
-            match self.scrollables.last() {
-                Some((last_translation, last_viewport, _depth)) => {
-                    let viewport = last_viewport
-                        .intersection(&(bounds - *last_translation))
-                        .unwrap_or(Rectangle::new(Point::ORIGIN, Size::ZERO));
-                    self.scrollables.push((
-                        translation + *last_translation,
-                        viewport,
-                        self.depth,
-                    ));
-                }
-                None => self.scrollables.push((translation, bounds, self.depth)),
-            }
-        }
-
-        fn container(
-            &mut self,
-            id: Option<&widget::Id>,
-            bounds: Rectangle,
-            operate_on_children: &mut dyn FnMut(&mut dyn Operation<StageResult>),
+            _state: &mut dyn operation::Scrollable,
         ) {
             if self.result.is_some() {
                 return;
             }
-            if id == Some(&self.target) {
-                self.result = Some(match self.scrollables.last() {
-                    Some((translation, viewport, _)) => {
-                        let full = bounds - *translation;
-                        (full, viewport.intersection(&full))
-                    }
-                    None => (bounds, Some(bounds)),
-                });
+            // The scrollable's viewport (clipped by ancestors) and its content
+            // translation apply to everything nested under it, until `traverse`
+            // pops back out of this subtree.
+            let visible = self
+                .viewport
+                .intersection(&(bounds + self.translation))
+                .unwrap_or(Rectangle::new(Point::ORIGIN, Size::ZERO));
+            self.translation = self.translation - translation;
+            self.viewport = visible;
+        }
+
+        fn container(&mut self, id: Option<&widget::Id>, bounds: Rectangle) {
+            if self.result.is_some() {
                 return;
             }
-
-            self.depth += 1;
-            operate_on_children(self);
-            self.depth -= 1;
-
-            match self.scrollables.last() {
-                Some((_, _, depth)) if self.depth == *depth => {
-                    let _ = self.scrollables.pop();
-                }
-                _ => {}
+            if id == Some(&self.target) {
+                // `full` is the stage's scroll-translated on-screen rect (needed
+                // to place the fixed-size webview even when partly scrolled off);
+                // the intersection is the part actually showing through.
+                let full = bounds + self.translation;
+                self.result = Some((full, self.viewport.intersection(&full)));
             }
         }
 
@@ -127,9 +125,10 @@ pub fn stage_bounds_probe() -> iced::Task<Option<(iced::Rectangle, Option<iced::
     }
 
     iced::advanced::widget::operate(StageBounds {
-        target: stage_id().into(),
-        depth: 0,
-        scrollables: Vec::new(),
+        target: stage_id(),
+        stack: vec![(Rectangle::INFINITE, Vector::ZERO)],
+        viewport: Rectangle::INFINITE,
+        translation: Vector::ZERO,
         result: None,
     })
 }
@@ -144,6 +143,11 @@ pub enum Platform {
     /// embed a specific VOD or clip by id, so those links fall through to
     /// the regular OpenGraph preview instead of a misleading player.
     Kick,
+    /// Not a hosting platform at all — a direct link to a video *file*
+    /// (`.mp4`, `.webm`, ...). Reuses the same card/label/accent plumbing
+    /// as the platforms above; only `embed_url`/`player_url` differ in how
+    /// they turn it into something playable.
+    File,
 }
 
 impl Platform {
@@ -154,6 +158,7 @@ impl Platform {
             Platform::Dailymotion => "Dailymotion",
             Platform::Rumble => "Rumble",
             Platform::Kick => "Kick",
+            Platform::File => "Video",
         }
     }
 
@@ -166,6 +171,8 @@ impl Platform {
             Platform::Dailymotion => iced::Color::from_rgb8(0x00, 0xAA, 0xFF),
             Platform::Rumble => iced::Color::from_rgb8(0x85, 0xC7, 0x42),
             Platform::Kick => iced::Color::from_rgb8(0x53, 0xFC, 0x18),
+            // No brand to match — a neutral gray.
+            Platform::File => iced::Color::from_rgb8(0x8A, 0x8A, 0x8A),
         }
     }
 }
@@ -175,6 +182,8 @@ impl Platform {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbedVideo {
     pub platform: Platform,
+    /// Unused (empty) for `Platform::File` — the source URL alone is
+    /// playable, there's no separate video id to track.
     pub id: String,
     pub start_seconds: u32,
     /// Vimeo's unlisted-video privacy hash (`?h=...`); unused elsewhere.
@@ -227,6 +236,11 @@ impl EmbedVideo {
             Platform::Rumble => format!("https://rumble.com/embed/{}/?autoplay=2", self.id),
             // Confirmed via Kick's help center (live-channel embed only).
             Platform::Kick => format!("https://player.kick.com/{}?autoplay=true", self.id),
+            // The file itself is the "embed" — there's no separate player
+            // page. `player_url` doesn't actually reach this arm (it routes
+            // through the wrapper instead, for consistent styling) but it's
+            // kept correct/total here regardless.
+            Platform::File => self.source_url.clone(),
         }
     }
 
@@ -256,10 +270,26 @@ impl EmbedVideo {
                 }
                 url
             }
+            // No referer to satisfy, but routed through the same wrapper
+            // trick as YouTube (rather than a raw navigation) so playback
+            // looks consistent — black backdrop, video filling the stage —
+            // instead of whatever Chromium's default media-document viewer
+            // does with an arbitrary video's native size.
+            Platform::File => {
+                format!("{WRAPPER_SCHEME}://localhost/video?src={}", percent_encode(&self.source_url))
+            }
             // The other platforms don't referer-gate their embeds; keep
             // the direct navigation that has always worked for them.
             _ => self.embed_url(),
         }
+    }
+
+    /// Filename from the URL path, used as a card title when there's no OG
+    /// title to show — the common case for a raw file link, since there's
+    /// no page to scrape one from. `None` for hosted platforms, where an OG
+    /// title (once resolved) is always preferred over an opaque video id.
+    pub fn file_name(&self) -> Option<String> {
+        (self.platform == Platform::File).then(|| path_file_name(&self.source_url)).flatten().map(str::to_string)
     }
 }
 
@@ -280,25 +310,37 @@ fn youtube_embed_src(id: &str, start_seconds: u32) -> String {
 /// origin, which is the whole point (see [`EmbedVideo::player_url`]).
 const WRAPPER_SCHEME: &str = "thornyplayer";
 
+/// Dispatches the wrapper-page custom protocol by path: `/player` is
+/// YouTube's referer-satisfying wrapper, `/video` is the plain `<video>`
+/// wrapper for direct file links.
+fn wrapper_response(
+    request: wry::http::Request<Vec<u8>>,
+) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
+    match request.uri().path() {
+        "/video" => file_wrapper_page(request),
+        _ => youtube_wrapper_page(request),
+    }
+}
+
+fn html_response(status: u16, body: String) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
+    wry::http::Response::builder()
+        .status(status)
+        .header(wry::http::header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(std::borrow::Cow::Owned(body.into_bytes()))
+        .expect("static response parts are valid")
+}
+
 /// Serves the wrapper page: a black full-bleed document whose sole content
 /// is the official YouTube iframe. The video id and start offset come from
 /// the request's query string and are re-validated here (the id charset
 /// check doubles as HTML-injection proofing, since the values are
 /// interpolated into markup).
-fn wrapper_page(
+fn youtube_wrapper_page(
     request: wry::http::Request<Vec<u8>>,
 ) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
-    let respond = |status: u16, body: String| {
-        wry::http::Response::builder()
-            .status(status)
-            .header(wry::http::header::CONTENT_TYPE, "text/html; charset=utf-8")
-            .body(std::borrow::Cow::Owned(body.into_bytes()))
-            .expect("static response parts are valid")
-    };
-
     let query = request.uri().query().unwrap_or("");
     let Some(id) = query_param(query, "v").filter(|id| valid_id(id, 20)) else {
-        return respond(404, "missing or invalid video id".into());
+        return html_response(404, "missing or invalid video id".into());
     };
     let start = query_param(query, "start").and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
 
@@ -313,7 +355,40 @@ fn wrapper_page(
 </body></html>"#,
         src = youtube_embed_src(&id, start),
     );
-    respond(200, html)
+    html_response(200, html)
+}
+
+/// Serves the wrapper page for a direct video-file link: a black full-bleed
+/// document containing a plain HTML5 `<video>` tag pointing at the original
+/// URL. Same custom-protocol trick as the YouTube wrapper above, but here
+/// it's purely cosmetic (no referer to satisfy) — it keeps the black
+/// backdrop and contained sizing consistent with every other platform
+/// instead of Chromium's default media-document viewer. The URL is
+/// percent-decoded and re-validated as http(s) (never trust the round trip
+/// through a request we technically built ourselves), then HTML-escaped
+/// before interpolation — it can't be restricted to a safe charset like the
+/// YouTube id above, since URLs need `/`, `:`, `?`, ...
+fn file_wrapper_page(
+    request: wry::http::Request<Vec<u8>>,
+) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
+    let query = request.uri().query().unwrap_or("");
+    let src = query_param(query, "src")
+        .and_then(|encoded| percent_decode(&encoded))
+        .filter(|url| split_url(url).is_some());
+    let Some(src) = src else {
+        return html_response(404, "missing or invalid video url".into());
+    };
+
+    let html = format!(
+        r#"<!doctype html>
+<html><head><meta charset="utf-8">
+<style>html,body{{margin:0;height:100%;background:#000;overflow:hidden}}video{{display:block;width:100%;height:100%;object-fit:contain}}</style>
+</head><body>
+<video src="{src}" autoplay controls></video>
+</body></html>"#,
+        src = html_escape(&src),
+    );
+    html_response(200, html)
 }
 
 /// Tries each platform's parser in turn.
@@ -323,6 +398,7 @@ pub fn video_in(url: &str) -> Option<EmbedVideo> {
         .or_else(|| dailymotion_video_in(url))
         .or_else(|| rumble_video_in(url))
         .or_else(|| kick_video_in(url))
+        .or_else(|| direct_file_video_in(url))
 }
 
 /// Splits a URL into (lowercased host without a leading "www.", path,
@@ -354,6 +430,71 @@ fn query_param(query: &str, name: &str) -> Option<String> {
         let (key, value) = pair.split_once('=')?;
         (key == name && !value.is_empty()).then(|| value.to_string())
     })
+}
+
+/// The final `/`-segment of a URL's path — used both to sniff a file
+/// extension and, once matched, as a fallback card title.
+fn path_file_name(url: &str) -> Option<&str> {
+    let (_, path, _) = split_url(url)?;
+    path.rsplit('/').next().filter(|s| !s.is_empty())
+}
+
+/// Percent-encodes every byte outside RFC 3986's unreserved set. Used to
+/// smuggle an arbitrary URL through a single query-string value — not a
+/// general encoder, just enough that `query_param`'s naive `&`/`=` split
+/// can never misfire on the result (see `percent_decode`, its inverse).
+fn percent_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// Inverse of `percent_encode`. Fails closed (`None`) on any malformed
+/// escape rather than panicking or lossily substituting.
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                out.push(u8::from_str_radix(input.get(i + 1..i + 3)?, 16).ok()?);
+                i += 3;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Escapes the characters that matter inside an HTML attribute value.
+/// `valid_id` keeps the other wrapper page safe by restricting to an
+/// alphanumeric charset; a URL can't be restricted like that (it needs
+/// `/`, `:`, `?`, ...), so this is the file wrapper's equivalent guard
+/// against breaking out of the `src="..."` attribute it's interpolated into.
+fn html_escape(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for c in input.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn valid_id(id: &str, max_len: usize) -> bool {
@@ -516,6 +657,24 @@ fn kick_video_in(url: &str) -> Option<EmbedVideo> {
     Some(embed_video(Platform::Kick, channel.to_string(), 0, url))
 }
 
+/// A direct link to a video *file* rather than a hosting platform's page —
+/// e.g. someone pasting a CDN link straight to a `.mp4`. Matched purely on
+/// the URL's file extension, like the platform matchers above: no network
+/// round-trip just to decide whether a play button belongs on the card.
+fn direct_file_video_in(url: &str) -> Option<EmbedVideo> {
+    // Restricted to containers/codecs WebView2's Chromium engine decodes
+    // out of the box. `.mov`/`.mkv`/`.avi` are deliberately left out —
+    // Chromium has no built-in demuxer for those, so they'd silently fail
+    // to play instead of degrading to a normal link.
+    const FILE_VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "webm", "ogv"];
+
+    let name = path_file_name(url)?;
+    let ext = name.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase())?;
+    FILE_VIDEO_EXTENSIONS
+        .contains(&ext.as_str())
+        .then(|| embed_video(Platform::File, String::new(), 0, url))
+}
+
 /// A logical rect rounded to physical pixels: `(x, y, width, height)`.
 fn to_physical(rect: iced::Rectangle, scale: f32) -> (i32, i32, i32, i32) {
     (
@@ -546,7 +705,7 @@ mod host {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, MoveWindow, RegisterClassExW, ShowWindow,
-        HMENU, SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN,
+        SW_HIDE, SW_SHOWNA, WINDOW_EX_STYLE, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN,
         WS_CLIPSIBLINGS, WS_VISIBLE,
     };
 
@@ -601,9 +760,9 @@ mod host {
                 y,
                 width,
                 height,
-                HWND(parent as *mut core::ffi::c_void),
-                HMENU::default(),
-                GetModuleHandleW(PCWSTR::null()).map(HINSTANCE::from).unwrap_or_default(),
+                Some(HWND(parent as *mut core::ffi::c_void)),
+                None,
+                GetModuleHandleW(PCWSTR::null()).ok().map(HINSTANCE::from),
                 None,
             )
         }
@@ -660,7 +819,19 @@ thread_local! {
     /// The live player, if any. Only ever touched from the event-loop
     /// thread (see module docs) — one player at a time.
     static PLAYER: RefCell<Option<NativePlayer>> = const { RefCell::new(None) };
+    /// True while a page element is fullscreen (the player fills the whole
+    /// app window). `sync_bounds` leaves the geometry alone until it clears
+    /// so the stage-glue loop can't shrink the video back mid-fullscreen.
+    static FULLSCREEN: Cell<bool> = const { Cell::new(false) };
+    /// The last `(full, visible)` physical rects `sync_bounds` computed, so
+    /// leaving fullscreen can restore the glued geometry immediately —
+    /// without waiting on the iced probe loop, whose `synced` guard may
+    /// suppress a re-sync when the stage hasn't otherwise moved.
+    static LAST_GLUED: Cell<Option<Glued>> = const { Cell::new(None) };
 }
+
+/// `(full, visible)` in physical pixels — the inputs `apply_glued` needs.
+type Glued = ((i32, i32, i32, i32), Option<(i32, i32, i32, i32)>);
 
 /// Creates the clip host + child webview over the stage geometry. Must run
 /// on the event-loop thread (inside `window::run_with_handle`). `data_dir`
@@ -670,7 +841,7 @@ thread_local! {
 /// playback starting inline must not yank keyboard focus out of the
 /// composer. Clicking the video focuses it naturally.
 pub fn open(
-    parent: &impl HasWindowHandle,
+    parent: &(impl HasWindowHandle + ?Sized),
     video: &EmbedVideo,
     full: iced::Rectangle,
     visible: Option<iced::Rectangle>,
@@ -693,12 +864,29 @@ pub fn open(
     let mut context = wry::WebContext::new(data_dir);
     let builder = wry::WebViewBuilder::new_with_web_context(&mut context)
         .with_bounds(webview_bounds(full_phys, host_origin))
-        // YouTube plays via a wrapper page served from this protocol so
-        // the player sees a real embedding page — see `player_url` for
-        // the whole story. Registered unconditionally (it's inert for the
-        // platforms that navigate straight to their embed URL).
+        // Don't seize keyboard focus when playback starts — the composer has
+        // to stay typeable while a video plays inline. wry defaults
+        // `focused: true`, which `MoveFocus`es to the WebView2 document at
+        // creation and leaves winit (and thus the iced text_input) unable to
+        // receive WM_CHAR. Clicking the video still focuses it for player
+        // shortcuts (wry's container forwards WM_SETFOCUS to the document);
+        // `reclaim_focus` hands focus back on the next app-surface click.
+        .with_focused(false)
+        // YouTube and direct file links both play via a wrapper page served
+        // from this protocol — see `player_url` for the whole story.
+        // Registered unconditionally (it's inert for the platforms that
+        // navigate straight to their embed URL).
         .with_custom_protocol(WRAPPER_SCHEME.to_string(), |_webview_id, request| {
-            wrapper_page(request)
+            wrapper_response(request)
+        })
+        // The YouTube logo / "Watch on YouTube" (and any target=_blank link
+        // inside the player) ask to open a new window. WebView2 denies that
+        // by default, so those buttons appear dead — hand the URL to the
+        // system browser instead, which is the behavior the user expects
+        // anyway ("open on YouTube" opening their real browser).
+        .with_new_window_req_handler(|url, _features| {
+            let _ = open::that(url);
+            wry::NewWindowResponse::Deny
         })
         .with_url(video.player_url());
 
@@ -724,6 +912,7 @@ pub fn open(
             return Err(e.to_string());
         }
     };
+    subscribe_fullscreen(&webview);
     PLAYER.with(|player| *player.borrow_mut() = Some(NativePlayer { webview, host }));
     Ok(())
 }
@@ -733,17 +922,108 @@ pub fn open(
 /// overlay is open), webview offset so the full rect stays put underneath.
 /// Event-loop thread only; harmless when no player is live.
 pub fn sync_bounds(full: iced::Rectangle, visible: Option<iced::Rectangle>, scale: f32) {
+    let glued = (to_physical(full, scale), visible.map(|v| to_physical(v, scale)));
+    LAST_GLUED.with(|g| g.set(Some(glued)));
+    // While a page element is fullscreen the webview fills the window — the
+    // stage geometry is irrelevant until it exits (see `enter_fullscreen`),
+    // and applying it would visibly snap the video back to card size.
+    if FULLSCREEN.with(|f| f.get()) {
+        return;
+    }
+    apply_glued(glued);
+}
+
+/// Positions the host + webview for the given glued geometry. The single
+/// place stage-glue bounds are actually pushed to the OS.
+fn apply_glued((full_phys, visible_phys): Glued) {
     PLAYER.with(|player| {
         let borrowed = player.borrow();
         let Some(native) = borrowed.as_ref() else {
             return;
         };
-        let visible_phys = visible.map(|v| to_physical(v, scale));
         host::sync(native.host, visible_phys);
         if let Some((x, y, _, _)) = visible_phys {
-            let _ = native.webview.set_bounds(webview_bounds(to_physical(full, scale), (x, y)));
+            let _ = native.webview.set_bounds(webview_bounds(full_phys, (x, y)));
         }
     });
+}
+
+/// Applies a fullscreen state change: fill the app window on enter, restore
+/// the glued stage geometry on exit. Idempotent (ignores no-op repeats).
+/// Event-loop thread only.
+fn set_fullscreen(on: bool) {
+    if FULLSCREEN.with(|f| f.get()) == on {
+        return;
+    }
+    FULLSCREEN.with(|f| f.set(on));
+    if on {
+        fill_window();
+    } else if let Some(glued) = LAST_GLUED.with(|g| g.get()) {
+        // Restore the glued stage geometry directly — the iced loop's
+        // `synced` guard may not re-issue a sync on its own.
+        apply_glued(glued);
+    }
+}
+
+/// Expands the clip host + webview to cover the whole app window, escaping
+/// the stage clip — the fullscreen state. Uses the parent (winit) window's
+/// client rect, already in physical pixels like everything else here.
+/// `MoveWindow`/`ShowWindow` (like `host::sync`) — no z-order change is
+/// needed since the clip host is the app window's only child.
+fn fill_window() {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClientRect, GetParent, MoveWindow, ShowWindow, SW_SHOWNA,
+    };
+
+    PLAYER.with(|player| {
+        let borrowed = player.borrow();
+        let Some(native) = borrowed.as_ref() else {
+            return;
+        };
+        let host = HWND(native.host as *mut core::ffi::c_void);
+        let Ok(parent) = (unsafe { GetParent(host) }) else {
+            return;
+        };
+        let mut rc = RECT::default();
+        if unsafe { GetClientRect(parent, &mut rc) }.is_err() {
+            return;
+        }
+        let (w, h) = ((rc.right - rc.left).max(1), (rc.bottom - rc.top).max(1));
+        unsafe {
+            let _ = MoveWindow(host, 0, 0, w, h, true);
+            let _ = ShowWindow(host, SW_SHOWNA);
+        }
+        let _ = native.webview.set_bounds(wry::Rect {
+            position: wry::dpi::PhysicalPosition::new(0, 0).into(),
+            size: wry::dpi::PhysicalSize::new(w as u32, h as u32).into(),
+        });
+    });
+}
+
+/// Subscribes the live webview to WebView2's fullscreen event so the
+/// player's fullscreen button works — wry doesn't surface it, so we reach
+/// the raw controller directly (`webview2-com`). The handler reads the
+/// current state off the sender and applies it. It fires on the event-loop
+/// thread (WebView2 posts it to the UI message pump), where the player
+/// thread-locals live. The registration token is intentionally dropped: the
+/// subscription lives until the webview is destroyed.
+fn subscribe_fullscreen(webview: &wry::WebView) {
+    use webview2_com::ContainsFullScreenElementChangedEventHandler;
+    use wry::WebViewExtWindows;
+
+    let core = webview.webview();
+    let handler = ContainsFullScreenElementChangedEventHandler::create(Box::new(|sender, _args| {
+        if let Some(sender) = sender {
+            let mut is_fs = windows::core::BOOL::default();
+            if unsafe { sender.ContainsFullScreenElement(&mut is_fs) }.is_ok() {
+                set_fullscreen(is_fs.as_bool());
+            }
+        }
+        Ok(())
+    }));
+    let mut token = 0i64;
+    let _ = unsafe { core.add_ContainsFullScreenElementChanged(&handler, &mut token) };
 }
 
 /// Hides the player without stopping playback — used while the stage
@@ -756,9 +1036,37 @@ pub fn hide() {
     });
 }
 
+/// Returns Win32 keyboard focus to the app window. Clicking the playing
+/// video focuses the WebView2 document (wry's container window proc
+/// forwards WM_SETFOCUS to it), and winit doesn't reclaim focus on an
+/// ordinary click of its own client area — so without this the composer
+/// stays dead after the user has interacted with a playing video. Called
+/// on any app-surface click while a video is live; presses on the video's
+/// own child HWND never reach iced, so this can't fire from them.
+/// Event-loop thread only. No-op unless a player is live, so a stray call
+/// can't wrench focus around when nothing stole it.
+pub fn reclaim_focus(window: &(impl HasWindowHandle + ?Sized)) {
+    let live = PLAYER.with(|player| player.borrow().is_some());
+    if !live {
+        return;
+    }
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    if let raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+        let _ = unsafe { SetFocus(Some(HWND(h.hwnd.get() as *mut core::ffi::c_void))) };
+    }
+}
+
 /// Tears down the player (stops audio/video). Event-loop thread only;
 /// harmless when no player is live.
 pub fn close() {
+    // Reset fullscreen bookkeeping so a stale flag can't make the next
+    // video's first `sync_bounds` no-op itself into an unglued state.
+    FULLSCREEN.with(|f| f.set(false));
+    LAST_GLUED.with(|g| g.set(None));
     PLAYER.with(|player| {
         if let Some(native) = player.borrow_mut().take() {
             // Order matters — see `NativePlayer::host`.
@@ -844,6 +1152,25 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_direct_video_file_links() {
+        for url in [
+            "https://cdn.example.com/clips/funny.mp4",
+            "https://cdn.example.com/clips/funny.MP4",
+            "https://cdn.example.com/a/b/c.webm",
+            "https://cdn.example.com/old.m4v?token=abc",
+            "https://cdn.example.com/demo.ogv#t=10",
+        ] {
+            let video = video_in(url).unwrap_or_else(|| panic!("no match: {url}"));
+            assert_eq!(video.platform, Platform::File, "{url}");
+            assert_eq!(video.source_url, url);
+        }
+
+        let named = video_in("https://cdn.example.com/clips/funny cat.mp4").unwrap();
+        assert_eq!(named.file_name().as_deref(), Some("funny cat.mp4"));
+        assert_eq!(video_in("https://cdn.example.com/clip.mp4").unwrap().watch_url(), "https://cdn.example.com/clip.mp4");
+    }
+
+    #[test]
     fn rejects_non_video_urls() {
         for url in [
             "https://www.youtube.com/@somechannel",
@@ -852,8 +1179,55 @@ mod tests {
             "https://example.com/https://youtube.com/watch?v=x",
             "ftp://youtube.com/watch?v=dQw4w9WgXcQ",
             "https://example.com/",
+            // Video-adjacent but not a container WebView2 plays natively,
+            // or not a video at all — must fall through to the regular
+            // OpenGraph preview instead of a dead player.
+            "https://example.com/video.mov",
+            "https://example.com/video.mkv",
+            "https://example.com/video.avi",
+            "https://example.com/page.html",
+            "https://example.com/video.mp4x",
+            "https://example.com/watch?file=clip.mp4",
+            "https://example.com/novideoext",
         ] {
             assert!(video_in(url).is_none(), "should not match: {url}");
         }
+    }
+
+    #[test]
+    fn percent_round_trips_arbitrary_bytes() {
+        let original = "https://cdn.example.com/a b/c.mp4?x=1&y=2%3";
+        let encoded = percent_encode(original);
+        assert!(encoded.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'%')));
+        assert_eq!(percent_decode(&encoded).as_deref(), Some(original));
+    }
+
+    /// Builds a fake custom-protocol request for `file_wrapper_page`, as if
+    /// `EmbedVideo::player_url` had encoded `src` for it.
+    fn file_wrapper_request(src: &str) -> wry::http::Request<Vec<u8>> {
+        wry::http::Request::builder()
+            .uri(format!("thornyplayer://localhost/video?src={}", percent_encode(src)))
+            .body(Vec::new())
+            .unwrap()
+    }
+
+    // The next two tests cover the exact XSS shape this module has to guard
+    // against: a chat message can make `source_url` anything, and it ends up
+    // interpolated into an HTML document that then executes in a WebView2
+    // child window.
+
+    #[test]
+    fn file_wrapper_page_rejects_non_http_scheme() {
+        let response = file_wrapper_page(file_wrapper_request("javascript:alert(1)"));
+        assert_eq!(response.status().as_u16(), 404);
+    }
+
+    #[test]
+    fn file_wrapper_page_escapes_html_in_src() {
+        let malicious = r#"https://example.com/"><script>alert(1)</script>.mp4"#;
+        let response = file_wrapper_page(file_wrapper_request(malicious));
+        let body = String::from_utf8(response.body().to_vec()).unwrap();
+        assert!(!body.contains("<script>"));
+        assert!(body.contains("&lt;script&gt;"));
     }
 }

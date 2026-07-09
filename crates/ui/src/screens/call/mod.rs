@@ -135,7 +135,7 @@ pub fn banner<'a, M: Clone + 'a>(
             text(format!("{} in call", user_ids.len())).size(12).style(text::secondary),
         );
     }
-    bar = bar.push(iced::widget::horizontal_space());
+    bar = bar.push(iced::widget::space::horizontal());
 
     let action: Element<'a, M> = if pending {
         // In flight — the label above already says which way.

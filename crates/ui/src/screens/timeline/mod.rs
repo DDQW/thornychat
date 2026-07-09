@@ -11,13 +11,17 @@ use std::collections::HashMap;
 
 use client_core::commands::RequestId;
 use client_core::events::{
-    EmojiPack, NotificationMode, RoomMember, RoomSummary, TimelineItem, TimelineItemContent,
-    TrustShield, UrlPreview,
+    friendly_user_id, EmojiPack, NotificationMode, RoomMember, RoomSummary, TimelineItem,
+    TimelineItemContent, TrustShield, UrlPreview,
 };
 use iced::widget::{
-    button, column, container, image, row, scrollable, text, text_input, tooltip,
+    button, column, container, image, mouse_area, row, scrollable, text, text_input, tooltip,
 };
 use iced::{Element, Length};
+
+// Anything server-authored (bodies, names, titles) renders through this
+// instead of plain `text` — see its doc comment for the tofu story.
+use crate::theme::remote_text;
 
 
 /// The room header's notification dropdown options. `Default` means "no
@@ -213,6 +217,14 @@ pub struct State {
     /// thumbnail. At most one at a time (the native webview is a
     /// singleton, see `crate::video_player`).
     pub inline_video: Option<InlineVideo>,
+    /// Active browser-style middle-click autoscroll: the window-space point
+    /// where the middle-click landed (the dead-zone origin). While `Some`, a
+    /// timer subscription glides the timeline toward wherever the cursor sits
+    /// relative to it — toward newer messages when the cursor is below the
+    /// origin, older when above, faster the further away. Set and cleared by
+    /// the root dispatcher (it owns the window-global cursor and the scroll
+    /// task); any click, wheel tick, key press, or room switch cancels it.
+    pub autoscroll: Option<iced::Point>,
 }
 
 /// A video playing inline in place of its link card. The fields after
@@ -324,7 +336,7 @@ pub enum Message {
     /// A quote block was clicked — scroll to (and highlight) the quoted
     /// message.
     JumpToEvent(String),
-    ZoomImage { url: String, width: Option<u32>, height: Option<u32> },
+    ZoomImage(String),
     OpenUrl(String),
     /// A video card's play button was clicked — start playing it inline in
     /// place of the card (the root shell owns the native webview
@@ -339,6 +351,10 @@ pub enum Message {
     JoinCallClicked,
     LeaveCallClicked,
     DismissCallError,
+    /// Middle-click on the message list toggles browser-style autoscroll. The
+    /// root dispatcher handles it — it has the window-global cursor for the
+    /// anchor and owns the timeline scroll task (see `Effect::ToggleAutoscroll`).
+    AutoscrollToggle,
 }
 
 pub enum Effect {
@@ -351,7 +367,7 @@ pub enum Effect {
     /// `None` clears the per-room override (back to account default).
     SetNotificationMode(Option<NotificationMode>),
     PaginateBackwards,
-    ZoomImage { url: String, width: Option<u32>, height: Option<u32> },
+    ZoomImage(String),
     /// Open (or create) a DM with this user and switch to it. Whether a
     /// newly created DM is encrypted follows the user's encryption setting.
     OpenDirectMessage(String),
@@ -371,18 +387,29 @@ pub enum Effect {
     JoinCall,
     LeaveCall,
     DismissCallError,
+    /// Toggle middle-click autoscroll on/off. When turning it on, the root
+    /// dispatcher anchors it at the current window-global cursor position.
+    ToggleAutoscroll,
 }
 
 /// Widget id of the message-list scrollable, targeted by quote-jump and
 /// anchor-correction scroll tasks.
-pub fn timeline_scroll_id() -> iced::widget::scrollable::Id {
-    iced::widget::scrollable::Id::new("timeline-scroll")
+pub fn timeline_scroll_id() -> iced::widget::Id {
+    iced::widget::Id::from("timeline-scroll")
 }
 
 /// Widget id of a message row's wrapper container, addressable by
-/// `container::visible_bounds` probes.
-fn anchor_container_id(event_id: &str) -> iced::widget::container::Id {
-    iced::widget::container::Id::new(format!("msg-{event_id}"))
+/// [`visible_bounds`] probes.
+fn anchor_container_id(event_id: &str) -> iced::widget::Id {
+    iced::widget::Id::from(format!("msg-{event_id}"))
+}
+
+/// iced 0.14 removed `container::visible_bounds`; the `selector` API is the
+/// replacement — find the widget by id and take its clipped on-screen rect
+/// (`None` when it isn't in the tree or is scrolled fully out of view).
+fn visible_bounds(id: iced::widget::Id) -> iced::Task<Option<iced::Rectangle>> {
+    iced::widget::selector::find(id)
+        .map(|t: Option<iced::widget::selector::Target>| t.and_then(|t| t.visible_bounds()))
 }
 
 /// Display box for an image message: aspect-true from the sender-declared
@@ -449,7 +476,7 @@ fn nearest_event_id(items: &[TimelineItem], index: usize) -> Option<String> {
 /// discarded on arrival.
 fn probe_task(event_id: String, purpose: ProbePurpose, generation: u64) -> iced::Task<Message> {
     let id = anchor_container_id(&event_id);
-    iced::widget::container::visible_bounds(id).map(move |bounds| Message::AnchorProbed {
+    visible_bounds(id).map(move |bounds| Message::AnchorProbed {
         event_id: event_id.clone(),
         purpose,
         generation,
@@ -550,7 +577,7 @@ fn relative_offset_for_index(index: usize, len: usize) -> f32 {
 /// exact message once it's on screen.
 fn scroll_task(state: &State, relative_y: f32) -> iced::Task<Message> {
     let range = (state.last_content_height - state.last_bounds_height).max(0.0);
-    iced::widget::scrollable::scroll_to(
+    iced::widget::operation::scroll_to(
         timeline_scroll_id(),
         iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: relative_y * range },
     )
@@ -564,6 +591,7 @@ pub fn update(
     state: &mut State,
     message: Message,
     spell: &crate::spellcheck_config::SpellcheckConfig,
+    show_membership_events: bool,
 ) -> (iced::Task<Message>, Effect) {
     match message {
         Message::Composer(msg) => {
@@ -615,7 +643,7 @@ pub fn update(
             // Anchor the picker at the clicked message: probe where its row
             // sits right now. The picker renders when the probe lands, one
             // frame later.
-            let probe = iced::widget::container::visible_bounds(anchor_container_id(&event_id))
+            let probe = visible_bounds(anchor_container_id(&event_id))
                 .map(move |bounds| Message::ReactionAnchorProbed {
                     event_id: event_id.clone(),
                     bounds,
@@ -640,7 +668,7 @@ pub fn update(
             if !state.search_open {
                 state.search_query.clear();
             }
-            recompute_search_matches(state);
+            recompute_search_matches(state, show_membership_events);
             // Filtering rebuilds the list; the anchor's stored position no
             // longer means anything. Corrections pause until the next
             // scroll learns a fresh one.
@@ -731,7 +759,7 @@ pub fn update(
         }
         Message::SearchQueryChanged(query) => {
             state.search_query = query;
-            recompute_search_matches(state);
+            recompute_search_matches(state, show_membership_events);
             // Filtering rebuilds the list; drop the now-meaningless anchor.
             state.scroll_anchor = None;
             (iced::Task::none(), Effect::None)
@@ -851,7 +879,7 @@ pub fn update(
                     );
                     iced::Task::batch([
                         probe,
-                        iced::widget::scrollable::scroll_to(
+                        iced::widget::operation::scroll_to(
                             timeline_scroll_id(),
                             iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: from_bottom },
                         ),
@@ -914,7 +942,7 @@ pub fn update(
                 if from_bottom > 0.5 && !leaving {
                     tracing::debug!(from_bottom, height_delta, "live-edge glue → bottom");
                     return (
-                        iced::widget::scrollable::scroll_to(
+                        iced::widget::operation::scroll_to(
                             timeline_scroll_id(),
                             iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
                         ),
@@ -1052,7 +1080,7 @@ pub fn update(
                         state.scroll_generation += 1;
                         tracing::debug!(delta, event_id, "timeline reflow correction");
                         return (
-                            iced::widget::scrollable::scroll_by(
+                            iced::widget::operation::scroll_by(
                                 timeline_scroll_id(),
                                 iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: -delta },
                             ),
@@ -1116,9 +1144,7 @@ pub fn update(
                 None => (iced::Task::none(), Effect::None),
             }
         }
-        Message::ZoomImage { url, width, height } => {
-            (iced::Task::none(), Effect::ZoomImage { url, width, height })
-        }
+        Message::ZoomImage(url) => (iced::Task::none(), Effect::ZoomImage(url)),
         Message::OpenUrl(url) => {
             let _ = open::that(url);
             (iced::Task::none(), Effect::None)
@@ -1134,6 +1160,7 @@ pub fn update(
         Message::JoinCallClicked => (iced::Task::none(), Effect::JoinCall),
         Message::LeaveCallClicked => (iced::Task::none(), Effect::LeaveCall),
         Message::DismissCallError => (iced::Task::none(), Effect::DismissCallError),
+        Message::AutoscrollToggle => (iced::Task::none(), Effect::ToggleAutoscroll),
     }
 }
 
@@ -1152,6 +1179,7 @@ pub fn view<'a>(
     url_previews: &'a HashMap<String, Option<UrlPreview>>,
     tweet_previews: &'a HashMap<String, Option<crate::tweets::TweetData>>,
     steam_previews: &'a HashMap<String, Option<crate::steam::SteamAppData>>,
+    show_membership_events: bool,
 ) -> Element<'a, Message> {
     let Some(open_room_id) = state.room_id.as_deref() else {
         return container(text("Select a room to view its messages"))
@@ -1194,6 +1222,15 @@ pub fn view<'a>(
         // observably never arrives here).
         if state.suppress_unread_divider
             && matches!(item.content, TimelineItemContent::NewMessagesDivider)
+        {
+            continue;
+        }
+        // Membership changes hidden by the timeline setting are skipped here,
+        // before the grouping logic below — so a hidden item never resets
+        // `previous_sender` and breaks avatar-grouping of the real messages
+        // around it.
+        if !show_membership_events
+            && matches!(item.content, TimelineItemContent::MembershipChange(_))
         {
             continue;
         }
@@ -1326,7 +1363,7 @@ pub fn view<'a>(
         Message::DismissCallError,
     ));
 
-    let chat = scrollable(list)
+    let chat = mouse_area(scrollable(list)
         .id(timeline_scroll_id())
         .height(Length::Fill)
         .on_scroll(Message::Scrolled)
@@ -1348,7 +1385,13 @@ pub fn view<'a>(
                 .scroller_width(6)
                 .anchor(iced::widget::scrollable::Anchor::End),
         ))
-        .style(crate::theme::thin_scrollbar);
+        .style(crate::theme::thin_scrollbar))
+        // Middle-click anywhere over the message list toggles browser-style
+        // autoscroll: a hands-free glide the pointer steers (down past the
+        // anchor scrolls toward newer messages, up toward older, faster the
+        // further away). The root dispatcher anchors it at the cursor, drives
+        // the motion on a timer, and ends it on the next click/wheel/key.
+        .on_middle_press(Message::AutoscrollToggle);
 
     // Composer emoji/sticker picker: a layer floating over the bottom-right
     // of the chat, right above the input-row buttons that toggle it — NOT a
@@ -1452,7 +1495,7 @@ pub fn view<'a>(
         let max_y = (state.last_bounds_height - 110.0).max(0.0);
         let anchor_y = state.member_menu_anchor_y.clamp(0.0, max_y);
         let menu = member_menu_actions(user_id, state.highlighted_member.as_deref());
-        let positioned = column![iced::widget::Space::with_height(Length::Fixed(anchor_y)), menu];
+        let positioned = column![iced::widget::Space::new().height(Length::Fixed(anchor_y)), menu];
         container(positioned)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -1461,7 +1504,23 @@ pub fn view<'a>(
             // right edge lands just left of the list.
             .padding(iced::Padding { top: 0.0, right: 206.0, bottom: 0.0, left: 0.0 })
     });
-    iced::widget::stack![layout.height(Length::Fill)].push_maybe(member_flyout).into()
+    // The composer's right-click edit menu floats here in the outer stack
+    // (not in `chat_area`): a `stack` short-circuits event dispatch on the
+    // first layer that captures, so the pick/dismiss click is swallowed before
+    // it can reach the sibling composer and unfocus it — a `column` would let
+    // the click fall through to the input and drop the selection Cut/Copy need.
+    let composer_menu = state
+        .composer
+        .context_menu
+        .map(|anchor| composer::context_menu(anchor).map(Message::Composer));
+    let mut root = iced::widget::stack![layout.height(Length::Fill)];
+    if let Some(flyout) = member_flyout {
+        root = root.push(flyout);
+    }
+    if let Some(menu) = composer_menu {
+        root = root.push(menu);
+    }
+    root.into()
 }
 
 /// The member actions menu, rendered as a floating flyout to the left of the
@@ -1579,7 +1638,7 @@ fn member_panel<'a>(
             continue;
         }
 
-        let header = text(label).size(11).font(crate::theme::SEMIBOLD_FONT);
+        let header = remote_text(label).size(11).font(crate::theme::SEMIBOLD_FONT);
         let header: Element<'a, Message> = match color {
             Some(color) => header.style(colored_text(color)).into(),
             None => header.style(text::secondary).into(),
@@ -1587,7 +1646,7 @@ fn member_panel<'a>(
         col = col.push(container(header).padding([6, 4]));
 
         for member in group {
-            let name = text(member.display_name.clone()).size(13);
+            let name = remote_text(member.display_name.clone()).size(13);
             let name: Element<'a, Message> = match color {
                 Some(color) => name.style(colored_text(color)).into(),
                 None => name.into(),
@@ -1651,13 +1710,20 @@ fn member_panel<'a>(
 /// edits, search toggles, and timeline snapshots, NOT per frame:
 /// `item_matches` lowercases every body and sender name, far too heavy for
 /// view(). Empties the set when no search is active.
-pub fn recompute_search_matches(state: &mut State) {
+pub fn recompute_search_matches(state: &mut State, show_membership_events: bool) {
     state.search_matches.clear();
     let query = state.search_query.trim().to_lowercase();
     if !state.search_open || query.is_empty() {
         return;
     }
     for (index, item) in state.items.iter().enumerate() {
+        // Hidden membership changes stay out of search results too, so the
+        // match count and the rendered timeline agree.
+        if !show_membership_events
+            && matches!(item.content, TimelineItemContent::MembershipChange(_))
+        {
+            continue;
+        }
         if item_matches(item, &query) {
             state.search_matches.insert(index);
         }
@@ -1670,6 +1736,7 @@ fn item_matches(item: &TimelineItem, query_lower: &str) -> bool {
         TimelineItemContent::Image { caption, .. } => caption.as_deref(),
         TimelineItemContent::Sticker { body, .. } => Some(body.as_str()),
         TimelineItemContent::File { filename, .. } => Some(filename.as_str()),
+        TimelineItemContent::MembershipChange(desc) => Some(desc.as_str()),
         TimelineItemContent::Redacted
         | TimelineItemContent::DateDivider(_)
         | TimelineItemContent::NewMessagesDivider => None,
@@ -1679,7 +1746,7 @@ fn item_matches(item: &TimelineItem, query_lower: &str) -> bool {
     }
     item.sender_display_name
         .as_deref()
-        .unwrap_or(&item.sender)
+        .unwrap_or_else(|| friendly_user_id(&item.sender))
         .to_lowercase()
         .contains(query_lower)
 }
@@ -1696,7 +1763,7 @@ fn header<'a>(
     match room {
         Some(room) => {
             let mut title = row![].spacing(6).align_y(iced::Center);
-            title = title.push(text(room.name.clone()).size(15));
+            title = title.push(remote_text(room.name.clone()).size(15));
             if room.is_encrypted {
                 title = title.push(
                     tooltip(
@@ -1710,17 +1777,17 @@ fn header<'a>(
             if let Some(topic) = &room.topic {
                 let short: String = topic.chars().take(80).collect();
                 bar = bar.push(
-                    text(if short.len() < topic.len() { format!("{short}…") } else { short })
+                    remote_text(if short.len() < topic.len() { format!("{short}…") } else { short })
                         .size(12)
                         .style(text::secondary)
                         .width(Length::Fill),
                 );
             } else {
-                bar = bar.push(iced::widget::horizontal_space());
+                bar = bar.push(iced::widget::space::horizontal());
             }
         }
         None => {
-            bar = bar.push(iced::widget::horizontal_space());
+            bar = bar.push(iced::widget::space::horizontal());
         }
     }
 
@@ -1790,7 +1857,7 @@ fn typing_line(state: &State) -> Option<Element<'_, composer::Message>> {
         .map(|user_id| {
             member_by_id(&state.composer.member_candidates, &state.member_index, user_id)
                 .map(|m| m.display_name.clone())
-                .unwrap_or_else(|| user_id.clone())
+                .unwrap_or_else(|| friendly_user_id(user_id).to_string())
         })
         .collect();
 
@@ -1799,7 +1866,7 @@ fn typing_line(state: &State) -> Option<Element<'_, composer::Message>> {
         [a, b] => format!("{a} and {b} are typing…"),
         _ => "Several people are typing…".to_string(),
     };
-    Some(text(label).size(12).into())
+    Some(remote_text(label).size(12).into())
 }
 
 /// Mini avatars of everyone whose read receipt sits on the newest message
@@ -1833,10 +1900,10 @@ fn follower_avatars<'a>(
         let member = member_by_id(members, member_index, user_id);
         let (name, avatar_url) = member
             .map(|m| (m.display_name.as_str(), m.avatar_url.as_deref()))
-            .unwrap_or((user_id.as_str(), None));
+            .unwrap_or((friendly_user_id(user_id), None));
         avatars = avatars.push(tooltip(
             crate::media_cache::avatar::<composer::Message>(media, avatar_url, name, 16),
-            container(text(format!("{name} is following the conversation")).size(11))
+            container(remote_text(format!("{name} is following the conversation")).size(11))
                 .padding(4)
                 .style(crate::theme::panel),
             tooltip::Position::Top,
@@ -1892,14 +1959,23 @@ fn render_item<'a>(
             .center_x(Length::Fill)
             .into();
     }
-    let sender = item.sender_display_name.as_deref().unwrap_or(&item.sender);
+    // Membership changes render as a compact, dimmed system line spanning the
+    // timeline width — like the date/new-messages dividers — rather than a
+    // full avatar + name-header message row, so joins/leaves stay quiet.
+    if let TimelineItemContent::MembershipChange(desc) = &item.content {
+        return container(remote_text(format!("— {desc} —")).size(12).style(text::secondary))
+            .width(Length::Fill)
+            .center_x(Length::Fill)
+            .into();
+    }
+    let sender = item.sender_display_name.as_deref().unwrap_or_else(|| friendly_user_id(&item.sender));
     let is_own = own_user_id.is_some_and(|id| id == item.sender);
     // Grouped follow-up messages keep the avatar column's width so bodies
     // stay aligned, without repeating the picture.
     let avatar: Element<'a, Message> = if show_header {
         crate::media_cache::avatar(media, item.sender_avatar_url.as_deref(), sender, 42)
     } else {
-        iced::widget::Space::with_width(42).into()
+        iced::widget::Space::new().width(42.0).into()
     };
 
     let body_line: Element<'a, Message> = match &item.content {
@@ -1913,11 +1989,7 @@ fn render_item<'a>(
             let visual: Element<'a, Message> =
                 match crate::media_cache::mxc_visual(media, url, box_w, Some(box_h)) {
                     Some(img) => iced::widget::mouse_area(img)
-                        .on_press(Message::ZoomImage {
-                            url: url.clone(),
-                            width: *width,
-                            height: *height,
-                        })
+                        .on_press(Message::ZoomImage(url.clone()))
                         .interaction(iced::mouse::Interaction::Pointer)
                         .into(),
                     None => container(text("loading image…").size(12).style(text::secondary))
@@ -1927,7 +1999,7 @@ fn render_item<'a>(
                         .into(),
                 };
             match caption {
-                Some(c) => column![visual, text(c.clone()).size(12)].spacing(2).into(),
+                Some(c) => column![visual, remote_text(c.clone()).size(12)].spacing(2).into(),
                 None => visual,
             }
         }
@@ -1946,9 +2018,9 @@ fn render_item<'a>(
             }
         }
         TimelineItemContent::File { filename, caption, .. } => {
-            let name = text(format!("[file: {filename}]")).size(15);
+            let name = remote_text(format!("[file: {filename}]")).size(15);
             match caption {
-                Some(c) => column![name, text(c.clone()).size(12)].spacing(2).into(),
+                Some(c) => column![name, remote_text(c.clone()).size(12)].spacing(2).into(),
                 None => name.into(),
             }
         }
@@ -1960,7 +2032,9 @@ fn render_item<'a>(
         TimelineItemContent::Redacted => {
             text("(message removed)").size(14).style(text::secondary).into()
         }
-        TimelineItemContent::DateDivider(_) | TimelineItemContent::NewMessagesDivider => {
+        TimelineItemContent::DateDivider(_)
+        | TimelineItemContent::NewMessagesDivider
+        | TimelineItemContent::MembershipChange(_) => {
             unreachable!()
         }
     };
@@ -1974,7 +2048,7 @@ fn render_item<'a>(
         .and_then(|member| tag_color_for_level(power_tags, member.power_level))
         .unwrap_or_else(|| name_palette_color(&item.sender));
     let styled_name = || {
-        text(sender.to_string())
+        remote_text(sender.to_string())
             .size(13)
             .font(crate::theme::SEMIBOLD_FONT)
             .style(colored_text(name_color))
@@ -2010,13 +2084,13 @@ fn render_item<'a>(
         let who = if reply.sender.is_empty() { "…".to_string() } else { reply.sender.clone() };
         let who_line = row![
             text(crate::theme::icon::REPLY).size(11).font(crate::theme::ICON_FONT).style(text::primary),
-            text(who).size(11).style(text::primary),
+            remote_text(who).size(11).style(text::primary),
         ]
         .spacing(4)
         .align_y(iced::Center);
         let texts = column![
             who_line,
-            text(reply.snippet.clone()).size(12).style(text::secondary),
+            remote_text(reply.snippet.clone()).size(12).style(text::secondary),
         ]
         .spacing(1);
         let mut quote = row![].spacing(6).align_y(iced::Center);
@@ -2118,17 +2192,13 @@ fn render_item<'a>(
                 .padding([2, 4]);
             pills = pills.push(tooltip(
                 pill,
-                container(text(reaction_senders_label(&reaction.senders, members, member_index)).size(12))
+                container(remote_text(reaction_senders_label(&reaction.senders, members, member_index)).size(12))
                     .padding(6)
                     .style(crate::theme::panel),
                 tooltip::Position::Bottom,
             ));
         }
         block = block.push(pills);
-    }
-
-    if is_own && !item.read_by.is_empty() {
-        block = block.push(text(format!("Read by {}", item.read_by.len())).size(11));
     }
 
     if confirm_delete.as_deref() == Some(event_id.as_str()) {
@@ -2393,13 +2463,13 @@ fn embed_video_card<'a>(
         return inline_player_card(inline);
     }
 
-    let title = preview.and_then(|p| p.title.clone());
+    let title = preview.and_then(|p| p.title.clone()).or_else(|| video.file_name());
     let platform = video.platform;
 
     let mut details =
         column![text(platform.label()).size(11).style(text::secondary)].spacing(2);
     if let Some(title) = title.clone() {
-        details = details.push(text(title).size(13).font(crate::theme::SEMIBOLD_FONT));
+        details = details.push(remote_text(title).size(13).font(crate::theme::SEMIBOLD_FONT));
     }
 
     let thumb: Element<'a, Message> = preview
@@ -2407,7 +2477,7 @@ fn embed_video_card<'a>(
         .and_then(|mxc| crate::media_cache::mxc_visual(media, mxc, 360, None))
         .unwrap_or_else(|| {
             // No thumbnail (yet) — a dark 16:9 stage keeps the card's shape.
-            container(iced::widget::Space::new(360, 202))
+            container(iced::widget::Space::new().width(360.0).height(202.0))
                 .style(|_theme: &iced::Theme| iced::widget::container::Style {
                     background: Some(iced::Color::from_rgb8(0x10, 0x10, 0x10).into()),
                     border: iced::border::rounded(4),
@@ -2466,13 +2536,22 @@ fn embed_video_card<'a>(
 fn inline_player_card(inline: &InlineVideo) -> Element<'_, Message> {
     let platform = inline.video.platform;
     let label = platform.label();
+    // "Watch on Video" doesn't read as a platform name the way "Watch on
+    // YouTube" does — a direct file link isn't hosted anywhere in
+    // particular, so the escape hatch is framed as opening it rather than
+    // watching it "on" something.
+    let watch_text = if platform == crate::video_player::Platform::File {
+        "Open externally".to_string()
+    } else {
+        format!("Watch on {label}")
+    };
 
     let header = row![
-        text(inline.title.as_deref().unwrap_or(label))
+        remote_text(inline.title.as_deref().unwrap_or(label))
             .size(12)
             .font(crate::theme::SEMIBOLD_FONT)
             .width(Length::Fill),
-        button(text(format!("Watch on {label}")).size(11))
+        button(text(watch_text).size(11))
             .on_press(Message::OpenVideoExternally(inline.video.watch_url()))
             .style(crate::theme::ghost_button)
             .padding([2, 6]),
@@ -2532,10 +2611,10 @@ fn generic_preview<'a>(
 ) -> Element<'a, Message> {
     let mut details = column![].spacing(2);
     if let Some(site) = &preview.site_name {
-        details = details.push(text(site.clone()).size(11).style(text::secondary));
+        details = details.push(remote_text(site.clone()).size(11).style(text::secondary));
     }
     if let Some(title) = &preview.title {
-        details = details.push(text(title.clone()).size(13).font(crate::theme::SEMIBOLD_FONT));
+        details = details.push(remote_text(title.clone()).size(13).font(crate::theme::SEMIBOLD_FONT));
     }
     if let Some(description) = &preview.description {
         let flat = description.replace('\n', " ");
@@ -2544,7 +2623,7 @@ fn generic_preview<'a>(
         } else {
             flat
         };
-        details = details.push(text(shown).size(12).style(text::secondary));
+        details = details.push(remote_text(shown).size(12).style(text::secondary));
     }
 
     let mut card = row![].spacing(8).align_y(iced::Center);
@@ -2684,15 +2763,15 @@ fn tweet_card<'a>(
         }
     }
     let mut author_col =
-        column![text(tweet.author).size(14).font(crate::theme::SEMIBOLD_FONT)].spacing(1);
+        column![remote_text(tweet.author).size(14).font(crate::theme::SEMIBOLD_FONT)].spacing(1);
     if let Some(handle_line) = tweet.handle_line {
-        author_col = author_col.push(text(handle_line).size(12).style(text::secondary));
+        author_col = author_col.push(remote_text(handle_line).size(12).style(text::secondary));
     }
     author_row = author_row.push(author_col);
 
     let mut card = column![author_row].spacing(6);
     if !tweet.text.is_empty() {
-        card = card.push(text(tweet.text).size(14));
+        card = card.push(remote_text(tweet.text).size(14));
     }
     if !is_avatar {
         if let Some(media) = preview
@@ -2742,9 +2821,9 @@ fn tweet_body<'a>(
 ) -> Element<'a, Message> {
     let web_img = |url: &str, width: u16, height: Option<u16>| -> Option<Element<'a, Message>> {
         media.web_images.get(url).map(|handle| {
-            let mut widget = image(handle.clone()).width(width);
+            let mut widget = image(handle.clone()).width(width as f32);
             if let Some(height) = height {
-                widget = widget.height(height);
+                widget = widget.height(height as f32);
             }
             widget.into()
         })
@@ -2762,7 +2841,7 @@ fn tweet_body<'a>(
         author_row = author_row.push(avatar);
     }
     let mut name_row = row![
-        text(tweet.author.name.as_str()).size(name_size).font(crate::theme::SEMIBOLD_FONT)
+        remote_text(tweet.author.name.as_str()).size(name_size).font(crate::theme::SEMIBOLD_FONT)
     ]
     .spacing(4)
     .align_y(iced::Center);
@@ -2780,7 +2859,7 @@ fn tweet_body<'a>(
     let mut body = column![author_row].spacing(6);
 
     if !tweet.text.is_empty() {
-        body = body.push(text(tweet.text.as_str()).size(text_size));
+        body = body.push(remote_text(tweet.text.as_str()).size(text_size));
     }
 
     // Photos two-up like X's grid; video stills get a play marker.
@@ -2829,7 +2908,7 @@ fn tweet_body<'a>(
             footer.push_str(&format!("{} Views", compact_count(views)));
         }
         if !footer.is_empty() {
-            body = body.push(text(footer).size(12).style(text::secondary));
+            body = body.push(remote_text(footer).size(12).style(text::secondary));
         }
 
         let mut stats = Vec::new();
@@ -2880,11 +2959,11 @@ fn steam_card<'a>(
     };
 
     let header_row = row![
-        text(format!("Buy {}", app_data.name))
+        remote_text(format!("Buy {}", app_data.name))
             .size(15)
             .font(crate::theme::SEMIBOLD_FONT)
             .style(colored(TITLE)),
-        iced::widget::Space::with_width(Length::Fill),
+        iced::widget::Space::new().width(Length::Fill),
         text("STEAM").size(11).font(crate::theme::SEMIBOLD_FONT).style(colored(MUTED)),
     ]
     .spacing(8)
@@ -2905,7 +2984,7 @@ fn steam_card<'a>(
             flat
         };
         body_row = body_row.push(
-            column![text(shown).size(12).style(colored(DESCRIPTION))].width(Length::Fill),
+            column![remote_text(shown).size(12).style(colored(DESCRIPTION))].width(Length::Fill),
         );
     }
 
@@ -2925,10 +3004,10 @@ fn steam_card<'a>(
         }
         if !names.is_empty() {
             purchase_row =
-                purchase_row.push(text(names.join(" · ")).size(11).style(colored(MUTED)));
+                purchase_row.push(remote_text(names.join(" · ")).size(11).style(colored(MUTED)));
         }
     }
-    purchase_row = purchase_row.push(iced::widget::Space::with_width(Length::Fill));
+    purchase_row = purchase_row.push(iced::widget::Space::new().width(Length::Fill));
 
     let mut buy_label = "View on Steam";
     if let Some(price) = &app_data.price_overview {
@@ -2962,7 +3041,7 @@ fn steam_card<'a>(
             }
         }
         purchase_row = purchase_row.push(
-            text(price.final_formatted.clone())
+            remote_text(price.final_formatted.clone())
                 .size(14)
                 .font(crate::theme::SEMIBOLD_FONT)
                 .style(colored(TITLE)),
@@ -2974,7 +3053,7 @@ fn steam_card<'a>(
     } else if let Some(release) = &app_data.release_date {
         if release.coming_soon && !release.date.is_empty() {
             purchase_row = purchase_row
-                .push(text(format!("Coming {}", release.date)).size(12).style(colored(MUTED)));
+                .push(remote_text(format!("Coming {}", release.date)).size(12).style(colored(MUTED)));
         }
     }
     purchase_row = purchase_row.push(
@@ -3059,6 +3138,7 @@ fn ui_snippet(content: &TimelineItemContent) -> String {
         TimelineItemContent::Sticker { .. } => "[sticker]".to_string(),
         TimelineItemContent::File { filename, .. } => format!("[file: {filename}]"),
         TimelineItemContent::Redacted => "(message removed)".to_string(),
+        TimelineItemContent::MembershipChange(desc) => desc.clone(),
         TimelineItemContent::DateDivider(_) | TimelineItemContent::NewMessagesDivider => {
             String::new()
         }
@@ -3264,7 +3344,8 @@ fn render_text_body<'a>(
     // body that's both colon-free and plain ASCII (the common case — no
     // unicode emoji is representable in ASCII) skips the whole linkify +
     // shortcode + emoji scan. This runs per text item per view call, the
-    // hottest loop in the app.
+    // hottest loop in the app. Plain `text` (Basic shaping) is correct
+    // here and only here: ASCII never needs the fallback walk.
     if body.is_ascii() && !body.contains(':') {
         return text(body).size(15).into();
     }
@@ -3276,15 +3357,16 @@ fn render_text_body<'a>(
         .flatten()
         .any(|segment| !matches!(segment, BodySegment::Text(_)));
     if !has_special {
-        return text(body).size(15).into();
+        // Possibly non-ASCII (only the fast path above proves otherwise).
+        return remote_text(body).size(15).into();
     }
 
     let emoji_widget = |emoji: &'a client_core::events::CustomEmoji, size: u16| -> Element<'a, Message> {
         crate::media_cache::mxc_visual(media, &emoji.mxc_url, size, Some(size))
-            .unwrap_or_else(|| text(format!(":{}:", emoji.shortcode)).size(15).into())
+            .unwrap_or_else(|| remote_text(format!(":{}:", emoji.shortcode)).size(15).into())
     };
     let link_widget = |url: &str| -> Element<'a, Message> {
-        button(text(url.to_string()).size(15))
+        button(remote_text(url.to_string()).size(15))
             .on_press(Message::OpenUrl(url.to_string()))
             .style(crate::theme::link_button)
             .padding(0)
@@ -3334,13 +3416,13 @@ fn render_text_body<'a>(
                         _ => unreachable!(),
                     })
                     .collect();
-            out = out.push(text(content).size(15));
+            out = out.push(remote_text(content).size(15));
             continue;
         }
         let mut line = row![].spacing(2).align_y(iced::Center);
         for segment in segments {
             match segment {
-                BodySegment::Text(t) => line = line.push(text(t).size(15)),
+                BodySegment::Text(t) => line = line.push(remote_text(t).size(15)),
                 BodySegment::Emoji(emoji) => line = line.push(emoji_widget(emoji, 20)),
                 BodySegment::UnicodeEmoji(emoji) => {
                     line = line.push(crate::emoji_picker::emoji_visual(media, emoji, 20));
@@ -3367,9 +3449,7 @@ fn reaction_senders_label(
         .map(|user_id| {
             member_by_id(members, member_index, user_id)
                 .map(|m| m.display_name.clone())
-                .unwrap_or_else(|| {
-                    user_id.trim_start_matches('@').split(':').next().unwrap_or(user_id).to_string()
-                })
+                .unwrap_or_else(|| friendly_user_id(user_id).to_string())
         })
         .collect();
     if names.len() > SHOWN {
@@ -3430,12 +3510,11 @@ fn reaction_picker<'a>(
         },
         move |emoji| Message::ReactWithEmoji {
             event_id: event_id_custom.clone(),
-            // Cinny (what the HQ room runs) keys custom-emoji reactions on the
-            // `:shortcode:`, not the mxc URL — sending the same form is what
-            // makes this client's reactions aggregate with theirs instead of
-            // sitting as a separate pill. `resolve_reaction_visual` already
-            // renders inbound `:shortcode:` keys.
-            key: format!(":{}:", emoji.shortcode),
+            // React with the emoji's mxc URL. Confirmed by capturing real wire
+            // keys: Cinny (the HQ room's client) keys custom-emoji reactions on
+            // the `mxc://` URL and they aggregate across clients on it — its
+            // `:shortcode:` tooltip is only how it *displays* a resolved mxc.
+            key: emoji.mxc_url.clone(),
         },
     )
 }

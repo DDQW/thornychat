@@ -13,6 +13,9 @@ pub struct RoomActionPrompt {
     pub room_name: String,
     /// True for a direct message (the modal wording differs slightly).
     pub is_dm: bool,
+    /// Editable room-name field in the modal, seeded with `room_name`; the
+    /// Rename button commits it as the room's `m.room.name`.
+    pub rename_draft: String,
 }
 
 /// Default and minimum size of the Settings panel — resizable by the user
@@ -32,19 +35,6 @@ pub struct ResizeDrag {
     /// hand back a position, so the first move establishes the anchor
     /// instead of jumping the panel size on press.
     pub anchor: Option<iced::Point>,
-}
-
-/// The image open in the fullscreen lightbox. `width`/`height` are the
-/// sender-declared intrinsic dimensions (when the event carried them) —
-/// what the zoom scales from; `None` just means this particular image can't
-/// zoom past its initial contain-fit size. `scale` resets to 1.0 every time
-/// a new image opens (see `Effect::ZoomImage`'s handler).
-#[derive(Debug, Clone)]
-pub struct ZoomedImage {
-    pub url: String,
-    pub width: Option<u32>,
-    pub height: Option<u32>,
-    pub scale: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,15 +100,24 @@ pub struct App {
     /// editable from the General settings tab. Read by the composer on every
     /// keystroke (the Windows speller itself lives in `crate::spellcheck`).
     pub spellcheck: crate::spellcheck_config::SpellcheckConfig,
+    /// Timeline display preferences (currently just whether membership changes
+    /// are shown) — persisted globally, editable from the General settings
+    /// tab. Read by `view.rs` when rendering the timeline.
+    pub chat: crate::chat_config::ChatConfig,
     pub show_settings: bool,
+    /// Latest window-global cursor position, updated on every mouse move (see
+    /// `subscriptions::window_events`). Snapshotted when a right-click menu
+    /// opens so it can anchor at the pointer.
+    pub cursor_position: iced::Point,
     /// Current size of the Settings panel, user-resizable via its
     /// bottom-right grip.
     pub settings_panel_size: iced::Size,
     /// Present while the user is actively dragging the resize grip — also
     /// what gates the mouse-tracking subscription in `subscriptions.rs`.
     pub settings_resize_drag: Option<ResizeDrag>,
-    /// The image currently open in the fullscreen lightbox, if any.
-    pub zoomed_image: Option<ZoomedImage>,
+    /// The `mxc://` URL of the image currently open in the fullscreen
+    /// lightbox, if any.
+    pub zoomed_image: Option<String>,
     /// Present while the leave/forget confirmation modal is open (raised by
     /// right-clicking a room in the sidebar).
     pub pending_room_action: Option<RoomActionPrompt>,
@@ -126,6 +125,9 @@ pub struct App {
     /// space's rooms via the hierarchy API; opened by clicking a space in
     /// the sidebar).
     pub space_explorer: Option<screens::space_explorer::State>,
+    /// Present while the "new direct message" user-search overlay is open
+    /// (opened by the "+" on the sidebar's Direct messages header).
+    pub dm_search: Option<screens::dm_search::State>,
     /// Link-preview cache, keyed by URL. `None` = requested (or failed) —
     /// either way, don't re-request; `Some` = OpenGraph data to render.
     pub url_previews:
@@ -153,6 +155,12 @@ pub struct App {
     /// `url`, capped at [`MAX_COLLECTED_STICKERS`]. Loaded from and persisted
     /// to a small per-profile JSON file, exactly like `emoji_usage`.
     pub sticker_collection: Vec<CollectedSticker>,
+    /// Safe-state: the room to reopen on this launch, loaded at startup from
+    /// the per-profile `last-room` file. Held pending until the sync brings it
+    /// into the room list (sliding sync streams rooms in gradually), then
+    /// opened once and cleared. Also cleared the moment the user opens any
+    /// room manually, so a restored session never fights a deliberate click.
+    pub pending_restore_room: Option<String>,
 }
 
 /// One sticker remembered for reuse — harvested from an `m.sticker` event
@@ -203,10 +211,28 @@ fn load_sticker_collection(profile: &str) -> Vec<CollectedSticker> {
         .unwrap_or_default()
 }
 
+/// Where the "last open room" pointer lives — a plain file in the profile
+/// root holding just the room id. It sits alongside the SDK store rather than
+/// in a cache dir because it's per-account session state, not a cache. Drives
+/// the safe-state feature: on relaunch the app reopens whatever room was last
+/// on screen for this profile.
+pub fn last_room_path(profile: &str) -> Option<std::path::PathBuf> {
+    client_core::store::AppPaths::for_profile(profile).ok().map(|paths| paths.root.join("last-room"))
+}
+
+/// The room id remembered from the previous session, if any. A missing or
+/// blank file — never opened a room, or the last one was left — yields `None`.
+fn load_last_room(profile: &str) -> Option<String> {
+    let contents = std::fs::read_to_string(last_room_path(profile)?).ok()?;
+    let room_id = contents.trim();
+    (!room_id.is_empty()).then(|| room_id.to_string())
+}
+
 impl App {
     pub fn new(profile: String, theme: crate::theme_config::ThemeConfig) -> Self {
         let emoji_usage = load_emoji_usage(&profile);
         let sticker_collection = load_sticker_collection(&profile);
+        let pending_restore_room = load_last_room(&profile);
         let built_theme = theme.to_iced_theme();
         Self {
             route: Route::Login,
@@ -245,18 +271,22 @@ impl App {
             },
             encryption: crate::encryption_config::EncryptionConfig::load_or_default(),
             spellcheck: crate::spellcheck_config::SpellcheckConfig::load_or_default(),
+            chat: crate::chat_config::ChatConfig::load_or_default(),
             show_settings: false,
+            cursor_position: iced::Point::ORIGIN,
             settings_panel_size: DEFAULT_SETTINGS_SIZE,
             settings_resize_drag: None,
             zoomed_image: None,
             pending_room_action: None,
             space_explorer: None,
+            dm_search: None,
             url_previews: std::collections::HashMap::new(),
             tweet_previews: std::collections::HashMap::new(),
             steam_previews: std::collections::HashMap::new(),
             emoji_usage,
             emoji_shortcode_index: std::collections::HashMap::new(),
             sticker_collection,
+            pending_restore_room,
         }
     }
 
@@ -295,7 +325,7 @@ pub fn boot(
 
     let mut tasks = vec![restore_task];
     if start_minimized {
-        tasks.push(iced::window::get_latest().and_then(|id| iced::window::minimize(id, true)));
+        tasks.push(iced::window::latest().and_then(|id| iced::window::minimize(id, true)));
     }
 
     (App::new(profile, theme), iced::Task::batch(tasks))

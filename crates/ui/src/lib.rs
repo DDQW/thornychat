@@ -2,6 +2,8 @@
 //! directly — only on the plain boundary types in
 //! `client_core::events`/`client_core::commands`.
 
+pub mod animated_image;
+pub mod chat_config;
 pub mod clipboard_paste;
 pub mod emoji_picker;
 pub mod encryption_config;
@@ -14,6 +16,7 @@ pub mod spellcheck_config;
 pub mod state;
 pub mod steam;
 pub mod subscriptions;
+pub mod synthetic_input;
 pub mod theme;
 pub mod theme_config;
 pub mod tweets;

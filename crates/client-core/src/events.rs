@@ -4,6 +4,30 @@
 
 use crate::commands::RequestId;
 
+/// Best-effort display label for a user id when no display name is set.
+/// Strips a leading `@` and the trailing `:server`, then an `irc_`
+/// bridge-ghost prefix if one is present — matrix-appservice-irc puppets
+/// users as `@irc_<nick>:server`, so a bridged sender with no Matrix
+/// display name would otherwise render as the raw `@irc_alice:matrix.org`
+/// instead of just `alice`.
+///
+/// This is only ever reached as the *last-resort* fallback (after every
+/// cached/profile display name comes back absent), so a genuine, unbridged
+/// user whose localpart happens to start with `irc_` and who never set a
+/// display name would have it stripped too — accepted as a rare,
+/// cosmetic-only false positive (the raw `user_id` is untouched, only the
+/// rendered label changes). The `irc_` strip is skipped when nothing would
+/// remain (e.g. the pathological id `@irc_:server`), so it never yields an
+/// empty string.
+pub fn friendly_user_id(user_id: &str) -> &str {
+    let localpart = user_id.strip_prefix('@').unwrap_or(user_id);
+    let localpart = localpart.split(':').next().unwrap_or(localpart);
+    match localpart.strip_prefix("irc_") {
+        Some(nick) if !nick.is_empty() => nick,
+        _ => localpart,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ClientEvent {
     // --- Phase 0: session / sync lifecycle ---
@@ -96,6 +120,10 @@ pub enum ClientEvent {
     /// stays current with changes made from other devices too.
     DefaultNotificationModesUpdated { direct_messages: NotificationMode, group_chats: NotificationMode },
     SearchResults { request_id: RequestId, results: Vec<SearchResult> },
+    /// Results of a user-directory search (see `ClientCommand::SearchUsers`).
+    /// `limited` is the server's flag that it truncated the result set — the
+    /// UI can hint that a more specific query would help.
+    UserSearchResults { request_id: RequestId, results: Vec<UserSearchResult>, limited: bool },
 
     // --- Phase 5: calls (MatrixRTC signaling) ---
     /// Live call state for one room. Sent whenever a call membership
@@ -356,6 +384,12 @@ pub enum TimelineItemContent {
     /// a differing `body` is a caption, not the filename.
     File { url: String, filename: String, caption: Option<String> },
     Redacted,
+    /// A membership change (join/leave/kick/ban/invite/knock…) rendered as a
+    /// pre-composed human sentence (e.g. "alice joined the room"). Kept as
+    /// its own variant rather than folded into `Text` so the UI can render it
+    /// as a compact system line and hide it wholesale via the timeline
+    /// setting, without touching real chat messages.
+    MembershipChange(String),
     DateDivider(String),
     /// Everything below this point is unread (the SDK's read-marker
     /// position, i.e. the `m.fully_read` marker).
@@ -402,4 +436,13 @@ pub struct SearchResult {
     pub event_id: String,
     pub sender: String,
     pub snippet: String,
+}
+
+/// One hit from a user-directory search — enough to render a pick-a-person
+/// row and start a DM with them (even someone you share no room with yet).
+#[derive(Debug, Clone)]
+pub struct UserSearchResult {
+    pub user_id: String,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
 }

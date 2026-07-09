@@ -30,7 +30,7 @@ pub fn is_enabled() -> bool {
     unsafe {
         let path = wide(RUN_KEY_PATH);
         let mut hkey = HKEY::default();
-        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()), 0, KEY_QUERY_VALUE, &mut hkey).is_err()
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()), None, KEY_QUERY_VALUE, &mut hkey).is_err()
         {
             return false;
         }
@@ -52,7 +52,7 @@ pub fn migrate_legacy_value() {
     let legacy_exists = unsafe {
         let path = wide(RUN_KEY_PATH);
         let mut hkey = HKEY::default();
-        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()), 0, KEY_QUERY_VALUE, &mut hkey)
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()), None, KEY_QUERY_VALUE, &mut hkey)
             .is_err()
         {
             return;
@@ -68,7 +68,7 @@ pub fn migrate_legacy_value() {
     unsafe {
         let path = wide(RUN_KEY_PATH);
         let mut hkey = HKEY::default();
-        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()), 0, KEY_SET_VALUE, &mut hkey)
+        if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()), None, KEY_SET_VALUE, &mut hkey)
             .is_err()
         {
             return;
@@ -97,14 +97,14 @@ pub fn set_enabled(enabled: bool) -> std::io::Result<()> {
     unsafe {
         let path = wide(RUN_KEY_PATH);
         let mut hkey = HKEY::default();
-        RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()), 0, KEY_SET_VALUE, &mut hkey)
+        RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(path.as_ptr()), None, KEY_SET_VALUE, &mut hkey)
             .ok()
             .map_err(to_io_err)?;
         let name = wide(VALUE_NAME);
 
         let result = if let Some(command) = &command {
             let bytes = std::slice::from_raw_parts(command.as_ptr().cast::<u8>(), command.len() * 2);
-            RegSetValueExW(hkey, PCWSTR(name.as_ptr()), 0, REG_SZ, Some(bytes)).ok().map_err(to_io_err)
+            RegSetValueExW(hkey, PCWSTR(name.as_ptr()), None, REG_SZ, Some(bytes)).ok().map_err(to_io_err)
         } else {
             let outcome = RegDeleteValueW(hkey, PCWSTR(name.as_ptr()));
             // Already absent is the desired end state either way.

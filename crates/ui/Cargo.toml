@@ -23,6 +23,7 @@ arboard = { workspace = true }
 windows = { workspace = true }
 tray-icon = { workspace = true }
 wry = { workspace = true }
+webview2-com = { workspace = true }
 raw-window-handle = { workspace = true }
 
 tracing = { workspace = true }
@@ -38,8 +39,4 @@ open = { workspace = true }
 # disk — reqwest is already in the dependency tree transitively via
 # matrix-sdk, so this doesn't add a new crate to the build, just a new
 # direct edge to one already being compiled.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-
-# Animated GIF widget (iced core's image widget renders only the first
-# frame) — used for animated custom emotes and GIF image messages.
-iced_gif = { version = "0.13", default-features = false, features = ["tokio"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }

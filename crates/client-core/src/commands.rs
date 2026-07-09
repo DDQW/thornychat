@@ -100,6 +100,15 @@ pub enum ClientCommand {
     /// `encrypted` turns on end-to-end encryption for the new room.
     CreateRoomWith { user_id: String, encrypted: bool, request_id: RequestId },
 
+    /// Create a fresh private room with no other members — a solo room (e.g.
+    /// a personal scratch/test room); answered by `ClientEvent::RoomCreated`
+    /// so the UI can open it. `encrypted` turns on end-to-end encryption.
+    CreateRoom { encrypted: bool, request_id: RequestId },
+
+    /// Set a room's `m.room.name` (rename). The new name flows back through
+    /// the normal room-list sync, so there's no dedicated success event.
+    SetRoomName { room_id: String, name: String, request_id: RequestId },
+
     /// Leave a room (it drops out of the joined-room list on the next sync).
     LeaveRoom { room_id: String, request_id: RequestId },
     /// Leave (if still joined) *and* forget a room, dropping it from the
@@ -128,6 +137,10 @@ pub enum ClientCommand {
         request_id: RequestId,
     },
     Search { query: String, request_id: RequestId },
+    /// Search the homeserver user directory by name/id (for starting a DM
+    /// with someone you don't share a room with yet). Answered by
+    /// `ClientEvent::UserSearchResults`, or `CommandFailed`.
+    SearchUsers { query: String, request_id: RequestId },
 
     // --- Phase 5: calls (MatrixRTC signaling) ---
     /// Join the room's active call, or start one if none exists. Publishes

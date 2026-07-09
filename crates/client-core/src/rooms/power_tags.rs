@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use matrix_sdk::ruma::api::client::state::get_state_events_for_key;
+use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
 use matrix_sdk::ruma::events::StateEventType;
 use matrix_sdk::Room;
 use serde::Deserialize;
@@ -28,13 +28,14 @@ struct TagContent {
 /// room has no tag event (the UI falls back to Admin/Mod/Member).
 pub async fn fetch(room: &Room) -> Vec<PowerLevelTag> {
     for event_type in ["in.cinny.room.power_level_tags", "m.room.power_level_tags"] {
-        let request = get_state_events_for_key::v3::Request::new(
+        let request = get_state_event_for_key::v3::Request::new(
             room.room_id().to_owned(),
             StateEventType::from(event_type),
             String::new(),
         );
-        let raw = match room.client().send(request).await {
-            Ok(response) => response.content,
+        let raw: matrix_sdk::ruma::serde::Raw<serde_json::Value> =
+            match room.client().send(request).await {
+                Ok(response) => matrix_sdk::ruma::serde::Raw::from_json(response.event_or_content),
             Err(error) => {
                 let not_found =
                     error.as_client_api_error().is_some_and(|e| e.status_code.as_u16() == 404);
@@ -48,7 +49,7 @@ pub async fn fetch(room: &Room) -> Vec<PowerLevelTag> {
         // Keys are power levels as strings ("100", "38", ...) mapping to
         // tag objects; unparseable levels or malformed tags are skipped
         // rather than failing the whole set.
-        let content: BTreeMap<String, serde_json::Value> = match raw.deserialize_as() {
+        let content: BTreeMap<String, serde_json::Value> = match raw.deserialize_as_unchecked() {
             Ok(content) => content,
             Err(error) => {
                 tracing::warn!(room_id = %room.room_id(), %error, "failed to deserialize power level tags");

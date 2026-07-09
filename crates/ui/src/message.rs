@@ -63,6 +63,7 @@ pub enum Message {
     Verification(screens::verification::Message),
     Settings(screens::settings::Message),
     SpaceExplorer(screens::space_explorer::Message),
+    DmSearch(screens::dm_search::Message),
 
     /// Result of fetching a Twemoji SVG for a unicode emoji grapheme
     /// cluster (see `twemoji.rs`) — a pure UI-side fetch, not routed
@@ -81,8 +82,11 @@ pub enum Message {
     /// A fetched GIF finished frame-decoding off-thread (the decode is
     /// CPU-heavy — full RGBA per frame — and would freeze the UI if done in
     /// `update()`). `Err` carries the raster fallback for corrupt GIFs.
-    /// `Arc` because `iced_gif::Frames` isn't `Clone` but `Message` must be.
-    GifDecoded(String, Result<std::sync::Arc<iced_gif::Frames>, iced::widget::image::Handle>),
+    /// `Arc` because `animated_image::Frames` isn't `Clone` but `Message` must be.
+    GifDecoded(
+        String,
+        Result<std::sync::Arc<crate::animated_image::Frames>, iced::widget::image::Handle>,
+    ),
 
     /// Ctrl+V was pressed somewhere in the main shell: probe the clipboard
     /// for files/images to stage as attachments. Plain text is left alone —
@@ -102,12 +106,13 @@ pub enum Message {
 
     /// Dismiss the fullscreen image lightbox.
     CloseZoom,
+    /// Save the open lightbox image to disk (re-fetches the original bytes,
+    /// then opens a save dialog).
+    DownloadZoomedImage,
     /// Escape pressed anywhere — dismisses the image lightbox (a press on
-    /// the image itself is swallowed rather than closing it, so this is the
+    /// the image itself pans rather than closing it, so this is the
     /// guaranteed keyboard exit).
     EscapePressed,
-    /// Mouse wheel over the open lightbox — zooms the image in/out.
-    LightboxZoomed(iced::mouse::ScrollDelta),
 
     // --- inline video player (native webview glued over the playing
     // card's stage — see `video_player`) ---
@@ -121,15 +126,37 @@ pub enum Message {
     /// The native webview finished starting (or failed) on the event-loop
     /// thread.
     InlineVideoOpened(Result<(), String>),
+    /// A mouse press reached the app surface while a video plays inline —
+    /// i.e. the click landed off the video (its own child HWND swallows its
+    /// own clicks). Hands Win32 keyboard focus back to the app window so the
+    /// composer types again after the user has clicked into the video (see
+    /// `video_player::reclaim_focus`).
+    ReclaimAppFocus,
     /// Window resized — the timeline's scroll anchor geometry is stale.
     WindowResized(iced::Size),
+    /// Cursor moved (window-global coords) — tracked so right-click menus can
+    /// open at the pointer (see `state::App::cursor_position`).
+    CursorMoved(iced::Point),
 
-    // --- room leave/forget confirmation (sidebar right-click) ---
+    // --- middle-click autoscroll (see `timeline::State::autoscroll`) ---
+    /// One frame of the autoscroll glide: scroll the timeline toward the
+    /// cursor's offset from the anchor. Fired ~60×/s by a timer subscription
+    /// that's only live while autoscroll is.
+    AutoscrollTick,
+    /// End autoscroll — a click, wheel tick, or key press while it's active
+    /// (browser-style: any of them stops the glide).
+    AutoscrollEnd,
+
+    // --- room leave/forget/rename actions (sidebar right-click) ---
     /// Leave the room, then dismiss the prompt.
     ConfirmLeaveRoom(String),
     /// Leave (if needed) and forget the room, then dismiss the prompt.
     ConfirmForgetRoom(String),
-    /// Dismiss the leave/forget prompt without doing anything.
+    /// Edited the room-name field in the prompt.
+    RoomRenameDraftChanged(String),
+    /// Commit the edited name as the room's `m.room.name`, then dismiss.
+    ConfirmRoomRename(String),
+    /// Dismiss the prompt without doing anything.
     CancelRoomAction,
 
     // --- root shell controls (not owned by any one screen) ---

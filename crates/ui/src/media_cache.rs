@@ -22,10 +22,10 @@ pub struct State {
     pub mxc_svgs: HashMap<String, svg::Handle>,
     /// Animated GIFs (animated custom emotes, GIF image messages) —
     /// iced's core image widget draws only the first frame, so these are
-    /// pre-decoded into `iced_gif` frame sets and rendered with its
-    /// animating widget. `Arc` because the decode happens off-thread and
+    /// pre-decoded into [`crate::animated_image`] frame sets and rendered with
+    /// its animating widget. `Arc` because the decode happens off-thread and
     /// rides back on a `Message`, which must be `Clone`.
-    pub mxc_gifs: HashMap<String, std::sync::Arc<iced_gif::Frames>>,
+    pub mxc_gifs: HashMap<String, std::sync::Arc<crate::animated_image::Frames>>,
     pub pending: HashMap<RequestId, String>,
     /// URL-keyed mirror of `pending` (plus GIF decodes still in flight) so
     /// `is_known` is a set lookup instead of a linear scan of every in-flight
@@ -35,6 +35,13 @@ pub struct State {
     /// deleted/unreachable avatar or image would be re-requested on every
     /// single sync tick of an open room, forever.
     pub failed_mxc: HashSet<String>,
+    /// In-flight `FetchMedia` requests raised by the lightbox's Download
+    /// button (as opposed to display fetches tracked in `pending`). Downloading
+    /// re-fetches the original bytes rather than digging them back out of a
+    /// decoded handle, so it works the same for raster, GIF, and SVG. When the
+    /// matching `MediaFetched` lands, the bytes go to a save dialog instead of
+    /// the display caches.
+    pub download_requests: HashSet<RequestId>,
 
     pub emoji: HashMap<String, svg::Handle>,
     pub emoji_pending: HashSet<String>,
@@ -78,28 +85,30 @@ impl State {
 /// letting each call site pick its own placeholder.
 pub fn mxc_visual<'a, M: 'a>(
     media: &'a State,
-    url: &str,
+    url: &'a str,
     width: u16,
     height: Option<u16>,
 ) -> Option<Element<'a, M>> {
     if let Some(frames) = media.mxc_gifs.get(url) {
-        let mut widget = iced_gif::gif(frames).width(iced::Length::Fixed(width as f32));
+        let mut widget = crate::animated_image::gif(frames)
+            .debug_label(url)
+            .width(iced::Length::Fixed(width as f32));
         if let Some(height) = height {
             widget = widget.height(iced::Length::Fixed(height as f32));
         }
         return Some(widget.into());
     }
     if let Some(handle) = media.images.get(url) {
-        let mut widget = image(handle.clone()).width(width);
+        let mut widget = image(handle.clone()).width(width as f32);
         if let Some(height) = height {
-            widget = widget.height(height);
+            widget = widget.height(height as f32);
         }
         return Some(widget.into());
     }
     if let Some(handle) = media.mxc_svgs.get(url) {
-        let mut widget = svg(handle.clone()).width(width);
+        let mut widget = svg(handle.clone()).width(width as f32);
         if let Some(height) = height {
-            widget = widget.height(height);
+            widget = widget.height(height as f32);
         }
         return Some(widget.into());
     }
@@ -111,7 +120,7 @@ pub fn mxc_visual<'a, M: 'a>(
 /// media loads or when none is set).
 pub fn avatar<'a, M: 'a>(
     media: &'a State,
-    avatar_url: Option<&str>,
+    avatar_url: Option<&'a str>,
     name: &str,
     size: u16,
 ) -> Element<'a, M> {
@@ -155,6 +164,25 @@ pub fn looks_like_svg(bytes: &[u8]) -> bool {
     trimmed.starts_with(b"<?xml") || trimmed.starts_with(b"<svg")
 }
 
+/// File extension for downloaded media, sniffed from the same magic numbers
+/// as the routing above. `"bin"` when nothing matches, so a save never picks a
+/// misleading extension.
+pub fn image_extension(bytes: &[u8]) -> &'static str {
+    if looks_like_gif(bytes) {
+        "gif"
+    } else if looks_like_svg(bytes) {
+        "svg"
+    } else if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "png"
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "jpg"
+    } else if bytes.len() >= 12 && bytes[0..4] == *b"RIFF" && bytes[8..12] == *b"WEBP" {
+        "webp"
+    } else {
+        "bin"
+    }
+}
+
 /// ISOBMFF (`ftyp`-boxed) image containers our compiled `image` crate build
 /// has no decoder for — AVIF and HEIC/HEIF, both common exports from newer
 /// phones and some bridges/CDNs. `iced`'s raster cache swallows a decode
@@ -172,4 +200,18 @@ pub fn looks_like_unsupported_container(bytes: &[u8]) -> bool {
         &bytes[8..12],
         b"avif" | b"avis" | b"heic" | b"heix" | b"heim" | b"heis" | b"hevc" | b"hevx" | b"mif1"
     )
+}
+
+/// Cheap non-cryptographic content fingerprint, logged alongside every fetch
+/// so a "this emote looks wrong" report can be diagnosed from the log file
+/// alone — no filesystem access to the reporting machine needed. Two
+/// different URLs logging the same fingerprint means the server is actually
+/// serving identical bytes for both (a real content alias, not a client
+/// bug); the same URL logging two different fingerprints across sessions
+/// means the server-side image changed.
+pub fn fingerprint(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }

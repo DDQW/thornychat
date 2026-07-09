@@ -3,6 +3,10 @@
 //! across the `ui` boundary is a plain type from [`events`] and
 //! [`commands`], so the GUI layer never touches `matrix_sdk::*` directly.
 
+// ruma 0.16's deeply-nested event enums push the trait-resolution recursion
+// past the default 128 during type-checking; lift it so the crate compiles.
+#![recursion_limit = "256"]
+
 pub mod calls;
 pub mod client;
 pub mod commands;

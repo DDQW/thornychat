@@ -101,8 +101,22 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                     room_id: room.room_id.clone(),
                     room_name: room.name.clone(),
                     is_dm: room.is_dm,
+                    rename_draft: room.name.clone(),
                 });
             }
+            Task::none()
+        }
+        Message::RoomList(screens::room_list::Message::NewRoomClicked) => {
+            // A solo room, unencrypted (a personal scratch/test space — no
+            // other members, so E2EE would only add key overhead). Opens on
+            // the RoomCreated echo.
+            send_cmd(app, ClientCommand::CreateRoom { encrypted: false, request_id: Uuid::new_v4() });
+            Task::none()
+        }
+        Message::RoomList(screens::room_list::Message::NewDirectMessageClicked) => {
+            // Open the user-search overlay fresh (no stale results from a
+            // previous open).
+            app.dm_search = Some(screens::dm_search::State::default());
             Task::none()
         }
 
@@ -116,13 +130,38 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             send_cmd(app, ClientCommand::ForgetRoom { room_id: room_id.clone(), request_id: Uuid::new_v4() });
             forget_open_room(app, &room_id)
         }
+        Message::RoomRenameDraftChanged(name) => {
+            if let Some(prompt) = app.pending_room_action.as_mut() {
+                prompt.rename_draft = name;
+            }
+            Task::none()
+        }
+        Message::ConfirmRoomRename(room_id) => {
+            // Empty/whitespace name would just clear the display name back to
+            // the fallback — treat it as "no change" and only dismiss.
+            let name = app
+                .pending_room_action
+                .as_ref()
+                .map(|p| p.rename_draft.trim().to_string())
+                .unwrap_or_default();
+            app.pending_room_action = None;
+            if !name.is_empty() {
+                send_cmd(app, ClientCommand::SetRoomName { room_id, name, request_id: Uuid::new_v4() });
+            }
+            Task::none()
+        }
         Message::CancelRoomAction => {
             app.pending_room_action = None;
             Task::none()
         }
 
         Message::Timeline(msg) => {
-            let (task, effect) = screens::timeline::update(&mut app.timeline, msg, &app.spellcheck);
+            let (task, effect) = screens::timeline::update(
+                &mut app.timeline,
+                msg,
+                &app.spellcheck,
+                app.chat.show_membership_events,
+            );
             let task = task.map(Message::Timeline);
             let effect_task = apply_timeline_effect(app, effect);
             Task::batch([task, effect_task])
@@ -134,6 +173,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
         }
 
         Message::SpaceExplorer(msg) => update_space_explorer(app, msg),
+        Message::DmSearch(msg) => update_dm_search(app, msg),
 
         Message::EmojiSvgFetched(emoji, result) => {
             app.media.emoji_pending.remove(&emoji);
@@ -154,10 +194,22 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             app.media.pending_urls.remove(&url);
             match result {
                 Ok(frames) => {
+                    // Cross-reference against "emoji pack entry" (ground truth
+                    // shortcode/url) and any later "widget slot reused" warning
+                    // — this line is the decoded identity actually stored under
+                    // `url` in the cache.
+                    tracing::info!(
+                        url = %url,
+                        gif_id = frames.id(),
+                        frames = frames.frame_count(),
+                        size = ?frames.first_frame_size(),
+                        "gif decoded"
+                    );
                     app.media.mxc_gifs.insert(url, frames);
                 }
                 // Corrupt GIF: fall back to the (first-frame-only) raster path.
                 Err(raster) => {
+                    tracing::warn!(url = %url, "gif decode failed, falling back to static raster");
                     app.media.images.insert(url, raster);
                 }
             }
@@ -266,7 +318,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             if staged_any {
                 // Focus the input so "paste → type a caption → Enter" flows
                 // without an extra click (Enter submits via on_submit).
-                tasks.push(iced::widget::text_input::focus(
+                tasks.push(iced::widget::operation::focus(
                     screens::timeline::composer::input_id(),
                 ));
             }
@@ -277,35 +329,28 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             app.zoomed_image = None;
             Task::none()
         }
-        Message::EscapePressed => {
-            // Only the lightbox: a press on the image itself is swallowed
-            // rather than closing it, so it needs a keyboard exit too.
-            // Everything else keeps its explicit close affordances.
-            app.zoomed_image = None;
+        Message::DownloadZoomedImage => {
+            // Re-fetch the original bytes (fast — the SDK has them cached on
+            // disk from displaying the image) rather than reconstructing them
+            // from a decoded handle; the save dialog opens when they land in
+            // the `MediaFetched` handler below. Works the same for raster,
+            // GIF, and SVG.
+            if let Some(url) = app.zoomed_image.clone() {
+                let request_id = Uuid::new_v4();
+                app.media.download_requests.insert(request_id);
+                send_cmd(app, ClientCommand::FetchMedia { mxc_url: url, request_id });
+            }
             Task::none()
         }
-        Message::LightboxZoomed(delta) => {
-            if let Some(zoom) = &mut app.zoomed_image {
-                // Direction-only, like a typical wheel-zoom — Lines and
-                // Pixels both just drive a fixed step so a trackpad's tiny
-                // per-event deltas don't zoom differently than a mouse's
-                // notches.
-                const MIN_SCALE: f32 = 1.0;
-                const MAX_SCALE: f32 = 8.0;
-                const SCALE_STEP: f32 = 0.25;
-                let y = match delta {
-                    iced::mouse::ScrollDelta::Lines { y, .. } => y,
-                    iced::mouse::ScrollDelta::Pixels { y, .. } => y,
-                };
-                let factor = if y > 0.0 {
-                    1.0 + SCALE_STEP
-                } else if y < 0.0 {
-                    1.0 / (1.0 + SCALE_STEP)
-                } else {
-                    1.0
-                };
-                zoom.scale = (zoom.scale * factor).clamp(MIN_SCALE, MAX_SCALE);
-            }
+        Message::EscapePressed => {
+            // Escape also cancels an active autoscroll — but the gated
+            // subscription that ends it on any key press already handles that;
+            // clearing here too is just belt-and-braces (and harmless when
+            // idle). The lightbox is the real target: a press on the image
+            // itself pans rather than closing, so it needs a keyboard exit
+            // too. Everything else keeps its explicit close affordances.
+            app.timeline.autoscroll = None;
+            app.zoomed_image = None;
             Task::none()
         }
 
@@ -329,6 +374,18 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::InlineVideoBounds(probed) => inline_video_bounds(app, probed),
+        Message::ReclaimAppFocus => {
+            // The user clicked the app off the video — return Win32 keyboard
+            // focus to the app window so the composer types again (the
+            // embedded webview grabs it on click; see `reclaim_focus`).
+            iced::window::latest().then(|maybe_id| match maybe_id {
+                Some(id) => iced::window::run(id, |handle| {
+                    crate::video_player::reclaim_focus(handle);
+                })
+                .map(|_| Message::Noop),
+                None => Task::none(),
+            })
+        }
         Message::WindowResized(_) => {
             // Text rewraps to the new width — every row's on-screen position
             // changes legitimately, so the scroll anchor's stored geometry
@@ -336,6 +393,19 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             // video player reglues itself through the probe this message
             // triggers, like any other reflow.)
             app.timeline.scroll_anchor = None;
+            Task::none()
+        }
+        Message::CursorMoved(position) => {
+            // Cheap: just remember where the pointer is, so a right-click menu
+            // can open there (the press event itself carries no coordinates),
+            // and so an active autoscroll knows how far the cursor has drifted
+            // from its anchor.
+            app.cursor_position = position;
+            Task::none()
+        }
+        Message::AutoscrollTick => autoscroll_tick(app),
+        Message::AutoscrollEnd => {
+            app.timeline.autoscroll = None;
             Task::none()
         }
 
@@ -390,6 +460,8 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 &mut app.privacy,
                 &mut app.encryption,
                 &mut app.spellcheck,
+                &mut app.chat,
+                &app.profile,
                 msg,
             );
             // Settings is the only place `theme` changes; rebuild the cached
@@ -538,6 +610,64 @@ fn update_space_explorer(app: &mut App, msg: screens::space_explorer::Message) -
     }
 }
 
+fn update_dm_search(app: &mut App, msg: screens::dm_search::Message) -> Task<Message> {
+    use screens::dm_search::Message as Msg;
+    match msg {
+        Msg::Close => {
+            app.dm_search = None;
+            Task::none()
+        }
+        Msg::QueryChanged(query) => {
+            let Some(state) = app.dm_search.as_mut() else { return Task::none() };
+            state.query = query;
+            state.error = None;
+            state.generation += 1;
+            let generation = state.generation;
+            // Empty box: clear immediately, don't hit the server.
+            if state.query.trim().is_empty() {
+                state.results.clear();
+                state.pending = false;
+                state.last_request_id = None;
+                return Task::none();
+            }
+            // Debounce: only the newest keystroke's timer still matches
+            // `generation` when it fires (see `dm_search` module docs).
+            Task::future(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                Message::DmSearch(Msg::Debounced(generation))
+            })
+        }
+        Msg::Debounced(generation) => {
+            let Some(state) = app.dm_search.as_mut() else { return Task::none() };
+            // Superseded by a newer keystroke, or the box was cleared.
+            if generation != state.generation || state.query.trim().is_empty() {
+                return Task::none();
+            }
+            let request_id = Uuid::new_v4();
+            state.last_request_id = Some(request_id);
+            state.pending = true;
+            let query = state.query.clone();
+            send_cmd(app, ClientCommand::SearchUsers { query, request_id });
+            Task::none()
+        }
+        Msg::ResultClicked(user_id) => {
+            // Close the overlay now: the DirectMessageReady echo will
+            // `select_room`, so leaving it open would switch the room out
+            // from under it (same as the space explorer's Open).
+            app.dm_search = None;
+            send_cmd(
+                app,
+                ClientCommand::OpenDirectMessage {
+                    user_id,
+                    encrypted: app.encryption.encrypt_direct_messages,
+                    request_id: Uuid::new_v4(),
+                },
+            );
+            Task::none()
+        }
+    }
+}
+
 fn apply_settings_effect(app: &mut App, effect: screens::settings::Effect) -> Task<Message> {
     match effect {
         screens::settings::Effect::None => {}
@@ -603,8 +733,8 @@ fn apply_timeline_effect(app: &mut App, effect: screens::timeline::Effect) -> Ta
             }
             Task::none()
         }
-        screens::timeline::Effect::ZoomImage { url, width, height } => {
-            app.zoomed_image = Some(crate::state::ZoomedImage { url, width, height, scale: 1.0 });
+        screens::timeline::Effect::ZoomImage(url) => {
+            app.zoomed_image = Some(url);
             Task::none()
         }
         screens::timeline::Effect::OpenDirectMessage(user_id) => {
@@ -646,9 +776,9 @@ fn apply_timeline_effect(app: &mut App, effect: screens::timeline::Effect) -> Ta
             // previous player first — one video at a time.
             Task::batch([
                 close_native_player(),
-                iced::window::get_latest().then(|maybe_id| match maybe_id {
+                iced::window::latest().then(|maybe_id| match maybe_id {
                     Some(id) => {
-                        iced::window::get_scale_factor(id).map(Message::InlineVideoScale)
+                        iced::window::scale_factor(id).map(Message::InlineVideoScale)
                     }
                     None => Task::none(),
                 }),
@@ -670,7 +800,46 @@ fn apply_timeline_effect(app: &mut App, effect: screens::timeline::Effect) -> Ta
             app.call.error = None;
             Task::none()
         }
+        screens::timeline::Effect::ToggleAutoscroll => {
+            // Toggle: a second middle-click over the chat turns it back off.
+            // On activation, anchor at the live cursor — the middle-press
+            // itself carries no coordinates, but `cursor_position` was set by
+            // the moves that brought the pointer here.
+            app.timeline.autoscroll =
+                if app.timeline.autoscroll.is_some() { None } else { Some(app.cursor_position) };
+            Task::none()
+        }
     }
+}
+
+/// One frame of middle-click autoscroll: scroll the timeline by a step
+/// proportional to how far the cursor sits from the anchor point, past a small
+/// dead zone. The scrollable measures its offset from the bottom (newer
+/// content = smaller offset), so a cursor *below* the anchor scrolls toward
+/// newer messages — hence the sign flip when handing the step to `scroll_by`.
+/// Called ~60×/s while `autoscroll` is set; a no-op inside the dead zone.
+fn autoscroll_tick(app: &App) -> Task<Message> {
+    /// Radius around the anchor where the view holds still, so a click that
+    /// barely nudges the pointer doesn't start creeping.
+    const DEAD_ZONE: f32 = 14.0;
+    /// Per-frame pixels of scroll per pixel of overshoot past the dead zone.
+    const SPEED: f32 = 0.14;
+    /// Cap on per-frame scroll, so flinging the pointer to a screen edge
+    /// glides fast but stays legible rather than teleporting.
+    const MAX_STEP: f32 = 42.0;
+
+    let Some(origin) = app.timeline.autoscroll else {
+        return Task::none();
+    };
+    let dy = app.cursor_position.y - origin.y;
+    if dy.abs() <= DEAD_ZONE {
+        return Task::none();
+    }
+    let step = ((dy.abs() - DEAD_ZONE) * SPEED).min(MAX_STEP) * dy.signum();
+    iced::widget::operation::scroll_by(
+        screens::timeline::timeline_scroll_id(),
+        iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: -step },
+    )
 }
 
 /// Fires JoinCall/LeaveCall for the open room, remembering the request so
@@ -731,8 +900,8 @@ fn inline_video_bounds(
                 }
                 inline.synced = Some((full, visible));
                 let scale = inline.scale.unwrap_or(1.0);
-                return iced::window::get_latest().then(move |maybe_id| match maybe_id {
-                    Some(id) => iced::window::run_with_handle(id, move |_handle| {
+                return iced::window::latest().then(move |maybe_id| match maybe_id {
+                    Some(id) => iced::window::run(id, move |_handle| {
                         crate::video_player::sync_bounds(full, visible, scale);
                     })
                     .map(|_| Message::Noop),
@@ -767,8 +936,8 @@ fn inline_video_bounds(
                 // The native player no longer reflects any known geometry;
                 // whatever probe next finds the stage must sync it.
                 inline.synced = None;
-                iced::window::get_latest().then(|maybe_id| match maybe_id {
-                    Some(id) => iced::window::run_with_handle(id, |_handle| {
+                iced::window::latest().then(|maybe_id| match maybe_id {
+                    Some(id) => iced::window::run(id, |_handle| {
                         crate::video_player::hide();
                     })
                     .map(|_| Message::Noop),
@@ -800,14 +969,14 @@ fn open_inline_player(
         .ok()
         .map(|paths| paths.root.join("webview-data"));
 
-    iced::window::get_latest().then(move |maybe_id| {
+    iced::window::latest().then(move |maybe_id| {
         let Some(id) = maybe_id else {
             return Task::none();
         };
         let video = video.clone();
         let data_dir = data_dir.clone();
-        iced::window::run_with_handle(id, move |handle| {
-            crate::video_player::open(&handle, &video, full, visible, scale, data_dir)
+        iced::window::run(id, move |handle| {
+            crate::video_player::open(handle, &video, full, visible, scale, data_dir)
         })
         .map(Message::InlineVideoOpened)
     })
@@ -816,8 +985,8 @@ fn open_inline_player(
 /// Drops the native webview (if any) on its owning thread. Safe to fire
 /// even when nothing is open.
 fn close_native_player() -> Task<Message> {
-    iced::window::get_latest().then(|maybe_id| match maybe_id {
-        Some(id) => iced::window::run_with_handle(id, |_handle| {
+    iced::window::latest().then(|maybe_id| match maybe_id {
+        Some(id) => iced::window::run(id, |_handle| {
             crate::video_player::close();
         })
         .map(|_| Message::Noop),
@@ -885,6 +1054,22 @@ fn apply_composer_effect(app: &mut App, effect: screens::timeline::composer::Eff
             Task::none()
         }
         ComposerEffect::EmojiUsed(key) => record_emoji_use(app, key),
+        ComposerEffect::OpenContextMenu => {
+            // Anchor the edit menu at the pointer — the composer can't see the
+            // window-global cursor, so it's snapshotted here.
+            app.timeline.composer.context_menu = Some(app.cursor_position);
+            Task::none()
+        }
+        ComposerEffect::ClipboardEdit(edit) => {
+            // Right-click Cut/Copy: replay the native chord at the focused
+            // input (which owns the selection app code can't see).
+            crate::synthetic_input::edit(edit);
+            Task::none()
+        }
+        ComposerEffect::PasteFromClipboard => match app.timeline.room_id.clone() {
+            Some(room_id) => paste_menu_task(room_id),
+            None => Task::none(),
+        },
     }
 }
 
@@ -1064,6 +1249,31 @@ fn persist_sticker_collection(app: &App) -> Task<Message> {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
         let _ = tokio::fs::write(path, contents).await;
+        Message::Noop
+    })
+}
+
+/// Records the open room as this profile's "last room" (fire-and-forget, same
+/// shape as [`record_emoji_use`]) so the next launch can reopen it.
+fn persist_last_room(profile: &str, room_id: &str) -> Task<Message> {
+    let Some(path) = crate::state::last_room_path(profile) else { return Task::none() };
+    let contents = room_id.to_string();
+    Task::future(async move {
+        if let Some(parent) = path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let _ = tokio::fs::write(path, contents).await;
+        Message::Noop
+    })
+}
+
+/// Clears the persisted "last room" (fire-and-forget) — used when the user
+/// leaves or forgets the room that's currently open, so the next launch
+/// doesn't try to reopen a room they deliberately walked away from.
+fn clear_last_room(profile: &str) -> Task<Message> {
+    let Some(path) = crate::state::last_room_path(profile) else { return Task::none() };
+    Task::future(async move {
+        let _ = tokio::fs::remove_file(path).await;
         Message::Noop
     })
 }
@@ -1304,31 +1514,7 @@ fn paste_clipboard_task(room_id: String) -> Task<Message> {
                 crate::clipboard_paste::Pasted::Image { filename, bytes } => {
                     (vec![(filename, bytes)], 0)
                 }
-                crate::clipboard_paste::Pasted::Files(paths) => {
-                    let mut files = Vec::new();
-                    let mut failed = 0usize;
-                    for path in paths {
-                        match tokio::fs::read(&path).await {
-                            Ok(bytes) => {
-                                let filename = path
-                                    .file_name()
-                                    .map(|name| name.to_string_lossy().into_owned())
-                                    .unwrap_or_else(|| "attachment".to_string());
-                                files.push((filename, bytes));
-                            }
-                            Err(error) => {
-                                // Folders land here too (fs::read refuses them).
-                                tracing::warn!(
-                                    %error,
-                                    path = %path.display(),
-                                    "pasted path not readable; skipped"
-                                );
-                                failed += 1;
-                            }
-                        }
-                    }
-                    (files, failed)
-                }
+                crate::clipboard_paste::Pasted::Files(paths) => read_pasted_paths(paths).await,
             }
         },
         move |(files, failed)| {
@@ -1338,6 +1524,84 @@ fn paste_clipboard_task(room_id: String) -> Task<Message> {
             } else {
                 Message::AttachmentsReadFor { room_id: room_id.clone(), files, failed }
             }
+        },
+    )
+}
+
+/// Reads the bytes behind clipboard-pasted file paths, returning the readable
+/// `(filename, bytes)` pairs plus a count of the ones that failed (folders,
+/// permission errors). Shared by the Ctrl+V and right-click-Paste flows.
+async fn read_pasted_paths(
+    paths: Vec<std::path::PathBuf>,
+) -> (Vec<(String, Vec<u8>)>, usize) {
+    let mut files = Vec::new();
+    let mut failed = 0usize;
+    for path in paths {
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => {
+                let filename = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "attachment".to_string());
+                files.push((filename, bytes));
+            }
+            Err(error) => {
+                // Folders land here too (fs::read refuses them).
+                tracing::warn!(
+                    %error,
+                    path = %path.display(),
+                    "pasted path not readable; skipped"
+                );
+                failed += 1;
+            }
+        }
+    }
+    (files, failed)
+}
+
+/// Where a right-click paste's clipboard content is headed once read.
+enum PasteRoute {
+    Text(String),
+    Attach { files: Vec<(String, Vec<u8>)>, failed: usize },
+    Nothing,
+}
+
+/// Right-click **Paste**: probes the clipboard off-thread — text included,
+/// unlike Ctrl+V (see `clipboard_paste::read_for_menu`) — and routes it. Text
+/// is appended to the draft via `InsertText` (the menu can't lean on the
+/// focused widget to paste text the way Ctrl+V does); files/image stage as
+/// attachments, matching Ctrl+V. Bound to the room open at click time.
+fn paste_menu_task(room_id: String) -> Task<Message> {
+    use crate::clipboard_paste::PastedForMenu;
+    Task::perform(
+        async move {
+            let pasted = tokio::task::spawn_blocking(crate::clipboard_paste::read_for_menu)
+                .await
+                .unwrap_or(PastedForMenu::None);
+            match pasted {
+                PastedForMenu::Text(text) => PasteRoute::Text(text),
+                PastedForMenu::Image { filename, bytes } => {
+                    PasteRoute::Attach { files: vec![(filename, bytes)], failed: 0 }
+                }
+                PastedForMenu::Files(paths) => {
+                    let (files, failed) = read_pasted_paths(paths).await;
+                    PasteRoute::Attach { files, failed }
+                }
+                PastedForMenu::None => PasteRoute::Nothing,
+            }
+        },
+        move |route| match route {
+            PasteRoute::Text(text) => Message::Timeline(screens::timeline::Message::Composer(
+                screens::timeline::composer::Message::InsertText(text),
+            )),
+            PasteRoute::Attach { files, failed } => {
+                if files.is_empty() && failed == 0 {
+                    Message::Noop
+                } else {
+                    Message::AttachmentsReadFor { room_id: room_id.clone(), files, failed }
+                }
+            }
+            PasteRoute::Nothing => Message::Noop,
         },
     )
 }
@@ -1416,6 +1680,9 @@ fn select_room(app: &mut App, room_id: String) -> Task<Message> {
     if app.room_list.selected_room_id.as_deref() == Some(room_id.as_str()) {
         return Task::none();
     }
+    // Any genuine room open — click, new DM, restored session — cancels a
+    // still-pending safe-state restore so it can never fire on top of it.
+    app.pending_restore_room = None;
     let previous = app.room_list.selected_room_id.replace(room_id.clone());
 
     app.timeline.room_id = Some(room_id.clone());
@@ -1450,6 +1717,9 @@ fn select_room(app: &mut App, room_id: String) -> Task<Message> {
     // A jump deferred in the previous room must not fire in this one.
     app.timeline.pending_jump = None;
     app.timeline.scroll_anchor = None;
+    // An autoscroll anchor belongs to the room being left; its scroll target
+    // is meaningless in the new one.
+    app.timeline.autoscroll = None;
     app.timeline.last_content_height = 0.0;
     app.timeline.last_from_bottom = 0.0;
     app.timeline.last_seen_newest = None;
@@ -1471,7 +1741,9 @@ fn select_room(app: &mut App, room_id: String) -> Task<Message> {
 
     let reset_scroll = Task::batch([
         close_video,
-        iced::widget::scrollable::scroll_to(
+        // Remember this room as the one to reopen next launch (safe-state).
+        persist_last_room(&app.profile, &room_id),
+        iced::widget::operation::scroll_to(
             screens::timeline::timeline_scroll_id(),
             iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
         ),
@@ -1505,11 +1777,14 @@ fn forget_open_room(app: &mut App, room_id: &str) -> Task<Message> {
     app.timeline.selected_member = None;
     app.timeline.highlighted_member = None;
     app.timeline.member_menu = None;
+    app.timeline.autoscroll = None;
     send_cmd(app, ClientCommand::CloseRoom { room_id: room_id.to_string() });
+    // Don't let the next launch reopen a room the user just left.
+    let clear = clear_last_room(&app.profile);
     if app.timeline.inline_video.take().is_some() {
-        return close_native_player();
+        return Task::batch([clear, close_native_player()]);
     }
-    Task::none()
+    clear
 }
 
 /// A single `ClientEvent` can affect multiple screens at once (unread
@@ -1552,6 +1827,21 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
         ClientEvent::RoomCreated { room_id } => {
             return select_room(app, room_id);
         }
+        ClientEvent::UserSearchResults { request_id, results, limited } => {
+            // Only accept the newest in-flight search's results — a slower
+            // earlier response must not overwrite a faster later one.
+            if app.dm_search.as_ref().and_then(|s| s.last_request_id) == Some(request_id) {
+                let avatar_urls: Vec<String> =
+                    results.iter().filter_map(|r| r.avatar_url.clone()).collect();
+                if let Some(state) = app.dm_search.as_mut() {
+                    state.results = results;
+                    state.limited = limited;
+                    state.pending = false;
+                    state.error = None;
+                }
+                ensure_media_fetched(app, avatar_urls);
+            }
+        }
         ClientEvent::PowerLevelTagsUpdated { room_id, tags } => {
             if app.timeline.room_id.as_deref() == Some(room_id.as_str()) {
                 app.timeline.power_tags = tags;
@@ -1583,6 +1873,25 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
             }
             app.room_list.rooms = rooms;
             ensure_media_fetched(app, avatar_urls);
+
+            // Safe-state: reopen the room we were last in on this launch, the
+            // moment the sync brings it into the list (sliding sync streams
+            // rooms in gradually, so it may not be in the first update). Only
+            // when nothing's been opened yet, the worker channel is up
+            // (`select_room` needs it to subscribe the room), and the target
+            // is a real, non-space room still in the list — a space has no
+            // timeline, and a room left elsewhere simply never reappears.
+            // Consuming it here means it fires exactly once.
+            if let Some(target) = app.pending_restore_room.clone() {
+                let restorable = app.room_list.selected_room_id.is_none()
+                    && app.cmd_tx.is_some()
+                    && app.room_list.rooms.iter().any(|r| r.room_id == target && !r.is_space);
+                if restorable {
+                    app.pending_restore_room = None;
+                    tracing::info!(room_id = %target, "safe-state: reopening last room");
+                    return select_room(app, target);
+                }
+            }
         }
         ClientEvent::TimelineUpdated { room_id, items } => {
             if app.timeline.room_id.as_deref() == Some(room_id.as_str()) {
@@ -1620,7 +1929,10 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                 app.timeline.first_urls = first_urls;
                 // Membership set is index-based; a new snapshot invalidates
                 // it (no-op when no search is active).
-                screens::timeline::recompute_search_matches(&mut app.timeline);
+                screens::timeline::recompute_search_matches(
+                    &mut app.timeline,
+                    app.chat.show_membership_events,
+                );
                 let reset_task = if reset {
                     tracing::info!(
                         len = app.timeline.items.len(),
@@ -1628,7 +1940,7 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                     );
                     app.timeline.scroll_anchor = None;
                     app.timeline.at_bottom = true;
-                    iced::widget::scrollable::scroll_to(
+                    iced::widget::operation::scroll_to(
                         screens::timeline::timeline_scroll_id(),
                         iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
                     )
@@ -1771,6 +2083,13 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                 // A join finished — the explorer flipped that row to
                 // "Joined"; the sidebar picks the room up on the next
                 // room-list emission.
+            } else if app
+                .dm_search
+                .as_mut()
+                .is_some_and(|search| search.handle_success(request_id))
+            {
+                // A user search succeeded; its results arrive separately via
+                // UserSearchResults. Nothing else to do here.
             }
         }
         ClientEvent::CommandFailed { request_id, error } => {
@@ -1826,6 +2145,12 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
             {
                 // Routed into the explorer (failed page fetch → level error
                 // with Retry; failed join → error line in that room's row).
+            } else if app
+                .dm_search
+                .as_mut()
+                .is_some_and(|search| search.handle_failure(request_id, &error))
+            {
+                // Surfaced in the DM-search overlay's error line.
             }
         }
         ClientEvent::CrossSigningBootstrapNeedsFallback { url } => {
@@ -1880,11 +2205,38 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
             ensure_media_fetched(app, urls);
         }
         ClientEvent::MediaFetched { request_id, bytes } => {
+            // Lightbox Download button: these bytes are destined for a file,
+            // not the display caches. Intercept before the display path (the
+            // request_id was never put in `pending`, so it wouldn't match
+            // below anyway).
+            if app.media.download_requests.remove(&request_id) {
+                let suggested =
+                    format!("thornychat-image.{}", crate::media_cache::image_extension(&bytes));
+                return Task::future(async move {
+                    if let Some(handle) =
+                        rfd::AsyncFileDialog::new().set_file_name(&suggested).save_file().await
+                    {
+                        if let Err(error) = handle.write(&bytes).await {
+                            tracing::warn!(%error, "saving downloaded image failed");
+                        }
+                    }
+                    Message::Noop
+                });
+            }
             if let Some(url) = app.media.pending.remove(&request_id) {
                 app.media.pending_urls.remove(&url);
+                // Logged for every branch below: url + byte length + content
+                // fingerprint, so a "wrong image shown" report can be
+                // diagnosed from the log file alone. Cross-reference against
+                // "emoji pack entry" (what shortcode/pack this url belongs
+                // to) and, for gifs, the "gif decoded" line that follows.
+                let len = bytes.len();
+                let fingerprint = crate::media_cache::fingerprint(&bytes);
                 if crate::media_cache::looks_like_svg(&bytes) {
+                    tracing::info!(url, len, fingerprint, kind = "svg", "media fetched");
                     app.media.mxc_svgs.insert(url, iced::widget::svg::Handle::from_memory(bytes));
                 } else if crate::media_cache::looks_like_gif(&bytes) {
+                    tracing::info!(url, len, fingerprint, kind = "gif", "media fetched, decoding");
                     // Frame decode is CPU-heavy (full RGBA per frame; a chat
                     // GIF is easily 100ms+) — run it off the update thread.
                     // The url stays in pending_urls until GifDecoded lands so
@@ -1893,7 +2245,7 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                     return Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
-                                iced_gif::Frames::from_bytes(bytes.clone())
+                                crate::animated_image::Frames::from_bytes(bytes.clone())
                                     .map(std::sync::Arc::new)
                                     .map_err(|_| iced::widget::image::Handle::from_bytes(bytes))
                             })
@@ -1910,14 +2262,22 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                     // and leave a permanently blank, unexplained gap. Fail it
                     // the same way a failed fetch would, so the caller falls
                     // back to the initials avatar instead.
-                    tracing::warn!(url, "media is AVIF/HEIC — no decoder compiled in, falling back");
+                    tracing::warn!(url, len, fingerprint, "media is AVIF/HEIC — no decoder compiled in, falling back");
                     app.media.failed_mxc.insert(url);
                 } else {
+                    tracing::info!(url, len, fingerprint, kind = "raster", "media fetched");
                     app.media.images.insert(url, iced::widget::image::Handle::from_bytes(bytes));
                 }
             }
         }
         ClientEvent::MediaFetchFailed { request_id, reason } => {
+            // A download re-fetch that failed: just drop the tracking entry so
+            // it doesn't leak; nothing to blacklist (the display copy, if any,
+            // is unaffected).
+            if app.media.download_requests.remove(&request_id) {
+                tracing::warn!(reason, "image download re-fetch failed");
+                return Task::none();
+            }
             // Negative-cache the URL — without this, the very next timeline
             // or room-list update re-requests it, once per sync tick, forever.
             if let Some(url) = app.media.pending.remove(&request_id) {

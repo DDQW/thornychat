@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use matrix_sdk::ruma::api::client::membership::joined_rooms;
 use matrix_sdk::ruma::api::client::space::get_hierarchy;
-use matrix_sdk::ruma::api::client::state::get_state_events_for_key;
+use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
 use matrix_sdk::ruma::events::room::create::RoomCreateEventContent;
 use matrix_sdk::ruma::events::StateEventType;
 use matrix_sdk::ruma::room::RoomType;
@@ -69,20 +69,21 @@ pub async fn fetch_children(
         .iter()
         // The queried space itself is returned as a chunk of page one; only
         // its children belong in the listing.
-        .filter(|chunk| chunk.room_id != space_id)
+        // 0.18/ruma-0.16 flattened the per-room fields into a `summary`.
+        .filter(|chunk| chunk.summary.room_id != space_id)
         .map(|chunk| SpaceChildSummary {
-            room_id: chunk.room_id.to_string(),
-            name: chunk.name.clone(),
-            topic: chunk.topic.clone(),
-            canonical_alias: chunk.canonical_alias.as_ref().map(ToString::to_string),
-            avatar_url: chunk.avatar_url.as_ref().map(ToString::to_string),
-            num_joined_members: chunk.num_joined_members.into(),
-            is_space: chunk.room_type == Some(matrix_sdk::ruma::room::RoomType::Space),
+            room_id: chunk.summary.room_id.to_string(),
+            name: chunk.summary.name.clone(),
+            topic: chunk.summary.topic.clone(),
+            canonical_alias: chunk.summary.canonical_alias.as_ref().map(ToString::to_string),
+            avatar_url: chunk.summary.avatar_url.as_ref().map(ToString::to_string),
+            num_joined_members: chunk.summary.num_joined_members.into(),
+            is_space: chunk.summary.room_type == Some(matrix_sdk::ruma::room::RoomType::Space),
             joined: client
-                .get_room(&chunk.room_id)
+                .get_room(&chunk.summary.room_id)
                 .is_some_and(|room| room.state() == matrix_sdk::RoomState::Joined),
-            join_rule: map_join_rule(&chunk.join_rule),
-            via: via.get(&chunk.room_id).cloned().unwrap_or_default(),
+            join_rule: map_join_rule(&chunk.summary.join_rule),
+            via: via.get(&chunk.summary.room_id).cloned().unwrap_or_default(),
         })
         .collect();
 
@@ -229,21 +230,22 @@ async fn fetch_room_type(
     client: &Client,
     room_id: &RoomId,
 ) -> anyhow::Result<Option<RoomType>> {
-    let request = get_state_events_for_key::v3::Request::new(
+    let request = get_state_event_for_key::v3::Request::new(
         room_id.to_owned(),
         StateEventType::RoomCreate,
         String::new(),
     );
     let response = client.send(request).await?;
-    let content = response.content.deserialize_as::<RoomCreateEventContent>()?;
+    // 0.18: the response carries raw JSON (`event_or_content`); parse it directly.
+    let content = serde_json::from_str::<RoomCreateEventContent>(response.event_or_content.get())?;
     Ok(content.room_type)
 }
 
-fn map_join_rule(rule: &matrix_sdk::ruma::space::SpaceRoomJoinRule) -> SpaceJoinRule {
-    use matrix_sdk::ruma::space::SpaceRoomJoinRule as Sdk;
+fn map_join_rule(rule: &matrix_sdk::ruma::room::JoinRuleSummary) -> SpaceJoinRule {
+    use matrix_sdk::ruma::room::JoinRuleSummary as Sdk;
     match rule {
         Sdk::Public => SpaceJoinRule::Public,
-        Sdk::Restricted | Sdk::KnockRestricted => SpaceJoinRule::Restricted,
+        Sdk::Restricted(_) | Sdk::KnockRestricted(_) => SpaceJoinRule::Restricted,
         Sdk::Knock => SpaceJoinRule::Knock,
         // Invite, Private, and custom rules all mean "you can't just join".
         _ => SpaceJoinRule::InviteOnly,
