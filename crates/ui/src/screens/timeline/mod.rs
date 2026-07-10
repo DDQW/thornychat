@@ -2264,7 +2264,7 @@ fn render_item<'a>(
     }
 
     // Emotes prepend the sender's name (in its normal tag color) to the
-    // action on one line: "alice vibe codes with claude". The name matches
+    // action on one line: "alice flips the table". The name matches
     // the action's text size so the two read as one phrase, not a header.
     block = block.push(if is_emote {
         let emote_name = remote_text(sender.to_string())
