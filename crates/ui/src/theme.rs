@@ -61,6 +61,8 @@ pub mod icon {
     pub const ADD: &str = "\u{E710}";
     /// U+E896 Download — save the open lightbox image to disk.
     pub const DOWNLOAD: &str = "\u{E896}";
+    /// U+E74B Down (arrow) — the timeline's floating "jump to latest" pill.
+    pub const DOWN: &str = "\u{E74B}";
 }
 
 /// An [`icon`] glyph rendered in the Windows icon font. Central so callers
@@ -208,6 +210,31 @@ pub fn floating_panel(theme: &Theme) -> container::Style {
             radius: 10.into(),
         },
         ..container::Style::default()
+    }
+}
+
+/// Fully-rounded solid pill for controls floating over the timeline (the
+/// scrolled-up "jump to latest" chip). Unlike `ghost_button` it needs a real
+/// background and border at rest — it sits on top of message text, not in a
+/// layout row.
+pub fn floating_pill_button(theme: &Theme, status: button::Status) -> button::Style {
+    let palette = theme.extended_palette();
+    let base = button::Style {
+        background: Some(palette.background.weak.color.into()),
+        text_color: palette.background.base.text,
+        border: iced::Border {
+            color: palette.background.strong.color,
+            width: 1.0,
+            radius: 999.into(),
+        },
+        ..button::Style::default()
+    };
+    match status {
+        button::Status::Hovered | button::Status::Pressed => button::Style {
+            background: Some(palette.background.strong.color.into()),
+            ..base
+        },
+        _ => base,
     }
 }
 

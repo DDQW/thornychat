@@ -19,10 +19,11 @@ use iced::advanced::widget::tree::{self, Tree};
 use iced::advanced::{mouse, Clipboard, Shell, Widget};
 use iced::{ContentFit, Element, Event, Length, Point, Radians, Rectangle, Size, Vector};
 
-/// Zoom level (relative to contain-fit, so 3.0 = "300%") past which the source
-/// is magnified enough that super-resolution is worth requesting. The widget
-/// publishes `on_upscale` once when the wheel first crosses this.
-const UPSCALE_TRIGGER_SCALE: f32 = 3.0;
+/// Zoom level (relative to contain-fit, so 1.0 = "100%", the rest/fit view)
+/// past which the picture is being magnified and a Lanczos upscale is worth
+/// requesting. The widget publishes `on_upscale` once, the instant the wheel
+/// first takes zoom past this.
+const UPSCALE_TRIGGER_SCALE: f32 = 1.0;
 
 /// A raster image shown fullscreen with wheel-zoom and drag-to-pan. Always
 /// lays out to fill the space it's given; the picture is contain-fit inside
@@ -209,9 +210,9 @@ where
                     let scaled = Size::new(fitted.width * state.scale, fitted.height * state.scale);
                     state.offset = clamp_offset(offset, scaled, bounds.size());
                 }
-                // Once past the threshold, ask the caller (once) to
-                // super-resolve the image being magnified.
-                if !state.upscale_signaled && state.scale >= UPSCALE_TRIGGER_SCALE {
+                // The instant zoom goes past the fit view, ask the caller
+                // (once) to upscale the image being magnified.
+                if !state.upscale_signaled && state.scale > UPSCALE_TRIGGER_SCALE {
                     state.upscale_signaled = true;
                     if let Some(message) = &self.on_upscale {
                         shell.publish(message.clone());

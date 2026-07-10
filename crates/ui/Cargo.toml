@@ -40,10 +40,3 @@ open = { workspace = true }
 # matrix-sdk, so this doesn't add a new crate to the build, just a new
 # direct edge to one already being compiled.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
-
-# ONNX Runtime for the lightbox's super-resolution upscaler (see `upscale`).
-# `download-binaries` (default) fetches the native ONNX Runtime lib at build
-# time; `directml` enables the GPU execution provider on Windows (falls back to
-# CPU when unavailable). Pinned because 2.0 is still pre-release and its API
-# shifts between RCs.
-ort = { version = "=2.0.0-rc.12", features = ["directml"] }

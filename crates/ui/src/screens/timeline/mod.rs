@@ -342,6 +342,9 @@ pub enum Message {
     /// A quote block was clicked — scroll to (and highlight) the quoted
     /// message.
     JumpToEvent(String),
+    /// The floating "jump to latest" pill was clicked — snap the view back
+    /// to the newest message.
+    JumpToLatest,
     ZoomImage(String),
     OpenUrl(String),
     /// A video card's play button was clicked — start playing it inline in
@@ -1183,6 +1186,24 @@ pub fn update(
                 None => (iced::Task::none(), Effect::None),
             }
         }
+        Message::JumpToLatest => {
+            // Bottom-anchored scrollable: offset 0 is the newest message,
+            // exact regardless of how stale the measured geometry is. The
+            // landing `Scrolled` does the rest of the bookkeeping — flips
+            // `at_bottom` and fires `MaybeMarkRead` via arrived-at-bottom.
+            // Drop the anchor and bump the generation so an in-flight
+            // probe (issued while scrolled up) can't land a stale
+            // correction on top of the jump.
+            state.scroll_anchor = None;
+            state.scroll_generation += 1;
+            (
+                iced::widget::operation::scroll_to(
+                    timeline_scroll_id(),
+                    iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
+                ),
+                Effect::None,
+            )
+        }
         Message::ZoomImage(url) => (iced::Task::none(), Effect::ZoomImage(url)),
         Message::OpenUrl(url) => {
             let _ = open::that(url);
@@ -1507,10 +1528,38 @@ pub fn view<'a>(
         }),
     );
 
-    // Stacked so the pickers float over the messages as layers; both are
-    // always-present slots, keeping the tree's shape fixed whether they're
-    // open or not.
-    let chat_area = iced::widget::stack![chat, composer_picker, reaction_overlay]
+    // "Jump to latest" pill, floating over the bottom edge of the chat
+    // whenever the user is scrolled up into history (`at_bottom` is pure
+    // geometry, refreshed by every `Scrolled`). A stack layer rather than a
+    // row in the column so appearing never resizes the scrollable, and NOT
+    // inside the scrollable itself so the bar can't cover it. The wrapping
+    // container is inert — clicks anywhere off the pill fall through to the
+    // messages.
+    let jump_to_latest = crate::theme::slot((!state.at_bottom).then(|| {
+        let pill = button(
+            row![
+                crate::theme::icon_text(crate::theme::icon::DOWN, 11),
+                text("Jump to latest").size(12),
+            ]
+            .spacing(6)
+            .align_y(iced::Center),
+        )
+        .on_press(Message::JumpToLatest)
+        .style(crate::theme::floating_pill_button)
+        .padding([5, 12]);
+        container(pill)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::Center)
+            .align_y(iced::Bottom)
+            .padding(iced::Padding { top: 0.0, right: 0.0, bottom: 10.0, left: 0.0 })
+            .into()
+    }));
+
+    // Stacked so the pill and pickers float over the messages as layers; all
+    // are always-present slots, keeping the tree's shape fixed whether
+    // they're open or not.
+    let chat_area = iced::widget::stack![chat, jump_to_latest, composer_picker, reaction_overlay]
         .width(Length::Fill)
         .height(Length::Fill);
 

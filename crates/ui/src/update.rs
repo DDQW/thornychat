@@ -2678,3 +2678,175 @@ fn perform_discover(homeserver: String) -> Task<Message> {
         },
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use client_core::events::{TimelineDiff as D, TimelineItem, TimelineItemContent};
+
+    /// A minimal item distinguishable by `event_id`; `body` drives what
+    /// `first_url_in` extracts, so tests can steer the `first_urls` cache.
+    fn item(id: &str, body: &str) -> TimelineItem {
+        TimelineItem {
+            event_id: Some(id.to_string()),
+            sender: "@t:example.org".into(),
+            sender_display_name: None,
+            sender_avatar_url: None,
+            timestamp_ms: 0,
+            content: TimelineItemContent::Text(body.to_string()),
+            shield: None,
+            reactions: Vec::new(),
+            thread_root: None,
+            thread_reply_count: None,
+            read_by: Vec::new(),
+            in_reply_to: None,
+            send_failed: None,
+        }
+    }
+
+    fn linky(id: &str) -> TimelineItem {
+        item(id, &format!("see https://example.org/{id}"))
+    }
+
+    /// Applies `diffs` and asserts the invariant the timeline view depends on:
+    /// `first_urls` stays index-parallel to `items` — same length, and each
+    /// slot holds exactly what a fresh scan of that item would produce. A
+    /// drift here is a rendering bug at best and a `Vec::remove` panic at
+    /// worst, which is why every test funnels through this helper.
+    fn apply(items: &mut Vec<TimelineItem>, urls: &mut Vec<Option<String>>, diffs: Vec<D>) {
+        super::apply_timeline_diffs(items, urls, diffs);
+        assert_eq!(items.len(), urls.len(), "first_urls length drifted from items");
+        for (index, it) in items.iter().enumerate() {
+            let expected = match &it.content {
+                TimelineItemContent::Text(body) => crate::screens::timeline::first_url_in(body),
+                _ => None,
+            };
+            assert_eq!(urls[index], expected, "first_urls[{index}] out of lockstep");
+        }
+    }
+
+    fn ids(items: &[TimelineItem]) -> Vec<&str> {
+        items.iter().map(|i| i.event_id.as_deref().unwrap_or("?")).collect()
+    }
+
+    #[test]
+    fn reset_seeds_then_replaces_wholesale() {
+        let (mut items, mut urls) = (Vec::new(), Vec::new());
+        apply(&mut items, &mut urls, vec![D::Reset(vec![item("a", "plain"), linky("b")])]);
+        assert_eq!(ids(&items), ["a", "b"]);
+        apply(&mut items, &mut urls, vec![D::Reset(vec![linky("c")])]);
+        assert_eq!(ids(&items), ["c"]);
+    }
+
+    #[test]
+    fn appends_and_pushes_extend_both_ends() {
+        let (mut items, mut urls) = (Vec::new(), Vec::new());
+        apply(&mut items, &mut urls, vec![D::Append(vec![item("b", "x"), linky("c")])]);
+        apply(&mut items, &mut urls, vec![D::PushFront(linky("a")), D::PushBack(item("d", "y"))]);
+        assert_eq!(ids(&items), ["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn pops_shrink_both_ends_and_ignore_empty() {
+        let (mut items, mut urls) = (Vec::new(), Vec::new());
+        apply(&mut items, &mut urls, vec![D::Reset(vec![linky("a"), item("b", "x"), linky("c")])]);
+        apply(&mut items, &mut urls, vec![D::PopFront, D::PopBack]);
+        assert_eq!(ids(&items), ["b"]);
+        // Draining past empty must be a no-op, not a panic.
+        apply(&mut items, &mut urls, vec![D::PopBack, D::PopFront, D::PopFront]);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn insert_lands_at_index_and_clamps_past_end() {
+        let (mut items, mut urls) = (Vec::new(), Vec::new());
+        apply(&mut items, &mut urls, vec![D::Reset(vec![item("a", "x"), item("c", "y")])]);
+        apply(&mut items, &mut urls, vec![D::Insert { index: 1, item: linky("b") }]);
+        assert_eq!(ids(&items), ["a", "b", "c"]);
+        // An index past the end appends rather than panicking (the worker's
+        // renumbering can briefly race ahead of a Clear).
+        apply(&mut items, &mut urls, vec![D::Insert { index: 99, item: item("d", "z") }]);
+        assert_eq!(ids(&items), ["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn set_swaps_in_place_and_refreshes_the_url_slot() {
+        let (mut items, mut urls) = (Vec::new(), Vec::new());
+        apply(&mut items, &mut urls, vec![D::Reset(vec![item("a", "plain"), linky("b")])]);
+        // Plain → linky and linky → plain, so both directions of the cached
+        // slot changing are exercised.
+        apply(&mut items, &mut urls, vec![D::Set { index: 0, item: linky("a2") }]);
+        apply(&mut items, &mut urls, vec![D::Set { index: 1, item: item("b2", "no links") }]);
+        assert_eq!(ids(&items), ["a2", "b2"]);
+        // Out of range: dropped, list untouched.
+        apply(&mut items, &mut urls, vec![D::Set { index: 5, item: item("x", "x") }]);
+        assert_eq!(ids(&items), ["a2", "b2"]);
+    }
+
+    #[test]
+    fn remove_takes_one_index_and_ignores_out_of_range() {
+        let (mut items, mut urls) = (Vec::new(), Vec::new());
+        apply(&mut items, &mut urls, vec![D::Reset(vec![linky("a"), item("b", "x"), linky("c")])]);
+        apply(&mut items, &mut urls, vec![D::Remove { index: 1 }]);
+        assert_eq!(ids(&items), ["a", "c"]);
+        apply(&mut items, &mut urls, vec![D::Remove { index: 9 }]);
+        assert_eq!(ids(&items), ["a", "c"]);
+    }
+
+    #[test]
+    fn truncate_keeps_a_prefix_and_tolerates_overshoot() {
+        let (mut items, mut urls) = (Vec::new(), Vec::new());
+        apply(
+            &mut items,
+            &mut urls,
+            vec![D::Reset(vec![item("a", "x"), linky("b"), item("c", "y")])],
+        );
+        apply(&mut items, &mut urls, vec![D::Truncate { length: 5 }]);
+        assert_eq!(ids(&items), ["a", "b", "c"]);
+        apply(&mut items, &mut urls, vec![D::Truncate { length: 1 }]);
+        assert_eq!(ids(&items), ["a"]);
+    }
+
+    #[test]
+    fn clear_empties_both() {
+        let (mut items, mut urls) = (Vec::new(), Vec::new());
+        apply(&mut items, &mut urls, vec![D::Reset(vec![linky("a")]), D::Clear]);
+        assert!(items.is_empty());
+        assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn a_batch_applies_in_order_and_stays_in_lockstep() {
+        // One long mixed script, shaped like a real session: seed, live
+        // appends, an edit (Set), back-pagination prepends, a redaction
+        // (Remove), a sync-gap Reset, more appends. The `apply` helper
+        // re-verifies the whole invariant after every call.
+        let (mut items, mut urls) = (Vec::new(), Vec::new());
+        apply(&mut items, &mut urls, vec![D::Reset(vec![linky("m1"), item("m2", "hi")])]);
+        apply(
+            &mut items,
+            &mut urls,
+            vec![
+                D::Append(vec![item("m3", "yo"), linky("m4")]),
+                D::Set { index: 1, item: linky("m2-edited") },
+                D::PushFront(item("m0", "older")),
+            ],
+        );
+        assert_eq!(ids(&items), ["m0", "m1", "m2-edited", "m3", "m4"]);
+        apply(
+            &mut items,
+            &mut urls,
+            vec![
+                D::Remove { index: 2 },
+                D::Insert { index: 2, item: item("m2-redacted", "(removed)") },
+                D::Truncate { length: 4 },
+            ],
+        );
+        assert_eq!(ids(&items), ["m0", "m1", "m2-redacted", "m3"]);
+        apply(
+            &mut items,
+            &mut urls,
+            vec![D::Reset(vec![linky("n1")]), D::Append(vec![item("n2", "fresh")])],
+        );
+        assert_eq!(ids(&items), ["n1", "n2"]);
+    }
+}
