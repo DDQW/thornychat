@@ -104,6 +104,14 @@ pub struct App {
     /// are shown) — persisted globally, editable from the General settings
     /// tab. Read by `view.rs` when rendering the timeline.
     pub chat: crate::chat_config::ChatConfig,
+    /// Which game launchers to watch and how a game change is announced —
+    /// persisted globally, editable from the Connectors settings tab. Gates and
+    /// paces the poll subscription in `subscriptions.rs`.
+    pub connectors: crate::connectors_config::ConnectorsConfig,
+    /// The last game a connector poll detected (across all enabled launchers),
+    /// so `update.rs` posts an emote only when it *changes*. `None` = nothing
+    /// running, or not yet polled.
+    pub connectors_last: Option<crate::connectors::ActiveGame>,
     pub show_settings: bool,
     /// Latest window-global cursor position, updated on every mouse move (see
     /// `subscriptions::window_events`). Snapshotted when a right-click menu
@@ -272,6 +280,8 @@ impl App {
             encryption: crate::encryption_config::EncryptionConfig::load_or_default(),
             spellcheck: crate::spellcheck_config::SpellcheckConfig::load_or_default(),
             chat: crate::chat_config::ChatConfig::load_or_default(),
+            connectors: crate::connectors_config::ConnectorsConfig::load_or_default(),
+            connectors_last: None,
             show_settings: false,
             cursor_position: iced::Point::ORIGIN,
             settings_panel_size: DEFAULT_SETTINGS_SIZE,

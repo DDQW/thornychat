@@ -260,6 +260,37 @@ pub fn thin_scrollbar(
     }
 }
 
+/// Like [`thin_scrollbar`] but fully transparent — the surface still scrolls
+/// (wheel and drag), there is just no bar drawn. Used for the Settings dialog,
+/// where the bar was visual noise and, at the right edge, covered the tab
+/// strip's trailing button.
+pub fn hidden_scrollbar(
+    theme: &Theme,
+    _status: iced::widget::scrollable::Status,
+) -> iced::widget::scrollable::Style {
+    use iced::widget::scrollable::{Rail, Scroller, Style};
+    let palette = theme.extended_palette();
+    let hidden = Rail {
+        background: None,
+        border: border::rounded(0),
+        scroller: Scroller { background: iced::Color::TRANSPARENT.into(), border: border::rounded(0) },
+    };
+    Style {
+        container: container::Style::default(),
+        vertical_rail: hidden,
+        horizontal_rail: hidden,
+        gap: None,
+        // The middle-click autoscroll puck is a separate affordance from the
+        // scrollbar, so it keeps real colors even here.
+        auto_scroll: iced::widget::scrollable::AutoScroll {
+            background: palette.background.strong.color.into(),
+            border: border::rounded(4),
+            shadow: Default::default(),
+            icon: palette.background.strong.text,
+        },
+    }
+}
+
 /// A layout slot that exists whether or not it has content. iced diffs
 /// widget state by tree position, so conditionally inserting an element
 /// (typing indicator, error line, banner) shifts every later sibling and

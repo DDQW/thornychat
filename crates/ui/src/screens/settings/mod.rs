@@ -1,4 +1,5 @@
 pub mod appearance;
+pub mod connectors;
 pub mod encryption;
 pub mod general;
 pub mod manual;
@@ -10,6 +11,7 @@ use iced::widget::{button, column, row, text};
 use iced::{Element, Task};
 
 use crate::chat_config::ChatConfig;
+use crate::connectors_config::ConnectorsConfig;
 use crate::encryption_config::EncryptionConfig;
 use crate::privacy_config::PrivacyConfig;
 use crate::screens::verification;
@@ -20,6 +22,7 @@ use crate::theme_config::ThemeConfig;
 pub enum Tab {
     General,
     Privacy,
+    Connectors,
     Encryption,
     Notifications,
     RoomAdmin,
@@ -30,9 +33,10 @@ pub enum Tab {
     Manual,
 }
 
-const TABS: [(Tab, &str); 7] = [
+const TABS: [(Tab, &str); 8] = [
     (Tab::General, "General"),
     (Tab::Privacy, "Privacy"),
+    (Tab::Connectors, "Connectors"),
     (Tab::Encryption, "Encryption"),
     (Tab::Notifications, "Notifications"),
     (Tab::RoomAdmin, "Room Admin"),
@@ -45,6 +49,7 @@ pub struct State {
     pub tab: Tab,
     pub general: general::State,
     pub privacy: privacy::State,
+    pub connectors: connectors::State,
     pub encryption: encryption::State,
     pub notifications: notifications::State,
     pub appearance: appearance::State,
@@ -65,6 +70,7 @@ impl State {
             tab: Tab::General,
             general: general::State::new(),
             privacy: privacy::State,
+            connectors: connectors::State,
             encryption: encryption::State,
             notifications: notifications::State,
             appearance: appearance::State::synced_from(theme),
@@ -77,6 +83,7 @@ pub enum Message {
     TabSelected(Tab),
     General(general::Message),
     Privacy(privacy::Message),
+    Connectors(connectors::Message),
     Encryption(encryption::Message),
     Notifications(notifications::Message),
     Appearance(appearance::Message),
@@ -112,6 +119,7 @@ pub fn update(
     encryption: &mut EncryptionConfig,
     spellcheck: &mut SpellcheckConfig,
     chat: &mut ChatConfig,
+    connectors: &mut ConnectorsConfig,
     profile: &str,
     message: Message,
 ) -> (Task<Message>, Effect) {
@@ -126,6 +134,10 @@ pub fn update(
         }
         Message::Privacy(msg) => {
             let task = privacy::update(privacy, msg).map(Message::Privacy);
+            (task, Effect::None)
+        }
+        Message::Connectors(msg) => {
+            let task = connectors::update(connectors, msg).map(Message::Connectors);
             (task, Effect::None)
         }
         Message::Encryption(msg) => {
@@ -152,6 +164,7 @@ pub fn view<'a>(
     encryption: &'a EncryptionConfig,
     spellcheck: &'a SpellcheckConfig,
     chat: &'a ChatConfig,
+    connectors: &'a ConnectorsConfig,
     account: general::AccountInfo<'a>,
     default_modes: (client_core::events::NotificationMode, client_core::events::NotificationMode),
     verification: &'a verification::State,
@@ -165,11 +178,12 @@ pub fn view<'a>(
         );
     }
 
-    // A lone "?" opens the manual (a hidden tab, so it's not in `TABS`). The
-    // Fill spacer stretches the strip so the button lands on the trailing edge.
+    // A lone "?" after the last tab opens the manual (a hidden tab, so it's not
+    // in `TABS`). Kept left-packed with the other tabs on purpose: the whole
+    // settings view sits inside a `scrollable`, so a right-aligned button would
+    // land under the scrollbar strip and get covered.
     let manual_style =
         if state.tab == Tab::Manual { crate::theme::selected_ghost_button } else { crate::theme::ghost_button };
-    tabs = tabs.push(iced::widget::space::horizontal());
     tabs = tabs.push(
         button(text("?").size(13)).on_press(Message::TabSelected(Tab::Manual)).style(manual_style).padding([6, 12]),
     );
@@ -177,6 +191,7 @@ pub fn view<'a>(
     let body: Element<'_, Message> = match state.tab {
         Tab::General => general::view(&state.general, account, spellcheck, chat).map(Message::General),
         Tab::Privacy => privacy::view(privacy).map(Message::Privacy),
+        Tab::Connectors => connectors::view(connectors).map(Message::Connectors),
         Tab::Encryption => encryption::view(encryption).map(Message::Encryption),
         Tab::Notifications => notifications::view(&state.notifications, default_modes).map(Message::Notifications),
         Tab::RoomAdmin => room_admin::view(),

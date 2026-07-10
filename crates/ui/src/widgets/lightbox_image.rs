@@ -19,6 +19,11 @@ use iced::advanced::widget::tree::{self, Tree};
 use iced::advanced::{mouse, Clipboard, Shell, Widget};
 use iced::{ContentFit, Element, Event, Length, Point, Radians, Rectangle, Size, Vector};
 
+/// Zoom level (relative to contain-fit, so 3.0 = "300%") past which the source
+/// is magnified enough that super-resolution is worth requesting. The widget
+/// publishes `on_upscale` once when the wheel first crosses this.
+const UPSCALE_TRIGGER_SCALE: f32 = 3.0;
+
 /// A raster image shown fullscreen with wheel-zoom and drag-to-pan. Always
 /// lays out to fill the space it's given; the picture is contain-fit inside
 /// that at rest (`scale` 1.0) and grows from there.
@@ -28,6 +33,7 @@ pub struct LightboxImage<Message, Handle> {
     max_scale: f32,
     scale_step: f32,
     on_double_click: Option<Message>,
+    on_upscale: Option<Message>,
 }
 
 impl<Message, Handle> LightboxImage<Message, Handle> {
@@ -40,6 +46,7 @@ impl<Message, Handle> LightboxImage<Message, Handle> {
             max_scale: 20.0,
             scale_step: 0.25,
             on_double_click: None,
+            on_upscale: None,
         }
     }
 
@@ -48,6 +55,14 @@ impl<Message, Handle> LightboxImage<Message, Handle> {
     /// can't double as the close gesture).
     pub fn on_double_click(mut self, message: Message) -> Self {
         self.on_double_click = Some(message);
+        self
+    }
+
+    /// Message to publish once, the first time zoom passes
+    /// [`UPSCALE_TRIGGER_SCALE`] — the caller uses it to kick off a
+    /// super-resolution pass for the image being magnified.
+    pub fn on_upscale(mut self, message: Message) -> Self {
+        self.on_upscale = Some(message);
         self
     }
 }
@@ -63,6 +78,9 @@ struct State {
     grab_start_offset: Vector,
     /// Last press on the picture, for single/double-click discrimination.
     last_click: Option<mouse::Click>,
+    /// Set once the upscale trigger has fired, so it fires exactly once per
+    /// opened image (a fresh lightbox = a fresh `State`).
+    upscale_signaled: bool,
 }
 
 impl Default for State {
@@ -73,6 +91,7 @@ impl Default for State {
             grabbed_at: None,
             grab_start_offset: Vector::new(0.0, 0.0),
             last_click: None,
+            upscale_signaled: false,
         }
     }
 }
@@ -189,6 +208,14 @@ where
                     let fitted = fitted_size::<Renderer>(renderer, &self.handle, bounds.size());
                     let scaled = Size::new(fitted.width * state.scale, fitted.height * state.scale);
                     state.offset = clamp_offset(offset, scaled, bounds.size());
+                }
+                // Once past the threshold, ask the caller (once) to
+                // super-resolve the image being magnified.
+                if !state.upscale_signaled && state.scale >= UPSCALE_TRIGGER_SCALE {
+                    state.upscale_signaled = true;
+                    if let Some(message) = &self.on_upscale {
+                        shell.publish(message.clone());
+                    }
                 }
                 shell.capture_event();
             }

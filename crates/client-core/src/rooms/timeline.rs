@@ -21,7 +21,7 @@ use matrix_sdk_ui::timeline::{
     VirtualTimelineItem,
 };
 use matrix_sdk_ui::timeline::{
-    InReplyToDetails, MsgLikeKind, TimelineDetails, TimelineEventShieldState,
+    EventSendState, InReplyToDetails, MsgLikeKind, TimelineDetails, TimelineEventShieldState,
 };
 use matrix_sdk_ui::eyeball_im::VectorDiff;
 use tokio::sync::broadcast;
@@ -30,8 +30,8 @@ use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
 use crate::events::{
-    friendly_user_id, ClientEvent, ReactionGroup, ReplyPreview, TimelineDiff, TimelineItem,
-    TimelineItemContent, TrustShield,
+    friendly_user_id, ClientEvent, ReactionGroup, ReplyPreview, SendFailure, TimelineDiff,
+    TimelineItem, TimelineItemContent, TrustShield,
 };
 
 /// Opens (or re-opens) the timeline for `room_id_str` and spawns a task that
@@ -338,6 +338,12 @@ fn convert_item(item: &SdkTimelineItem, own_user_id: Option<&UserId>) -> Option<
                 thread_reply_count,
                 read_by: event.read_receipts().keys().map(|id| id.to_string()).collect(),
                 in_reply_to,
+                send_failed: event.send_state().and_then(|state| match state {
+                    EventSendState::SendingFailed { error, is_recoverable } => {
+                        Some(SendFailure { is_recoverable: *is_recoverable, error: error.to_string() })
+                    }
+                    _ => None,
+                }),
             })
         }
         TimelineItemKind::Virtual(VirtualTimelineItem::DateDivider(ts)) => {
@@ -364,6 +370,7 @@ fn virtual_item(content: TimelineItemContent, timestamp_ms: u64) -> TimelineItem
         thread_reply_count: None,
         read_by: Vec::new(),
         in_reply_to: None,
+        send_failed: None,
     }
 }
 

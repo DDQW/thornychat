@@ -11,6 +11,7 @@
 use iced::widget::{row, text, Column};
 use iced::{Element, Font, Length};
 
+use crate::slash;
 use crate::theme;
 
 pub fn view<'a, M: 'a>() -> Element<'a, M> {
@@ -25,29 +26,73 @@ pub fn view<'a, M: 'a>() -> Element<'a, M> {
              button in Settings.",
         ));
 
+    let mut slash_rows = vec![para(
+        "Type a command at the very start of a message. Anything \
+         unrecognised is sent as normal text (so \"/method\" is safe), and a \
+         leading \"//\" escapes to a literal slash. A command clears the box \
+         on success; a mistake (a missing or malformed name) shows a hint \
+         and keeps your text.",
+    )];
+    // Generated from the same catalog `slash::parse` matches against, so this
+    // list and the parser's actual behaviour can't describe a command
+    // differently (they did, three times, before this catalog existed).
+    slash_rows.extend(slash::COMMANDS.iter().map(command_row));
+    slash_rows.push(note(
+        "The room and moderation commands act on the room you're viewing and \
+         need the right permissions — if your power level is too low the \
+         server refuses and the error shows above the box.",
+    ));
+    page = page.push(section("Slash commands", slash_rows));
+
     page = page.push(section(
-        "Text commands",
+        "Formatting with Markdown",
+        vec![
+            para(
+                "Type Markdown in the message box and ThornyChat converts it when \
+                 you send, so people on other Matrix clients (Element and the rest) \
+                 see your messages formatted.",
+            ),
+            note(
+                "Heads-up: ThornyChat's own timeline currently shows message text as \
+                 plain text — it does not render formatting yet. So here you will \
+                 see the literal characters you typed (the ** around bold, the \
+                 backticks around code) even though other clients render them; other \
+                 people's formatted messages likewise show as their plain-text \
+                 version.",
+            ),
+            entry("**bold**", "Bold. Double underscores, __like this__, work too."),
+            entry("*italic*", "Italic. Single underscores, _like this_, work too."),
+            entry("~~strike~~", "Strikethrough."),
+            entry("`code`", "Inline monospace, for code or literal text."),
+            entry(
+                "[text](url)",
+                "A titled link. For plain links it is simpler to paste the bare URL \
+                 — ThornyChat makes bare URLs clickable and shows a preview; the \
+                 [text](url) form only formats on other clients.",
+            ),
+            note(
+                "Headings (#), lists (-) and quotes (>) are Markdown too, but they \
+                 need separate lines, and the message box is a single line (Enter \
+                 sends), so in practice only the inline styles above are usable.",
+            ),
+        ],
+    ));
+
+    page = page.push(section(
+        "Mentions & emoji",
         vec![
             entry(
-                "/me <action>",
-                "Send an action/emote — \"/me waves\" shows as your name followed \
-                 by \"waves\". Must start with \"/me \", including the trailing space.",
-            ),
-            entry(
                 "@name",
-                "Mention someone: type @ and part of their name, then pick from \
-                 the list. They get highlighted and notified.",
+                "Mention someone: type @ then part of their name and pick from the \
+                 list that appears. They get highlighted and notified.",
             ),
             entry(
                 ":shortcode:",
-                "Insert a custom emoji by its :shortcode:. The emoji picker \
-                 inserts these for you.",
+                "Insert a custom (pack) emoji by its :shortcode:. Easiest from the \
+                 emoji button, which fills in the shortcode for you; the same custom \
+                 emoji work in reactions, where they show as the real image.",
             ),
-            entry("Markdown", "Message text supports Markdown — bold, italics, links, and so on."),
-            note(
-                "That is the whole set of typed commands — there is no /join, \
-                 /leave or /invite. Those actions live as buttons and menus, below.",
-            ),
+            note("The emoji and sticker pickers themselves are covered under Composer & attachments, below."),
         ],
     ));
 
@@ -268,8 +313,10 @@ pub fn view<'a, M: 'a>() -> Element<'a, M> {
             note("A few things are not built yet, so you will not find them:"),
             bullet("Desktop notifications and a system-tray icon."),
             bullet(
-                "Member management (invite, kick, ban, power levels) and a full \
-                 room-settings dialog — only right-click Rename exists today.",
+                "Point-and-click member management and a full room-settings dialog \
+                 — you can invite, kick, ban and set the topic with slash commands \
+                 (above), but there are no buttons for them yet, and no power-level \
+                 editor.",
             ),
             bullet("A threads panel — you will only see a reply count on the original message."),
             bullet("Audio and video in calls — call presence works, but no media yet."),
@@ -310,12 +357,31 @@ fn bullet<'a, M: 'a>(s: &'a str) -> Element<'a, M> {
 }
 
 /// A two-column key/description row: a fixed-width monospace key (a command or
-/// shortcut) beside a wrapped description.
-fn entry<'a, M: 'a>(key: &'a str, desc: &'a str) -> Element<'a, M> {
+/// shortcut) beside a wrapped description. Takes `impl IntoFragment` (not
+/// just `&str`) so callers can pass an owned `String` built from data, like
+/// `command_row` below does — the same bound `theme::remote_text` uses.
+fn entry<'a, M: 'a>(key: impl text::IntoFragment<'a>, desc: impl text::IntoFragment<'a>) -> Element<'a, M> {
     row![
         text(key).font(Font::MONOSPACE).size(12).width(Length::Fixed(160.0)),
         text(desc).size(13).width(Length::Fill),
     ]
     .spacing(10)
     .into()
+}
+
+/// Renders one [`slash::CommandSpec`] as an `entry()` row: the description
+/// plus its usage line and any aliases, appended rather than duplicated in
+/// `description` itself.
+fn command_row<'a, M: 'a>(spec: &'static slash::CommandSpec) -> Element<'a, M> {
+    let mut desc = spec.description.to_string();
+    if let Some(usage) = spec.usage {
+        desc.push(' ');
+        desc.push_str(usage);
+        desc.push('.');
+    }
+    if !spec.aliases.is_empty() {
+        let aliased: Vec<String> = spec.aliases.iter().map(|a| format!("/{a}")).collect();
+        desc.push_str(&format!(" (or {}).", aliased.join(", ")));
+    }
+    entry(format!("/{}", spec.name), desc)
 }

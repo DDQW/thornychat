@@ -109,6 +109,12 @@ pub enum Message {
     /// Save the open lightbox image to disk (re-fetches the original bytes,
     /// then opens a save dialog).
     DownloadZoomedImage,
+    /// The lightbox widget crossed the zoom threshold where upscaling helps —
+    /// kick off a super-resolution pass for the open image (once).
+    UpscaleZoomedImage,
+    /// A super-resolution pass finished: the sharper handle for `url`, or an
+    /// error string. `Handle` is `Arc`-backed, so carrying it here is cheap.
+    ImageUpscaled { url: String, handle: Result<iced::widget::image::Handle, String> },
     /// Escape pressed anywhere — dismisses the image lightbox (a press on
     /// the image itself pans rather than closing it, so this is the
     /// guaranteed keyboard exit).
@@ -177,6 +183,14 @@ pub enum Message {
     /// correction cascade past its 3-consecutive-redraw budget. See
     /// [`crate::media_cache::State::staged`].
     FlushStagedMedia,
+
+    /// The connector poll timer fired: kick off an off-thread detection pass
+    /// for the game you're currently playing (see `crate::connectors`).
+    PollConnectors,
+    /// Detection finished: the game running per the enabled connectors, or
+    /// `None`. Diffed against the last known game to decide whether to post an
+    /// emote into the open room.
+    ConnectorsDetected(Option<crate::connectors::ActiveGame>),
 
     Noop,
 }

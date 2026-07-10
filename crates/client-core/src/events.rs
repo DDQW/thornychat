@@ -251,6 +251,22 @@ pub struct TimelineItem {
     pub read_by: Vec<String>,
     /// Set when this message is a rich reply — who/what it quotes.
     pub in_reply_to: Option<ReplyPreview>,
+    /// Set when this is a local echo whose send attempt failed (mirrors
+    /// matrix-sdk-ui's `EventSendState::SendingFailed`). `None` covers both
+    /// a normally-sent message and a local echo still in flight — only a
+    /// send that has actually failed needs a UI affordance.
+    pub send_failed: Option<SendFailure>,
+}
+
+/// See [`TimelineItem::send_failed`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SendFailure {
+    /// Recoverable errors (e.g. a timeout) can be retried by simply
+    /// re-enabling the room's send queue; unrecoverable ones ("wedged")
+    /// can't be fixed that way, so the UI shouldn't offer a Retry action for
+    /// them (see `ClientCommand::RetrySend`'s doc comment).
+    pub is_recoverable: bool,
+    pub error: String,
 }
 
 /// One structural change to a room's timeline window, mirroring the SDK's

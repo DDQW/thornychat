@@ -85,9 +85,13 @@ fn lightbox<'a>(app: &'a App, url: &'a str) -> Element<'a, Message> {
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
-    } else if let Some(handle) = app.media.images.get(url) {
+    } else if let Some(handle) = app.media.upscaled.get(url).or_else(|| app.media.images.get(url)) {
+        // Prefer the super-resolved copy once it exists; the widget's zoom/pan
+        // state survives the handle swap (same tree position), so it just gets
+        // sharper mid-zoom. `on_upscale` requests that copy past the threshold.
         crate::widgets::lightbox_image::LightboxImage::new(handle.clone())
             .on_double_click(Message::CloseZoom)
+            .on_upscale(Message::UpscaleZoomedImage)
             .into()
     } else if let Some(handle) = app.media.mxc_svgs.get(url) {
         iced::widget::svg(handle.clone()).width(Length::Fill).height(Length::Fill).into()
@@ -129,7 +133,23 @@ fn lightbox<'a>(app: &'a App, url: &'a str) -> Element<'a, Message> {
     .align_x(iced::Right)
     .padding(12);
 
-    opaque(stack![backdrop, controls])
+    let mut layers = stack![backdrop, controls];
+    // Transient hint while a super-resolution pass runs, top-left so it clears
+    // the controls. A plain container captures no clicks, so close-through
+    // still works underneath it.
+    if app.media.upscale_pending.contains(url) {
+        let pill = container(text("Enhancing…").size(12))
+            .padding([6, 12])
+            .style(|_theme: &iced::Theme| iced::widget::container::Style {
+                background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.6).into()),
+                text_color: Some(iced::Color::WHITE),
+                border: iced::Border { radius: 6.0.into(), ..Default::default() },
+                ..Default::default()
+            });
+        layers = layers.push(container(pill).padding(12));
+    }
+
+    opaque(layers)
 }
 
 /// Settings dialog: dimmed backdrop, centered panel with the tab strip and
@@ -166,13 +186,14 @@ fn settings_overlay(app: &App) -> Element<'_, Message> {
             &app.encryption,
             &app.spellcheck,
             &app.chat,
+            &app.connectors,
             account,
             app.default_notification_modes,
             &app.verification,
         )
         .map(Message::Settings),
     )
-    .style(crate::theme::thin_scrollbar);
+    .style(crate::theme::hidden_scrollbar);
 
     let size = app.settings_panel_size;
     let card = container(
@@ -359,6 +380,7 @@ fn main_shell(app: &App) -> Element<'_, Message> {
         &app.tweet_previews,
         &app.steam_previews,
         app.chat.show_membership_events,
+        &app.sync_state,
     )
     .map(Message::Timeline);
 

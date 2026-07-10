@@ -336,6 +336,47 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
 
         Message::CloseZoom => {
             app.zoomed_image = None;
+            clear_upscale_cache(app);
+            Task::none()
+        }
+        Message::UpscaleZoomedImage => {
+            // The widget signals this once, when zoom crosses the threshold
+            // where the source is being magnified past its resolution. Produce
+            // a super-resolved copy off-thread; the view swaps to it when it
+            // lands. Skip if one is cached or already running.
+            let Some(url) = app.zoomed_image.clone() else { return Task::none() };
+            if app.media.upscaled.contains_key(&url) || app.media.upscale_pending.contains(&url) {
+                return Task::none();
+            }
+            // Reuse the encoded bytes already held by the display handle rather
+            // than re-fetching; only raster images have them (GIF/SVG don't go
+            // through this widget).
+            let Some(iced::widget::image::Handle::Bytes(_, bytes)) = app.media.images.get(&url)
+            else {
+                return Task::none();
+            };
+            let bytes = bytes.clone();
+            app.media.upscale_pending.insert(url.clone());
+            Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || crate::upscale::upscale_to_handle(&bytes))
+                        .await
+                        .unwrap_or_else(|_| Err("upscale task panicked".into()))
+                },
+                move |handle| Message::ImageUpscaled { url, handle },
+            )
+        }
+        Message::ImageUpscaled { url, handle } => {
+            app.media.upscale_pending.remove(&url);
+            // Drop the result if the lightbox moved on while it computed.
+            if app.zoomed_image.as_deref() == Some(url.as_str()) {
+                match handle {
+                    Ok(handle) => {
+                        app.media.upscaled.insert(url, handle);
+                    }
+                    Err(reason) => tracing::info!(url, reason, "image upscale produced nothing"),
+                }
+            }
             Task::none()
         }
         Message::DownloadZoomedImage => {
@@ -360,6 +401,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             // too. Everything else keeps its explicit close affordances.
             app.timeline.autoscroll = None;
             app.zoomed_image = None;
+            clear_upscale_cache(app);
             Task::none()
         }
 
@@ -470,6 +512,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 &mut app.encryption,
                 &mut app.spellcheck,
                 &mut app.chat,
+                &mut app.connectors,
                 &app.profile,
                 msg,
             );
@@ -480,6 +523,23 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             let task = task.map(Message::Settings);
             let effect_task = apply_settings_effect(app, effect);
             Task::batch([task, effect_task])
+        }
+
+        Message::PollConnectors => {
+            // Registry / process reads are blocking; run them off the UI thread.
+            let cfg = app.connectors;
+            Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || crate::connectors::detect_active_game(&cfg))
+                        .await
+                        .unwrap_or(None)
+                },
+                Message::ConnectorsDetected,
+            )
+        }
+        Message::ConnectorsDetected(current) => {
+            apply_connector_change(app, current);
+            Task::none()
         }
 
         Message::Noop => Task::none(),
@@ -536,6 +596,49 @@ fn send_cmd(app: &App, cmd: ClientCommand) {
     if let Some(tx) = &app.cmd_tx {
         let _ = tx.send(cmd);
     }
+}
+
+/// Diff a fresh connector detection against the last known game and, on a
+/// change, post one `m.emote` (`* you plays X`) into the room currently on
+/// screen. The detected state is *always* recorded — even with no room open,
+/// so a change made while sitting on the room list isn't re-announced when a
+/// room is later opened; only the send is gated on a room being open, matching
+/// the "post to the current room" design. Deliberately does not touch the
+/// composer's `pending_request`, so a connector send never disturbs a draft the
+/// user is typing.
+fn apply_connector_change(app: &mut App, current: Option<crate::connectors::ActiveGame>) {
+    if current == app.connectors_last {
+        return;
+    }
+    let previous = std::mem::replace(&mut app.connectors_last, current.clone());
+
+    let Some(room_id) = app.timeline.room_id.clone() else { return };
+    let Some(body) = crate::connectors::emote_body(
+        previous.as_ref(),
+        current.as_ref(),
+        app.connectors.announce_stop,
+    ) else {
+        return;
+    };
+    send_cmd(
+        app,
+        ClientCommand::SendMessage {
+            room_id,
+            body,
+            mentioned_user_ids: Vec::new(),
+            reply_to_event_id: None,
+            emote: true,
+            markdown: true,
+            request_id: Uuid::new_v4(),
+        },
+    );
+}
+
+/// Drops the lightbox's super-resolved buffers when it closes — they're large
+/// and only the currently open image is ever needed.
+fn clear_upscale_cache(app: &mut App) {
+    app.media.upscaled.clear();
+    app.media.upscale_pending.clear();
 }
 
 /// Space-explorer overlay actions. Handled at the app level (no screen
@@ -713,6 +816,10 @@ fn apply_timeline_effect(app: &mut App, effect: screens::timeline::Effect) -> Ta
             let usage_task = record_emoji_use(app, key.clone());
             toggle_reaction(app, event_id, key);
             usage_task
+        }
+        screens::timeline::Effect::RetrySend => {
+            retry_send(app);
+            Task::none()
         }
         screens::timeline::Effect::EnsureEmojiFetched(emojis) => ensure_emoji_fetched(app, emojis),
         screens::timeline::Effect::SetNotificationMode(mode) => {
@@ -1152,24 +1259,66 @@ fn send_message(
     reply_to_event_id: Option<String>,
 ) {
     let Some(room_id) = app.timeline.room_id.clone() else { return };
-    let Some(cmd_tx) = &app.cmd_tx else { return };
-    // `/me <action>` sends an IRC-style emote (`m.emote`) — the standard
-    // command across Matrix clients. Only the exact `/me ` prefix triggers it,
-    // so an ordinary message like "/method" still sends as text.
-    let (emote, body) = match body.strip_prefix("/me ") {
-        Some(action) => (true, action.to_string()),
-        None => (false, body),
-    };
-    let request_id = Uuid::new_v4();
-    app.timeline.composer.pending_request = Some(request_id);
-    let _ = cmd_tx.send(ClientCommand::SendMessage {
-        room_id,
-        body,
-        mentioned_user_ids,
-        reply_to_event_id,
-        emote,
-        request_id,
-    });
+    if app.cmd_tx.is_none() {
+        return;
+    }
+    // Slash commands are parsed here (see `crate::slash`): most Matrix/Element
+    // commands map to a worker action, `/me` and `/plain` change how the text
+    // is sent, and anything unrecognised falls through as an ordinary message.
+    match crate::slash::parse(&body) {
+        crate::slash::Parsed::Message { body, emote, markdown } => {
+            let request_id = Uuid::new_v4();
+            app.timeline.composer.pending_request = Some(request_id);
+            send_cmd(
+                app,
+                ClientCommand::SendMessage {
+                    room_id,
+                    body,
+                    mentioned_user_ids,
+                    reply_to_event_id,
+                    emote,
+                    markdown,
+                    request_id,
+                },
+            );
+        }
+        crate::slash::Parsed::Action(action) => {
+            use crate::slash::Action;
+            let request_id = Uuid::new_v4();
+            let command = match action {
+                Action::Join(room) => {
+                    ClientCommand::JoinRoom { room_id_or_alias: room, via: Vec::new(), request_id }
+                }
+                Action::Leave => ClientCommand::LeaveRoom { room_id, request_id },
+                Action::Invite(user) => ClientCommand::InviteUser { room_id, user_id: user, request_id },
+                Action::Dm(user) => ClientCommand::OpenDirectMessage {
+                    user_id: user,
+                    encrypted: app.encryption.encrypt_direct_messages,
+                    request_id,
+                },
+                Action::Kick { user, reason } => {
+                    ClientCommand::KickUser { room_id, user_id: user, reason, request_id }
+                }
+                Action::Ban { user, reason } => {
+                    ClientCommand::BanUser { room_id, user_id: user, reason, request_id }
+                }
+                Action::Unban(user) => ClientCommand::UnbanUser { room_id, user_id: user, request_id },
+                Action::Topic(topic) => ClientCommand::SetRoomTopic { room_id, topic, request_id },
+                Action::Nick(name) => ClientCommand::SetDisplayName { name, request_id },
+                Action::RoomName(name) => ClientCommand::SetRoomName { room_id, name, request_id },
+            };
+            // Reuse the text-send slot so a command's success clears the draft
+            // (SendSucceeded) and its failure shows in the composer's error line
+            // (SendFailed) — the same machinery as a normal message send.
+            app.timeline.composer.pending_request = Some(request_id);
+            send_cmd(app, command);
+        }
+        crate::slash::Parsed::Error(message) => {
+            // Usage error: show it on the composer and keep the draft so the
+            // user can fix and resend. No request goes out.
+            app.timeline.composer.error = Some(message);
+        }
+    }
 }
 
 fn send_attachment(
@@ -1329,6 +1478,12 @@ fn toggle_reaction(app: &App, event_id: String, key: String) {
     let Some(cmd_tx) = &app.cmd_tx else { return };
     let request_id = Uuid::new_v4();
     let _ = cmd_tx.send(ClientCommand::ToggleReaction { room_id, event_id, key, request_id });
+}
+
+fn retry_send(app: &App) {
+    let Some(room_id) = app.timeline.room_id.clone() else { return };
+    let Some(cmd_tx) = &app.cmd_tx else { return };
+    let _ = cmd_tx.send(ClientCommand::RetrySend { room_id });
 }
 
 /// Issues `ClientCommand::FetchMedia` for every mxc URL referenced by

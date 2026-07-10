@@ -11,8 +11,8 @@ use std::collections::HashMap;
 
 use client_core::commands::RequestId;
 use client_core::events::{
-    friendly_user_id, EmojiPack, NotificationMode, RoomMember, RoomSummary, TimelineItem,
-    TimelineItemContent, TrustShield, UrlPreview,
+    friendly_user_id, EmojiPack, NotificationMode, RoomMember, RoomSummary, SyncState,
+    TimelineItem, TimelineItemContent, TrustShield, UrlPreview,
 };
 use iced::widget::{
     button, column, container, image, mouse_area, row, scrollable, text, text_input, tooltip,
@@ -302,6 +302,11 @@ pub enum Message {
     CancelDelete,
     ToggleReactionPicker(String),
     ReactWithEmoji { event_id: String, key: String },
+    /// "Retry" on a message whose send failed — no payload; the effect
+    /// handler resolves the open room from app state, not from the item
+    /// (retrying re-enables the whole room's send queue, not just this one
+    /// message — see `ClientCommand::RetrySend`'s doc comment).
+    RetrySend,
     ItemHovered(String),
     ItemUnhovered(String),
     ToggleSearch,
@@ -364,6 +369,8 @@ pub enum Effect {
     Edit { event_id: String, new_body: String },
     Redact { event_id: String },
     ToggleReaction { event_id: String, key: String },
+    /// Re-enable the open room's send queue after a failed send.
+    RetrySend,
     EnsureEmojiFetched(Vec<String>),
     /// `None` clears the per-room override (back to account default).
     SetNotificationMode(Option<NotificationMode>),
@@ -694,6 +701,7 @@ pub fn update(
             state.reacting_to = None;
             (iced::Task::none(), Effect::ToggleReaction { event_id, key })
         }
+        Message::RetrySend => (iced::Task::none(), Effect::RetrySend),
         Message::ToggleSearch => {
             state.search_open = !state.search_open;
             if !state.search_open {
@@ -1211,6 +1219,7 @@ pub fn view<'a>(
     tweet_previews: &'a HashMap<String, Option<crate::tweets::TweetData>>,
     steam_previews: &'a HashMap<String, Option<crate::steam::SteamAppData>>,
     show_membership_events: bool,
+    sync_state: &'a SyncState,
 ) -> Element<'a, Message> {
     let Some(open_room_id) = state.room_id.as_deref() else {
         return container(text("Select a room to view its messages"))
@@ -1320,6 +1329,19 @@ pub fn view<'a>(
             .as_ref()
             .map(|err| text(err.clone()).style(text::danger).size(12).into()),
     );
+    // Empty (hidden) while `Syncing`, which is the overwhelming majority of
+    // the time — only appears to explain an actual connectivity hiccup.
+    // `theme::slot` keeps this from shifting the composer or stealing its
+    // focus when it blinks in/out mid-typing.
+    let sync_slot = crate::theme::slot(
+        match sync_state {
+            SyncState::Syncing => None,
+            SyncState::Connecting => Some("Connecting…"),
+            SyncState::Offline => Some("Offline — you'll reconnect automatically"),
+            SyncState::Error(_) => Some("Connection error"),
+        }
+        .map(|label| text(label).style(text::secondary).size(12).into()),
+    );
     // The typing indicator and the mini avatars of everyone "following the
     // conversation" (read receipts at the newest message, Cinny-style) live
     // inside the composer's toolbar next to Send — no extra status row.
@@ -1334,6 +1356,7 @@ pub fn view<'a>(
         media,
     );
     let bottom = column![
+        sync_slot,
         error_slot,
         composer::view(&state.composer, media, typing, followers).map(Message::Composer),
     ]
@@ -2146,8 +2169,28 @@ fn render_item<'a>(
     }
 
     let Some(event_id) = &item.event_id else {
-        // Local echo without an event id yet (still sending) — no edit/delete/react affordances.
-        return with_avatar(avatar, block.push(body_line).into());
+        // Local echo without an event id yet: either still sending, or its
+        // send failed (matrix-sdk keeps it a local echo either way — a
+        // permanently failed send never gets a real event id) — no
+        // edit/delete/react affordances either way.
+        let mut local = block.push(body_line);
+        if let Some(failure) = &item.send_failed {
+            let mut failed_row =
+                row![text("Failed to send").size(12).style(text::danger)].spacing(8).align_y(iced::Center);
+            // Unrecoverable ("wedged") sends can't be fixed by re-enabling
+            // the queue — see `ClientCommand::RetrySend`'s doc comment —
+            // so a Retry button here would silently do nothing.
+            if failure.is_recoverable {
+                failed_row = failed_row.push(
+                    button(text("Retry").size(12))
+                        .on_press(Message::RetrySend)
+                        .style(crate::theme::ghost_button)
+                        .padding(0),
+                );
+            }
+            local = local.push(failed_row);
+        }
+        return with_avatar(avatar, local.into());
     };
 
     if editing.as_ref().is_some_and(|e| &e.event_id == event_id) {

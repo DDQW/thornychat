@@ -10,6 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use matrix_sdk::encryption::verification::VerificationRequest;
 use matrix_sdk::notification_settings::{
@@ -29,11 +30,23 @@ use matrix_sdk::ruma::{
     EventId, OwnedMxcUri, OwnedRoomId, OwnedServerName, OwnedUserId, RoomId, RoomOrAliasId,
     ServerName, UInt, UserId,
 };
+use matrix_sdk::send_queue::SendQueueRoomError;
 use matrix_sdk::Client;
 use matrix_sdk_ui::sync_service::{self, SyncService};
 use matrix_sdk_ui::timeline::{AttachmentSource, Timeline, TimelineEventItemId};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
+
+/// How long the error-triggered send-queue recovery (see `spawn_send_queue_recovery`)
+/// waits before re-enabling a room whose queue just disabled itself. The SDK
+/// already retries a request a few times with its own backoff before giving
+/// up and disabling the queue, so this only needs to guard against hammering
+/// a link that's still down — not implement backoff itself. The
+/// reconnect-triggered recovery (the `state_stream` arm below) covers the
+/// "whole connection dropped" case with the sync service's own backoff for
+/// free; this constant only matters for the narrower "one request timed out
+/// while sync stayed healthy" case.
+const SEND_QUEUE_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 use crate::commands::{ClientCommand, RequestId};
 use crate::events::{ClientEvent, SyncState, UserSearchResult};
@@ -120,6 +133,10 @@ async fn run(
     let _room_list_handle = room_list::spawn_forwarder(client.clone(), event_tx.clone());
     let _notification_watcher = crate::push::spawn_watcher(client.clone(), event_tx.clone());
     let call_manager = crate::calls::CallManager::spawn(client.clone(), event_tx.clone());
+    // Detached for the process lifetime, like the watchers above — but this
+    // one doesn't touch `event_tx` at all, so it has no natural shutdown
+    // signal of its own; that's fine, it just rides out with the process.
+    let _send_queue_recovery = spawn_send_queue_recovery(client.clone());
     // Rooms the worker keeps subscribed for the session flow in here: the
     // joined-space discovery below reports the spaces it finds, and `JoinRoom`
     // reports what it joins. The worker owns the single active subscription
@@ -155,6 +172,10 @@ async fn run(
         verification: None,
         pending_cross_signing_session,
     };
+    // Tracks whether the *previous* mapped state was Offline/Error, so the
+    // edge back into Syncing (not every observation of it) is what triggers
+    // send-queue recovery below — see the state_stream arm.
+    let mut was_disconnected = false;
 
     loop {
         tokio::select! {
@@ -168,6 +189,20 @@ async fn run(
                     }
                     sync_service::State::Offline => SyncState::Offline,
                 };
+                // Reconnect-triggered send-queue recovery: catches a room
+                // whose queue disabled itself because the *whole* connection
+                // dropped (as opposed to a single request timing out while
+                // sync stayed healthy — `spawn_send_queue_recovery` handles
+                // that case instead). Gated on the edge, not every `Syncing`
+                // observation, because `SendQueue::set_enabled` does an
+                // unconditional local store read on every call.
+                if matches!(mapped, SyncState::Syncing) && was_disconnected {
+                    let client = client.clone();
+                    tokio::spawn(async move {
+                        client.send_queue().set_enabled(true).await;
+                    });
+                }
+                was_disconnected = matches!(mapped, SyncState::Offline | SyncState::Error(_));
                 let _ = event_tx.send(ClientEvent::SyncStateChanged(mapped));
             }
 
@@ -212,6 +247,40 @@ async fn run(
     sync_service.stop().await;
 
     Ok(())
+}
+
+/// Error-triggered send-queue recovery: re-enables a room's send queue
+/// shortly after matrix-sdk disables it for a recoverable error (a plain
+/// request timeout, most commonly — see `ClientEvent`'s doc comment on
+/// `TimelineItem::send_failed` for the full story). Deliberately a
+/// standalone spawned loop rather than a `tokio::select!` arm on
+/// `error_rx.recv()` directly: a `Lagged` result has to `continue`, and
+/// matching only `Ok(...)` in a `select!` arm would silently stop polling
+/// this branch forever the first time that happens (the same hazard
+/// `rooms::timeline::spawn_typing_forwarder` already routes around the same
+/// way). Targets `client.get_room` rather than `worker_state.open_rooms` so
+/// it recovers a room even if the UI isn't currently looking at it.
+fn spawn_send_queue_recovery(client: Client) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut error_rx = client.send_queue().subscribe_errors();
+        loop {
+            match error_rx.recv().await {
+                Ok(SendQueueRoomError { room_id, is_recoverable: true, .. }) => {
+                    tokio::time::sleep(SEND_QUEUE_RETRY_DELAY).await;
+                    if let Some(room) = client.get_room(&room_id) {
+                        room.send_queue().set_enabled(true);
+                    }
+                }
+                // Unrecoverable ("wedged") errors need `SendHandle::unwedge()`
+                // on the specific stuck request, not a blanket re-enable —
+                // out of scope for now, see `TimelineItem::send_failed`'s doc
+                // comment for why the UI doesn't offer a Retry button here.
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
 }
 
 /// Registers handlers for both transports a verification request can
@@ -502,19 +571,21 @@ async fn handle_command(
             });
         }
 
-        ClientCommand::SendMessage { room_id, body, mentioned_user_ids, reply_to_event_id, emote, request_id } => {
+        ClientCommand::SendMessage { room_id, body, mentioned_user_ids, reply_to_event_id, emote, markdown, request_id } => {
             let Some(handles) = worker_state.open_rooms.get(&room_id) else {
                 fail(event_tx, request_id, "room is not open");
                 return;
             };
 
-            // `/me` actions ride as `m.emote`; everything else is `m.text`.
-            // Both take the same markdown body and the same mentions/reply
-            // handling below.
+            // `/me` actions ride as `m.emote`; a `/plain` send skips Markdown
+            // and posts the body verbatim; everything else is Markdown `m.text`.
+            // All take the same mentions/reply handling below.
             let mut content = if emote {
                 RoomMessageEventContent::emote_markdown(body)
-            } else {
+            } else if markdown {
                 RoomMessageEventContent::text_markdown(body)
+            } else {
+                RoomMessageEventContent::text_plain(body)
             };
             if !mentioned_user_ids.is_empty() {
                 match parse_user_ids(&mentioned_user_ids) {
@@ -722,6 +793,13 @@ async fn handle_command(
                 tokio::spawn(async move {
                     let _ = room.typing_notice(typing).await;
                 });
+            }
+        }
+
+        ClientCommand::RetrySend { room_id } => {
+            // Room-scoped and synchronous/infallible — no need to spawn.
+            if let Some(handles) = worker_state.open_rooms.get(&room_id) {
+                handles.timeline.room().send_queue().set_enabled(true);
             }
         }
 
@@ -1116,6 +1194,101 @@ async fn handle_command(
             let event_tx = event_tx.clone();
             tokio::spawn(async move {
                 match room.invite_user_by_id(&parsed_user_id).await {
+                    Ok(()) => succeed(&event_tx, request_id),
+                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
+                }
+            });
+        }
+
+        ClientCommand::KickUser { room_id, user_id, reason, request_id } => {
+            let Ok(parsed_room_id) = RoomId::parse(&room_id) else {
+                fail(event_tx, request_id, "invalid room id");
+                return;
+            };
+            let Ok(parsed_user_id) = UserId::parse(&user_id) else {
+                fail(event_tx, request_id, "invalid user id");
+                return;
+            };
+            let Some(room) = client.get_room(&parsed_room_id) else {
+                fail(event_tx, request_id, "unknown room");
+                return;
+            };
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                match room.kick_user(&parsed_user_id, reason.as_deref()).await {
+                    Ok(()) => succeed(&event_tx, request_id),
+                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
+                }
+            });
+        }
+
+        ClientCommand::BanUser { room_id, user_id, reason, request_id } => {
+            let Ok(parsed_room_id) = RoomId::parse(&room_id) else {
+                fail(event_tx, request_id, "invalid room id");
+                return;
+            };
+            let Ok(parsed_user_id) = UserId::parse(&user_id) else {
+                fail(event_tx, request_id, "invalid user id");
+                return;
+            };
+            let Some(room) = client.get_room(&parsed_room_id) else {
+                fail(event_tx, request_id, "unknown room");
+                return;
+            };
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                match room.ban_user(&parsed_user_id, reason.as_deref()).await {
+                    Ok(()) => succeed(&event_tx, request_id),
+                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
+                }
+            });
+        }
+
+        ClientCommand::UnbanUser { room_id, user_id, request_id } => {
+            let Ok(parsed_room_id) = RoomId::parse(&room_id) else {
+                fail(event_tx, request_id, "invalid room id");
+                return;
+            };
+            let Ok(parsed_user_id) = UserId::parse(&user_id) else {
+                fail(event_tx, request_id, "invalid user id");
+                return;
+            };
+            let Some(room) = client.get_room(&parsed_room_id) else {
+                fail(event_tx, request_id, "unknown room");
+                return;
+            };
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                match room.unban_user(&parsed_user_id, None).await {
+                    Ok(()) => succeed(&event_tx, request_id),
+                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
+                }
+            });
+        }
+
+        ClientCommand::SetRoomTopic { room_id, topic, request_id } => {
+            let Ok(parsed_room_id) = RoomId::parse(&room_id) else {
+                fail(event_tx, request_id, "invalid room id");
+                return;
+            };
+            let Some(room) = client.get_room(&parsed_room_id) else {
+                fail(event_tx, request_id, "unknown room");
+                return;
+            };
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                match room.set_room_topic(&topic).await {
+                    Ok(_) => succeed(&event_tx, request_id),
+                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
+                }
+            });
+        }
+
+        ClientCommand::SetDisplayName { name, request_id } => {
+            let client = client.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                match client.account().set_display_name(Some(name.as_str())).await {
                     Ok(()) => succeed(&event_tx, request_id),
                     Err(error) => fail(&event_tx, request_id, &error.to_string()),
                 }

@@ -5,6 +5,15 @@
 //! Only login/session/room-open variants are consumed by the worker today
 //! (Phase 0). The rest of the shape is sketched now so later phases extend
 //! this enum instead of redesigning the channel contract.
+//!
+//! This enum is the *engine's* view of a command: every variant already
+//! takes resolved, structured data (room ids, user ids) — nothing here parses
+//! raw text. The composer's human-typed slash-command language (`/me`,
+//! `/kick`, `/topic`, …) that maps onto `KickUser`/`BanUser`/`UnbanUser`/
+//! `SetRoomTopic`/`SetDisplayName`/`InviteUser`/`JoinRoom`/`LeaveRoom`/
+//! `SetRoomName`/`SendMessage`'s `emote`/`markdown` lives one layer up, in
+//! `ui::slash` — see `ui::slash::COMMANDS` for the canonical, single list of
+//! every recognised command.
 
 use uuid::Uuid;
 
@@ -28,8 +37,12 @@ pub enum ClientCommand {
         /// When set, sends as a rich reply quoting this event.
         reply_to_event_id: Option<String>,
         /// `true` sends an IRC-style action (`m.emote`) instead of a normal
-        /// `m.text` — the UI sets this after stripping a `/me ` prefix.
+        /// `m.text` — set for the `/me` command; see `ui::slash::parse`,
+        /// which owns the full catalog of recognised commands.
         emote: bool,
+        /// `false` sends the body verbatim as plain text (the `/plain`
+        /// command) instead of the usual Markdown render.
+        markdown: bool,
         request_id: RequestId,
     },
     EditMessage { room_id: String, event_id: String, new_body: String, request_id: RequestId },
@@ -65,6 +78,12 @@ pub enum ClientCommand {
     },
     ToggleReaction { room_id: String, event_id: String, key: String, request_id: RequestId },
     SetTyping { room_id: String, typing: bool },
+    /// Re-enable this room's send queue after a recoverable send failure
+    /// (see `TimelineItem::send_failed`) — matrix-sdk auto-disables it and
+    /// expects the app to resume it manually once the user believes the
+    /// problem has passed. No `request_id`: the SDK call this triggers can't
+    /// fail, so there's nothing to report back.
+    RetrySend { room_id: String },
     /// Marks the room as read up to its latest event. `public_receipt`
     /// chooses the receipt kind: `true` sends the federated public read
     /// receipt (`m.read`, others can see it); `false` (privacy mode) sends
@@ -158,6 +177,17 @@ pub enum ClientCommand {
     /// for the join handshake (a space-hierarchy listing provides them) —
     /// needed for rooms our homeserver isn't in yet, harmless otherwise.
     JoinRoom { room_id_or_alias: String, via: Vec<String>, request_id: RequestId },
+
+    /// Kick a user from a room (they can rejoin). `reason` is optional.
+    KickUser { room_id: String, user_id: String, reason: Option<String>, request_id: RequestId },
+    /// Ban a user from a room (they can't rejoin until unbanned).
+    BanUser { room_id: String, user_id: String, reason: Option<String>, request_id: RequestId },
+    /// Lift a ban so the user can rejoin.
+    UnbanUser { room_id: String, user_id: String, request_id: RequestId },
+    /// Set a room's `m.room.topic`.
+    SetRoomTopic { room_id: String, topic: String, request_id: RequestId },
+    /// Set your own global profile display name (applies across all rooms).
+    SetDisplayName { name: String, request_id: RequestId },
 
     // --- Phase 6: spaces ---
     /// Fetch one page of a space's *direct* children via the

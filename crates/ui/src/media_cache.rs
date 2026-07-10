@@ -42,6 +42,15 @@ pub struct State {
     /// matching `MediaFetched` lands, the bytes go to a save dialog instead of
     /// the display caches.
     pub download_requests: HashSet<RequestId>,
+    /// Super-resolved versions of open lightbox images, keyed by mxc URL. The
+    /// widget draws this in preference to `images` once it exists, so a
+    /// zoomed-in picture gets sharper. These buffers are large (see
+    /// `upscale::MAX_OUTPUT_EDGE`), so the map is cleared when the lightbox
+    /// closes — at most one image is ever open.
+    pub upscaled: HashMap<String, image::Handle>,
+    /// mxc URLs whose super-resolution pass is running, so the trigger fires
+    /// once and the view can show an "Enhancing…" hint.
+    pub upscale_pending: HashSet<String>,
 
     pub emoji: HashMap<String, svg::Handle>,
     pub emoji_pending: HashSet<String>,

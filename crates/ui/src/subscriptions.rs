@@ -48,12 +48,23 @@ pub fn subscription(app: &App) -> Subscription<Message> {
     } else {
         Subscription::none()
     };
+    // Poll the enabled game-launcher connectors on a timer and announce what
+    // you're playing when it changes (see `crate::connectors`). Off entirely
+    // when no launcher is enabled — a fresh install does no polling.
+    let connectors = if app.connectors.any_enabled() {
+        let secs =
+            app.connectors.poll_interval_secs.max(crate::connectors_config::MIN_POLL_INTERVAL_SECS);
+        iced::time::every(std::time::Duration::from_secs(secs)).map(|_| Message::PollConnectors)
+    } else {
+        Subscription::none()
+    };
     Subscription::batch([
         client_events,
         iced::event::listen_with(window_events),
         settings_resize,
         autoscroll,
         video_focus,
+        connectors,
     ])
 }
 
