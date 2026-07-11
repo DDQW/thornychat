@@ -2142,9 +2142,9 @@ fn render_item<'a>(
         }
     };
 
-    // Sender names are colored by the sender's power-level group — the server's
-    // "Red team", "Purple team", "Founder", … the MSC3949 tag colors Cinny
-    // renders — resolved from the roster's power level. Falls back to a
+    // Sender names are colored by the sender's power-level group — the
+    // server's MSC3949 tags ("Founder", "Moderator", …) with the colors
+    // Cinny renders — resolved from the roster's power level. Falls back to a
     // stable per-user hash color when the sender has no colored tag (or the
     // room defines none), which is also what Cinny does for untagged users.
     let name_color = member_by_id(members, member_index, &item.sender)
@@ -2511,8 +2511,8 @@ fn colored_text(color: iced::Color) -> impl Fn(&iced::Theme) -> text::Style {
 /// Parse a CSS-style hex color (`#rgb`, `#rrggbb`, or `#rrggbbaa`) into an
 /// iced [`Color`](iced::Color). Returns `None` for anything malformed so
 /// callers fall back to the hash palette rather than rendering a wrong or
-/// invisible color. the server's tags use `#rrggbb`, but the others are cheap to
-/// accept and match what any web/Cinny-authored value could carry.
+/// invisible color. Tags in the wild use `#rrggbb`, but the others are cheap
+/// to accept and match what any web/Cinny-authored value could carry.
 fn parse_hex_color(hex: &str) -> Option<iced::Color> {
     let hex = hex.trim().strip_prefix('#')?;
     // Guard char-boundary slicing below: a stray multibyte char would panic.
