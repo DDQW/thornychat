@@ -3,8 +3,9 @@
 //! including rooms the account hasn't joined. Subspaces drill down one
 //! level at a time onto a stack (Back pops, already-fetched levels reshow
 //! instantly); joined rooms open in the timeline; unjoined public or
-//! restricted ones offer Join. Knock/invite-only rooms are listed but
-//! labeled — no knock flow yet.
+//! restricted ones offer Join, knock-rule ones offer Request to join
+//! (entry then arrives via sync if a moderator accepts); invite-only rooms
+//! are listed but labeled.
 
 use std::collections::HashSet;
 
@@ -55,6 +56,16 @@ pub struct State {
     /// The last failed join: (room id, error), rendered inside that room's
     /// row. Cleared when another join starts.
     pub join_error: Option<(String, String)>,
+    /// The in-flight knock, if any: (request, room it was for) — the
+    /// knock-side mirror of `pending_join`.
+    pub pending_knock: Option<(RequestId, String)>,
+    /// Rooms knocked on from this overlay — flips their rows to
+    /// "Requested" for the rest of the session (actually entering happens
+    /// whenever a moderator accepts, via sync).
+    pub requested: HashSet<String>,
+    /// The last failed knock: (room id, error), rendered inside that
+    /// room's row. Cleared when another knock starts.
+    pub knock_error: Option<(String, String)>,
 }
 
 impl State {
@@ -66,6 +77,9 @@ impl State {
             pending_join: None,
             joined: HashSet::new(),
             join_error: None,
+            pending_knock: None,
+            requested: HashSet::new(),
+            knock_error: None,
         }
     }
 
@@ -91,9 +105,9 @@ impl State {
         }
     }
 
-    /// Claims a correlated command success (a join finishing). Returns
-    /// false when the request wasn't the explorer's, so the caller keeps
-    /// routing it elsewhere.
+    /// Claims a correlated command success (a join or knock finishing).
+    /// Returns false when the request wasn't the explorer's, so the caller
+    /// keeps routing it elsewhere.
     pub fn handle_success(&mut self, request_id: RequestId) -> bool {
         if self.pending_join.as_ref().is_some_and(|(id, _)| *id == request_id) {
             if let Some((_, room_id)) = self.pending_join.take() {
@@ -101,15 +115,27 @@ impl State {
             }
             return true;
         }
+        if self.pending_knock.as_ref().is_some_and(|(id, _)| *id == request_id) {
+            if let Some((_, room_id)) = self.pending_knock.take() {
+                self.requested.insert(room_id);
+            }
+            return true;
+        }
         false
     }
 
-    /// Claims a correlated command failure (a join or a page fetch).
-    /// Returns false when the request wasn't the explorer's.
+    /// Claims a correlated command failure (a join, a knock, or a page
+    /// fetch). Returns false when the request wasn't the explorer's.
     pub fn handle_failure(&mut self, request_id: RequestId, error: &str) -> bool {
         if self.pending_join.as_ref().is_some_and(|(id, _)| *id == request_id) {
             if let Some((_, room_id)) = self.pending_join.take() {
                 self.join_error = Some((room_id, error.to_string()));
+            }
+            return true;
+        }
+        if self.pending_knock.as_ref().is_some_and(|(id, _)| *id == request_id) {
+            if let Some((_, room_id)) = self.pending_knock.take() {
+                self.knock_error = Some((room_id, error.to_string()));
             }
             return true;
         }
@@ -133,6 +159,8 @@ pub enum Message {
     EnterSpace { space_id: String, name: String },
     /// Join an unjoined child (room or subspace).
     Join { room_id: String, via: Vec<String> },
+    /// Ask to join a knock-rule child.
+    Knock { room_id: String, via: Vec<String> },
     /// Open an already-joined room in the timeline (closes the overlay).
     Open(String),
     /// Fetch the next page of the current level.
@@ -300,11 +328,23 @@ fn child_row<'a>(
             info = info.push(text(format!("Join failed: {error}")).size(11).style(text::danger));
         }
     }
+    if let Some((failed_room, error)) = &state.knock_error {
+        if failed_room == &child.room_id {
+            info =
+                info.push(text(format!("Request failed: {error}")).size(11).style(text::danger));
+        }
+    }
 
+    let knock_pending =
+        state.pending_knock.as_ref().is_some_and(|(_, id)| id == &child.room_id);
     let trailing: Element<'a, Message> = if join_pending {
         text("Joining...").size(11).style(text::secondary).into()
+    } else if knock_pending {
+        text("Requesting...").size(11).style(text::secondary).into()
     } else if joined {
         text("Joined").size(11).style(text::secondary).into()
+    } else if state.requested.contains(&child.room_id) {
+        text("Requested ✓").size(11).style(text::secondary).into()
     } else {
         match child.join_rule {
             SpaceJoinRule::Public | SpaceJoinRule::Restricted => {
@@ -320,7 +360,20 @@ fn child_row<'a>(
                     join.into()
                 }
             }
-            SpaceJoinRule::Knock => text("By request").size(11).style(text::secondary).into(),
+            SpaceJoinRule::Knock => {
+                let knock = button(text("Request to join").size(12)).padding([4, 12]);
+                // Inert while another knock is running, same as Join.
+                if state.pending_knock.is_none() {
+                    knock
+                        .on_press(Message::Knock {
+                            room_id: child.room_id.clone(),
+                            via: child.via.clone(),
+                        })
+                        .into()
+                } else {
+                    knock.into()
+                }
+            }
             SpaceJoinRule::InviteOnly => {
                 text("Invite only").size(11).style(text::secondary).into()
             }

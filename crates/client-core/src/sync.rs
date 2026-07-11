@@ -1409,6 +1409,30 @@ async fn handle_command(
             });
         }
 
+        ClientCommand::KnockRoom { room_id_or_alias, via, request_id } => {
+            let Ok(alias) = RoomOrAliasId::parse(&room_id_or_alias) else {
+                fail(event_tx, request_id, "invalid room id or alias");
+                return;
+            };
+            // Unparseable via entries are dropped rather than failing the
+            // knock — they're only routing hints (same as JoinRoom).
+            let via: Vec<OwnedServerName> =
+                via.iter().filter_map(|s| ServerName::parse(s).ok()).collect();
+            let client = client.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                // No reason attached: moderators see who's asking either
+                // way, and prompting for prose is friction the flow doesn't
+                // need. Nothing to pin or sweep on success either — unlike a
+                // join, a knock doesn't put us in the room; if a moderator
+                // accepts, the join arrives through sync like any other.
+                match client.knock(alias, None, via).await {
+                    Ok(_) => succeed(&event_tx, request_id),
+                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
+                }
+            });
+        }
+
         other => {
             tracing::debug!(?other, "command not yet implemented");
         }

@@ -26,6 +26,9 @@ pub enum Parsed {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Join(String),
+    /// Ask to join a knock-rule room (sends the knock; entry happens if a
+    /// moderator accepts).
+    Knock(String),
     Leave,
     Invite(String),
     Dm(String),
@@ -68,6 +71,7 @@ pub struct CommandSpec {
 const USAGE_ME: &str = "Usage: /me <action>";
 const USAGE_PLAIN: &str = "Usage: /plain <message>";
 const USAGE_JOIN: &str = "Usage: /join <#room:server or !roomid:server>";
+const USAGE_KNOCK: &str = "Usage: /knock <#room:server or !roomid:server>";
 const USAGE_ROOMNAME: &str = "Usage: /roomname <new name>";
 const USAGE_TOPIC: &str = "Usage: /topic <text>";
 const USAGE_INVITE: &str = "Usage: /invite <@user:server>";
@@ -130,6 +134,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &["j"],
         usage: Some(USAGE_JOIN),
         description: "Join a room by alias or id.",
+        category: CommandCategory::Rooms,
+    },
+    CommandSpec {
+        name: "knock",
+        aliases: &[],
+        usage: Some(USAGE_KNOCK),
+        description: "Ask to join a knock-rule room; you enter if a moderator accepts.",
         category: CommandCategory::Rooms,
     },
     CommandSpec {
@@ -231,6 +242,10 @@ pub fn parse(input: &str) -> Parsed {
         // --- rooms ---
         "join" | "j" => match require_room(args, USAGE_JOIN) {
             Ok(r) => Parsed::Action(Action::Join(r)),
+            Err(e) => e,
+        },
+        "knock" => match require_room(args, USAGE_KNOCK) {
+            Ok(r) => Parsed::Action(Action::Knock(r)),
             Err(e) => e,
         },
         "leave" | "part" => Parsed::Action(Action::Leave),
@@ -398,6 +413,7 @@ mod tests {
     #[test]
     fn room_and_people_actions() {
         assert_eq!(parse("/join #a:b.com"), Parsed::Action(Action::Join("#a:b.com".into())));
+        assert_eq!(parse("/knock #a:b.com"), Parsed::Action(Action::Knock("#a:b.com".into())));
         assert_eq!(parse("/leave"), Parsed::Action(Action::Leave));
         assert_eq!(parse("/invite @u:b.com"), Parsed::Action(Action::Invite("@u:b.com".into())));
         assert_eq!(parse("/dm @u:b.com"), Parsed::Action(Action::Dm("@u:b.com".into())));
@@ -420,6 +436,7 @@ mod tests {
         assert!(matches!(parse("/kick"), Parsed::Error(_)));
         assert!(matches!(parse("/kick notauser"), Parsed::Error(_)));
         assert!(matches!(parse("/join notaroom"), Parsed::Error(_)));
+        assert!(matches!(parse("/knock notaroom"), Parsed::Error(_)));
     }
 
     #[test]

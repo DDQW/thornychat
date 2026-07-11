@@ -177,6 +177,10 @@ pub enum ClientCommand {
     /// for the join handshake (a space-hierarchy listing provides them) —
     /// needed for rooms our homeserver isn't in yet, harmless otherwise.
     JoinRoom { room_id_or_alias: String, via: Vec<String>, request_id: RequestId },
+    /// Ask to join a knock-rule room (MSC2403). The correlated success only
+    /// means the request went out — actually entering happens if and when a
+    /// moderator accepts, and arrives through sync like any other join.
+    KnockRoom { room_id_or_alias: String, via: Vec<String>, request_id: RequestId },
 
     /// Kick a user from a room (they can rejoin). `reason` is optional.
     KickUser { room_id: String, user_id: String, reason: Option<String>, request_id: RequestId },

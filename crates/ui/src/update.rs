@@ -737,6 +737,19 @@ fn update_space_explorer(app: &mut App, msg: screens::space_explorer::Message) -
             send_cmd(app, ClientCommand::JoinRoom { room_id_or_alias: room_id, via, request_id });
             Task::none()
         }
+        Msg::Knock { room_id, via } => {
+            let request_id = Uuid::new_v4();
+            let Some(explorer) = &mut app.space_explorer else { return Task::none() };
+            // One knock at a time, same as joins — buttons render inert
+            // while one is pending, but a stale press could still race in.
+            if explorer.pending_knock.is_some() {
+                return Task::none();
+            }
+            explorer.pending_knock = Some((request_id, room_id.clone()));
+            explorer.knock_error = None;
+            send_cmd(app, ClientCommand::KnockRoom { room_id_or_alias: room_id, via, request_id });
+            Task::none()
+        }
         Msg::Open(room_id) => {
             app.space_explorer = None;
             select_room(app, room_id)
@@ -1356,6 +1369,9 @@ fn send_message(
             let command = match action {
                 Action::Join(room) => {
                     ClientCommand::JoinRoom { room_id_or_alias: room, via: Vec::new(), request_id }
+                }
+                Action::Knock(room) => {
+                    ClientCommand::KnockRoom { room_id_or_alias: room, via: Vec::new(), request_id }
                 }
                 Action::Leave => ClientCommand::LeaveRoom { room_id, request_id },
                 Action::Invite(user) => ClientCommand::InviteUser { room_id, user_id: user, request_id },
