@@ -251,6 +251,10 @@ pub struct TimelineItem {
     pub read_by: Vec<String>,
     /// Set when this message is a rich reply — who/what it quotes.
     pub in_reply_to: Option<ReplyPreview>,
+    /// This message has been edited (an `m.replace` aggregation was applied
+    /// by matrix-sdk-ui) — the UI appends a subdued "(edited)" tag. Always
+    /// `false` for non-message items.
+    pub edited: bool,
     /// Set when this is a local echo whose send attempt failed (mirrors
     /// matrix-sdk-ui's `EventSendState::SendingFailed`). `None` covers both
     /// a normally-sent message and a local echo still in flight — only a

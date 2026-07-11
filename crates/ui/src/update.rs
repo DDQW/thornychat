@@ -2707,6 +2707,7 @@ mod tests {
             thread_reply_count: None,
             read_by: Vec::new(),
             in_reply_to: None,
+            edited: false,
             send_failed: None,
         }
     }

@@ -2146,6 +2146,19 @@ fn render_item<'a>(
         }
     };
 
+    // An edit replaces the body in place (m.replace aggregation), so this
+    // subdued tag is the only visible trace a message was changed. Wrapping
+    // here (not per content kind) covers text, emotes, and captioned media
+    // alike; the emote row below nests it along with the action text.
+    let body_line: Element<'a, Message> = if item.edited {
+        row![body_line, text("(edited)").size(11).style(text::secondary)]
+            .spacing(6)
+            .align_y(iced::Bottom)
+            .into()
+    } else {
+        body_line
+    };
+
     // Sender names are colored by the sender's power-level group — the
     // server's MSC3949 tags ("Founder", "Moderator", …) with the colors
     // Cinny renders — resolved from the roster's power level. Falls back to a

@@ -338,6 +338,7 @@ fn convert_item(item: &SdkTimelineItem, own_user_id: Option<&UserId>) -> Option<
                 thread_reply_count,
                 read_by: event.read_receipts().keys().map(|id| id.to_string()).collect(),
                 in_reply_to,
+                edited: content_is_edited(event.content()),
                 send_failed: event.send_state().and_then(|state| match state {
                     EventSendState::SendingFailed { error, is_recoverable } => {
                         Some(SendFailure { is_recoverable: *is_recoverable, error: error.to_string() })
@@ -370,7 +371,21 @@ fn virtual_item(content: TimelineItemContent, timestamp_ms: u64) -> TimelineItem
         thread_reply_count: None,
         read_by: Vec::new(),
         in_reply_to: None,
+        edited: false,
         send_failed: None,
+    }
+}
+
+/// Whether an `m.replace` aggregation has been applied to this content.
+/// Only real messages can carry the flag — stickers, polls, and state
+/// events never show an "(edited)" tag here.
+fn content_is_edited(content: &SdkTimelineItemContent) -> bool {
+    match content {
+        SdkTimelineItemContent::MsgLike(msg_like) => match &msg_like.kind {
+            MsgLikeKind::Message(message) => message.is_edited(),
+            _ => false,
+        },
+        _ => false,
     }
 }
 
