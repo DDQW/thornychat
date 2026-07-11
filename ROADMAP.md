@@ -18,19 +18,19 @@ see README "Building").
 - Rooms: room list (DM/room sections, filter, unread badges, computed display
   names, avatars); spaces sidebar section w/ joined rooms nested under their
   parent space; space-explorer overlay (hierarchy API, drill-down w/ back
-  stack, join w/ via servers); leave/forget; user-directory DM search; local
-  message/room search.
+  stack, join w/ via servers, knock w/ Requested state on knock-rule rooms);
+  leave/forget; user-directory DM search; local message/room search.
 - Timeline: pagination + scroll autoload, bottom anchoring, day/new-message
   dividers, IRC-style read receipts (marked read only while scrolled to the
   newest message, focus-independent), message grouping, hover action bar,
   jump-to-latest, membership events (toggleable), hash-palette name colors,
-  timestamps.
+  timestamps, "(edited)" tags on edited messages.
 - Composer: markdown + preview, @mention pills, attachments + paste-to-attach
   chips (typed text becomes the MSC2530 caption), drag-and-drop, edit/redact,
   typing, reply/quote w/ jump-to-quoted + thumbnails, send retry, slash
-  commands (`/me`, `/plain`, `/join`, `/leave`|`/part`, `/invite`, `/kick`,
-  `/ban`; `//` escapes) + in-app manual, right-click cut/copy/paste menu,
-  Windows ISpellChecker suggestion bar w/ opt-in autocorrect.
+  commands (`/me`, `/plain`, `/join`, `/knock`, `/leave`|`/part`, `/invite`,
+  `/kick`, `/ban`; `//` escapes) + in-app manual, right-click cut/copy/paste
+  menu, Windows ISpellChecker suggestion bar w/ opt-in autocorrect.
 - E2EE: cross-signing bootstrap w/ UIAA fallback, SAS verify, opt-in key
   backup/recovery (Settings → Security), trust shields.
 - Media & rich content: reactions (no-bg pills, hover attribution, full
@@ -41,16 +41,21 @@ see README "Building").
   for YouTube/Vimeo/Dailymotion/Rumble/Kick (live channels only, no VOD/clip
   embed) and direct video files, hosted in a WebView2 child window; image
   lightbox w/ cursor-anchored zoom, Lanczos3 upscale past ~300% native
-  (Real-ESRGAN evaluated and rejected — hallucinates detail), save-to-disk.
+  (Real-ESRGAN evaluated and rejected — hallucinates detail), save-to-disk;
+  file messages click-to-save w/ the real filename suggested; media/emoji
+  disk caches capped (512 MB/64 MB, oldest evicted at startup, unit-tested).
 - Settings & platform: per-room notification modes + account-wide DM/group
   defaults (synced both ways); member panel grouped by MSC3949 power tags w/
-  click-to-DM; theming engine (custom themes, dark/light); persisted config
-  files (theme/chat/privacy/spellcheck/encryption/connectors); autostart
-  (HKCU Run + `--minimized`); app icon + version resource embedded;
-  game-activity connectors (Steam/GOG/Epic → `m.emote` when the running
-  game changes).
+  click-to-DM, visibility persisted; theming engine (custom themes,
+  dark/light); persisted config files
+  (theme/chat/privacy/spellcheck/encryption/connectors/window); window
+  size/position/maximized remembered across launches (debounced save,
+  off-screen restore guard); autostart (HKCU Run + `--minimized`); app icon
+  + version resource embedded; game-activity connectors (Steam/GOG/Epic →
+  `m.emote` when the running game changes).
 - Repo: public, GPL-3.0-or-later, README + CONTRIBUTING; `cargo xtask`
-  release pipeline.
+  release pipeline; GitHub Actions CI on Windows (check + clippy w/
+  `-D warnings` + tests).
 
 ## Phase 5 — Calls (native WebRTC / MatrixRTC) [highest risk]
 
@@ -84,7 +89,8 @@ Remaining (media):
 ## Phase 6 — Admin, spaces, room management
 
 Done: space explorer + sidebar nesting (via `space_children`); join by typed
-id/alias, invite, kick, and ban all work as slash commands; leave/forget.
+id/alias, invite, kick, and ban all work as slash commands; leave/forget;
+knock flow (explorer "Request to join" button + `/knock`).
 
 Remaining:
 - Room settings dialog: name/topic/avatar, join rules, history visibility,
@@ -93,12 +99,14 @@ Remaining:
   per-member profile popover (avatar, id, PL) instead of click=DM only —
   invite/kick/ban currently have no buttons, only slash commands.
 - Room creation wizard; invite accept/reject with room preview.
-- Knock flow (space explorer lists knock rooms as "By request", no button).
 
 ## Phase 7 — Windows platform polish & packaging
 
 Done: autostart (HKCU Run + `--minimized`, toggled from Settings); icon +
-version resource embedded via `app.rc`/`embed-resource`.
+version resource embedded via `app.rc`/`embed-resource`; window
+size/position/maximized remembered across launches. (System accent color
+via `UISettings` was considered and dropped — the theming engine's custom
+accents cover it.)
 
 Remaining:
 - Push-rule evaluation → `ClientEvent::Notification` (client-core `push.rs`
@@ -109,9 +117,6 @@ Remaining:
   validate early, affects packaging.
 - Tray icon w/ unread badge, minimize-to-tray, single-instance enforcement
   (`platform/tray.rs` is a stub).
-- Remember window size/position.
-- System accent color via `UISettings` — possibly moot now that the theming
-  engine ships custom accents; decide before building.
 - MSIX packaging (primary) + NSIS/WiX installer fallback.
 
 ## Backlog / known gaps (roughly by value)
@@ -119,24 +124,19 @@ Remaining:
 - Threads: only reply-count badges; no thread panel view.
 - Encrypted-room media: images/files/stickers degrade to text placeholder
   (`MediaSource::Encrypted` unsupported in the media cache path).
-- File messages: "[file: name]" text only — no download/save/open (the
-  lightbox can save images; nothing handles non-image files).
 - HTML `formatted_body` not rendered (plain body only): no mention pills,
-  colored text, spoilers, code blocks from other clients; no "(edited)" tag.
+  colored text, spoilers, code blocks from other clients.
 - Polls render as placeholders.
 - Server-side `/search` (local filter + user-directory DM search only).
 - Animated WebP/APNG emotes render as stills (`animated_image` is GIF-only).
 - Timeline virtualization (diffs stream now, but every row still renders;
   watch big rooms + many GIFs).
-- Media/emoji disk caches have no eviction.
-- Member-panel visibility isn't persisted (unlike the config-file prefs).
 - Round avatar clipping (iced can't clip images; would need CPU pre-rounding).
 - Jump-to-quote scroll is index-estimated, not pixel-exact.
 - Connectors: "now playing" media source (Windows media-transport API) to
   sit beside game detection.
-- Repo hygiene: no CI; slash parsing + timeline diffs have unit tests, but
-  the planned wiremock-based client-core suite and update() logic tests
-  don't exist yet.
+- Repo hygiene: CI runs check/clippy/test, but the planned wiremock-based
+  client-core suite and update() logic tests don't exist yet.
 
 ## Development notes
 
