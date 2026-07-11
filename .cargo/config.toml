@@ -1,2 +1,6 @@
 [build]
 target = "x86_64-pc-windows-msvc"
+
+[alias]
+# The three-variant release build (generic + znver4 + znver5), see crates/xtask.
+xtask = "run -p xtask --"

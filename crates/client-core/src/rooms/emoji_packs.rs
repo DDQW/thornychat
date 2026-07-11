@@ -7,16 +7,18 @@
 //!
 //! Resolves three sources, matching how Element-family clients expose
 //! custom emoji: the account's personal pack (`im.ponies.user_emotes`),
-//! packs explicitly enabled via `im.ponies.emote_rooms`, and the
-//! currently-open room's own default pack (`im.ponies.room_emotes` with an
-//! empty state key — usable by anyone in the room without opting in).
+//! packs explicitly enabled via `im.ponies.emote_rooms`, and every one of
+//! the currently-open room's own packs (`im.ponies.room_emotes` under ANY
+//! state key — usable by anyone in the room without opting in; Cinny
+//! creates packs under named state keys, so probing only the `""` default
+//! misses rooms that plainly have packs).
 //!
 //! Every step logs at debug/warn so a run's log file shows exactly where
 //! a homeserver's pack setup diverges from what this expects.
 
 use std::collections::BTreeMap;
 
-use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
+use matrix_sdk::ruma::api::client::state::{get_state_event_for_key, get_state_events};
 use matrix_sdk::ruma::events::{GlobalAccountDataEventType, StateEventType};
 use matrix_sdk::{Client, Room};
 use serde::Deserialize;
@@ -244,6 +246,72 @@ pub async fn fetch_room_pack(room: &Room, state_key: &str) -> Result<Option<Emoj
     Ok(pack_content_to_emoji_pack(fallback_name, content))
 }
 
+/// Every `im.ponies.room_emotes` pack in the room, across ALL state keys.
+/// MSC2545 allows a room any number of packs, one per state key, all usable
+/// by any member without opting in — and Cinny files them under named state
+/// keys, so the `""` default probed previously usually doesn't exist even
+/// when the room plainly has packs (observed live: both HQ packs sit under
+/// named keys while `/state/im.ponies.room_emotes/` 404s).
+///
+/// The C-S spec has no "all state keys of one type" endpoint, so this pulls
+/// the full room state (member events included — the price of completeness,
+/// paid once per room open like the rest of `fetch_all`) and filters by
+/// type. `Err(())` = transport failure; per-event deserialize failures are
+/// persistent data problems and just skip that pack.
+pub async fn fetch_room_packs(room: &Room) -> Result<Vec<EmojiPack>, ()> {
+    let request = get_state_events::v3::Request::new(room.room_id().to_owned());
+    let response = match room.client().send(request).await {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(room_id = %room.room_id(), %error, "failed to fetch room state for emoji packs");
+            return Err(());
+        }
+    };
+
+    let mut packs = Vec::new();
+    for raw in &response.room_state {
+        match raw.get_field::<String>("type") {
+            Ok(Some(event_type)) if event_type == "im.ponies.room_emotes" => {}
+            _ => continue,
+        }
+        let state_key =
+            raw.get_field::<String>("state_key").ok().flatten().unwrap_or_default();
+        let content = match raw.get_field::<PackContent>("content") {
+            Ok(Some(content)) => content,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    room_id = %room.room_id(),
+                    state_key,
+                    %error,
+                    "failed to deserialize im.ponies.room_emotes content"
+                );
+                continue;
+            }
+        };
+        // Nameless packs: the room name reads better than an empty string
+        // for the default pack; a named state key is itself descriptive.
+        let fallback_name = if state_key.is_empty() {
+            room.name().unwrap_or_else(|| room.room_id().to_string())
+        } else {
+            state_key.clone()
+        };
+        if let Some(pack) = pack_content_to_emoji_pack(fallback_name, content) {
+            packs.push(pack);
+        }
+    }
+    // Server-defined state order isn't stable; sorted packs keep the picker
+    // sections and first-wins shortcode collisions deterministic.
+    packs.sort_by(|a, b| a.name.cmp(&b.name));
+    tracing::debug!(
+        room_id = %room.room_id(),
+        state_events = response.room_state.len(),
+        packs = packs.len(),
+        "scanned full room state for emoji packs"
+    );
+    Ok(packs)
+}
+
 /// Every pack this account can currently use, or `None` if any source
 /// failed for transport reasons — the caller should then keep whatever pack
 /// set it already has rather than wiping custom emoji over a network blip.
@@ -256,8 +324,11 @@ pub async fn fetch_all(client: &Client, current_room: Option<&Room>) -> Option<V
     packs.extend(fetch_enabled_room_packs(client).await.ok()?);
 
     if let Some(room) = current_room {
-        tracing::debug!(room_id = %room.room_id(), "checking room's own default emoji pack");
-        if let Some(pack) = fetch_room_pack(room, "").await.ok()? {
+        tracing::debug!(room_id = %room.room_id(), "checking room's own emoji packs");
+        for pack in fetch_room_packs(room).await.ok()? {
+            // Rooms already enabled via `im.ponies.emote_rooms` show up a
+            // second time here when they're the open room — same dedup as
+            // before, first (enabled) copy wins.
             if !packs.iter().any(|p| p.name == pack.name) {
                 packs.push(pack);
             }

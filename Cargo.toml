@@ -4,6 +4,15 @@ members = [
     "crates/client-core",
     "crates/ui",
     "crates/app",
+    "crates/xtask",
+]
+# Keep xtask out of bare `cargo build/check/clippy`: the generic release build
+# stays identical to a plain `cargo build --release`, and the child cargo that
+# `cargo xtask` spawns never tries to relink the xtask exe it's running from.
+default-members = [
+    "crates/client-core",
+    "crates/ui",
+    "crates/app",
 ]
 
 [workspace.package]

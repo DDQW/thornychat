@@ -50,10 +50,10 @@ cargo build          # debug
 cargo run
 ```
 
-For release binaries, use the release script instead of a bare `cargo build --release`:
+For release binaries, use the release script (itself Rust — `crates/xtask`) instead of a bare `cargo build --release`:
 
 ```
-powershell -File scripts/build-zen-release.ps1
+cargo xtask
 ```
 
 It produces three variants, each in its own `target/` subdirectory:
@@ -75,6 +75,7 @@ Session data, media caches, and logs live under `%APPDATA%\ThornyChat\ThornyChat
 - `crates/client-core` — matrix-sdk wrapper: session, sync worker, per-room timelines. No iced dependency.
 - `crates/ui` — every iced view and widget. Talks to the core only through plain command/event types, never `matrix_sdk` types.
 - `crates/app` — thin binary: tokio runtime bootstrap plus the iced entrypoint.
+- `crates/xtask` — the three-variant release build script behind `cargo xtask`.
 
 ## License
 

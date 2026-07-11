@@ -66,9 +66,9 @@ pub enum ClientEvent {
     // --- Phase 4: custom emoji, media ---
     /// Every custom emoji pack this account can currently use: the
     /// personal pack (`im.ponies.user_emotes`), any packs explicitly
-    /// enabled via `im.ponies.emote_rooms`, and the currently-open room's
-    /// own default pack (`im.ponies.room_emotes` with an empty state key)
-    /// if it has one. Refetched whenever a room is opened.
+    /// enabled via `im.ponies.emote_rooms`, and all of the currently-open
+    /// room's own packs (`im.ponies.room_emotes` under every state key).
+    /// Refetched whenever a room is opened.
     CustomEmojiPacksUpdated(Vec<EmojiPack>),
     MediaFetched { request_id: RequestId, bytes: Vec<u8> },
     MediaFetchFailed { request_id: RequestId, reason: String },
