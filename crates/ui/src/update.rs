@@ -437,14 +437,66 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 None => Task::none(),
             })
         }
-        Message::WindowResized(_) => {
+        Message::WindowResized(size) => {
             // Text rewraps to the new width — every row's on-screen position
             // changes legitimately, so the scroll anchor's stored geometry
             // is meaningless until the next scroll re-learns it. (The inline
             // video player reglues itself through the probe this message
             // triggers, like any other reflow.)
             app.timeline.scroll_anchor = None;
-            Task::none()
+            // Minimizing reports a degenerate frame — never remember one.
+            if size.width >= 200.0 && size.height >= 150.0 {
+                app.pending_window_size = Some(size);
+                schedule_window_save(app)
+            } else {
+                Task::none()
+            }
+        }
+        Message::WindowMoved(position) => {
+            // ~−32000 is Win32's minimized-window parking spot, not a place
+            // the window was dragged to.
+            if position.x > -30000.0 && position.y > -30000.0 {
+                app.pending_window_position = Some(position);
+                schedule_window_save(app)
+            } else {
+                Task::none()
+            }
+        }
+        Message::PersistWindowGeometry => {
+            app.window_save_scheduled = false;
+            // Whether the window is maximized decides what the buffered
+            // frame means, so probe that first.
+            iced::window::latest()
+                .then(|maybe_id| match maybe_id {
+                    Some(id) => iced::window::is_maximized(id),
+                    None => Task::done(false),
+                })
+                .map(Message::WindowGeometryProbed)
+        }
+        Message::WindowGeometryProbed(maximized) => {
+            // A maximize fires Moved/Resized like any drag, but those report
+            // the maximized frame — adopting it would clobber the remembered
+            // normal geometry the window should unmaximize back to. Only
+            // normal-state values graduate from the pending buffer.
+            if maximized {
+                app.pending_window_size = None;
+                app.pending_window_position = None;
+            } else {
+                if let Some(size) = app.pending_window_size.take() {
+                    app.window_config.width = size.width;
+                    app.window_config.height = size.height;
+                }
+                if let Some(position) = app.pending_window_position.take() {
+                    app.window_config.x = Some(position.x);
+                    app.window_config.y = Some(position.y);
+                }
+            }
+            app.window_config.maximized = maximized;
+            let config = app.window_config;
+            Task::future(async move {
+                config.save().await;
+                Message::Noop
+            })
         }
         Message::CursorMoved(position) => {
             // Cheap: just remember where the pointer is, so a right-click menu
@@ -1438,6 +1490,21 @@ fn persist_last_room(profile: &str, room_id: &str) -> Task<Message> {
         }
         let _ = tokio::fs::write(path, contents).await;
         Message::Noop
+    })
+}
+
+/// Arms the debounced window-geometry save: one second after the last
+/// move/resize of a burst, `PersistWindowGeometry` probes the maximized
+/// state and writes `window.json`. One timer per burst — the same
+/// coalescing idea as `FlushStagedMedia`, stretched to a drag's timescale.
+fn schedule_window_save(app: &mut App) -> Task<Message> {
+    if app.window_save_scheduled {
+        return Task::none();
+    }
+    app.window_save_scheduled = true;
+    Task::future(async {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        Message::PersistWindowGeometry
     })
 }
 

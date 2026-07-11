@@ -122,6 +122,9 @@ fn window_events(
         iced::Event::Window(iced::window::Event::Resized(size)) => {
             Some(Message::WindowResized(size))
         }
+        iced::Event::Window(iced::window::Event::Moved(position)) => {
+            Some(Message::WindowMoved(position))
+        }
         // Window-global cursor position, so a right-click menu can open at the
         // pointer: `mouse_area::on_right_press` carries no coordinates and
         // `on_move` only reports widget-local ones.

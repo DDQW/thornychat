@@ -29,6 +29,7 @@ pub mod upscale;
 pub mod video_player;
 pub mod view;
 pub mod widgets;
+pub mod window_config;
 
 pub mod platform;
 

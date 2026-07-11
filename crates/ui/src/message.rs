@@ -138,8 +138,17 @@ pub enum Message {
     /// composer types again after the user has clicked into the video (see
     /// `video_player::reclaim_focus`).
     ReclaimAppFocus,
-    /// Window resized — the timeline's scroll anchor geometry is stale.
+    /// Window resized — the timeline's scroll anchor geometry is stale, and
+    /// the new size is buffered for the debounced geometry save.
     WindowResized(iced::Size),
+    /// Window moved — buffered so the next launch reopens where the window
+    /// was left (see `window_config`).
+    WindowMoved(iced::Point),
+    /// The geometry-save debounce elapsed: probe the maximized state, which
+    /// decides what the buffered values mean.
+    PersistWindowGeometry,
+    /// Maximized-state answer for the pending geometry save.
+    WindowGeometryProbed(bool),
     /// Cursor moved (window-global coords) — tracked so right-click menus can
     /// open at the pointer (see `state::App::cursor_position`).
     CursorMoved(iced::Point),

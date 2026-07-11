@@ -45,6 +45,10 @@ fn main() -> iced::Result {
         None => iced::Font::DEFAULT,
     };
 
+    // Remembered window geometry: synchronous for the same reason as the
+    // theme — it feeds `window::Settings` below, a builder-time setting.
+    let window = ui::window_config::WindowConfig::load_or_default();
+
     // Runtime window/taskbar icon, decoded from the embedded PNG. `.ok()`:
     // a corrupt asset falls back to iced's default icon rather than
     // aborting launch. (The exe icon Explorer shows is separate — embedded
@@ -63,7 +67,13 @@ fn main() -> iced::Result {
     )
     .title("ThornyChat")
     .subscription(ui::subscription)
-        .window(iced::window::Settings { icon: window_icon, ..Default::default() })
+        .window(iced::window::Settings {
+            icon: window_icon,
+            size: window.size(),
+            position: window.position(),
+            maximized: window.maximized,
+            ..Default::default()
+        })
         // Clone the pre-built theme (an Arc bump) rather than regenerating
         // the extended palette every update cycle.
         .theme(|state: &ui::App| state.built_theme.clone())

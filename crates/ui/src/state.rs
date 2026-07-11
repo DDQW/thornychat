@@ -113,6 +113,19 @@ pub struct App {
     /// running, or not yet polled.
     pub connectors_last: Option<crate::connectors::ActiveGame>,
     pub show_settings: bool,
+    /// Remembered window geometry, mirrored to `window.json` so the next
+    /// launch reopens the same frame. Holds the last *adopted* values; live
+    /// Moved/Resized reports buffer in the `pending_window_*` pair until the
+    /// debounced save learns whether they described a normal-state frame (a
+    /// maximize also moves/resizes, but must not clobber the remembered
+    /// restore geometry).
+    pub window_config: crate::window_config::WindowConfig,
+    pub pending_window_size: Option<iced::Size>,
+    pub pending_window_position: Option<iced::Point>,
+    /// Armed between scheduling the geometry save and it firing, so a drag
+    /// starts the debounce timer exactly once (same idea as
+    /// `media_cache::State::flush_scheduled`).
+    pub window_save_scheduled: bool,
     /// Latest window-global cursor position, updated on every mouse move (see
     /// `subscriptions::window_events`). Snapshotted when a right-click menu
     /// opens so it can anchor at the pointer.
@@ -288,6 +301,10 @@ impl App {
             connectors: crate::connectors_config::ConnectorsConfig::load_or_default(),
             connectors_last: None,
             show_settings: false,
+            window_config: crate::window_config::WindowConfig::load_or_default(),
+            pending_window_size: None,
+            pending_window_position: None,
+            window_save_scheduled: false,
             cursor_position: iced::Point::ORIGIN,
             settings_panel_size: DEFAULT_SETTINGS_SIZE,
             settings_resize_drag: None,
