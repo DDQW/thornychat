@@ -36,12 +36,14 @@ pub struct State {
     /// single sync tick of an open room, forever.
     pub failed_mxc: HashSet<String>,
     /// In-flight `FetchMedia` requests raised by the lightbox's Download
-    /// button (as opposed to display fetches tracked in `pending`). Downloading
-    /// re-fetches the original bytes rather than digging them back out of a
-    /// decoded handle, so it works the same for raster, GIF, and SVG. When the
-    /// matching `MediaFetched` lands, the bytes go to a save dialog instead of
-    /// the display caches.
-    pub download_requests: HashSet<RequestId>,
+    /// button or a file message's save affordance (as opposed to display
+    /// fetches tracked in `pending`). Downloading re-fetches the original
+    /// bytes rather than digging them back out of a decoded handle, so it
+    /// works the same for raster, GIF, SVG, and non-image files. When the
+    /// matching `MediaFetched` lands, the bytes go to a save dialog instead
+    /// of the display caches; the value is the filename to suggest there
+    /// (`None` = derive a generic image name from the bytes).
+    pub download_requests: HashMap<RequestId, Option<String>>,
     /// Super-resolved versions of open lightbox images, keyed by mxc URL. The
     /// widget draws this in preference to `images` once it exists, so a
     /// zoomed-in picture gets sharper. These buffers are large (see

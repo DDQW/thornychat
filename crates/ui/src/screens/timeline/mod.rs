@@ -346,6 +346,9 @@ pub enum Message {
     /// to the newest message.
     JumpToLatest,
     ZoomImage(String),
+    /// A file message was clicked — fetch its bytes and offer a save dialog
+    /// (the root shell owns the download pipeline).
+    DownloadFile { url: String, filename: String },
     OpenUrl(String),
     /// A video card's play button was clicked — start playing it inline in
     /// place of the card (the root shell owns the native webview
@@ -379,6 +382,9 @@ pub enum Effect {
     SetNotificationMode(Option<NotificationMode>),
     PaginateBackwards,
     ZoomImage(String),
+    /// Fetch this file message's bytes and open a save dialog with its real
+    /// filename suggested.
+    DownloadFile { url: String, filename: String },
     /// Open (or create) a DM with this user and switch to it. Whether a
     /// newly created DM is encrypted follows the user's encryption setting.
     OpenDirectMessage(String),
@@ -1209,6 +1215,9 @@ pub fn update(
             )
         }
         Message::ZoomImage(url) => (iced::Task::none(), Effect::ZoomImage(url)),
+        Message::DownloadFile { url, filename } => {
+            (iced::Task::none(), Effect::DownloadFile { url, filename })
+        }
         Message::OpenUrl(url) => {
             let _ = open::that(url);
             (iced::Task::none(), Effect::None)
@@ -2124,11 +2133,30 @@ fn render_item<'a>(
                     .into(),
             }
         }
-        TimelineItemContent::File { filename, caption, .. } => {
-            let name = remote_text(format!("[file: {filename}]")).size(15);
+        TimelineItemContent::File { url, filename, caption } => {
+            // The whole row is a button: click re-fetches the bytes (fast —
+            // the SDK's disk cache has them if the file was ever fetched)
+            // and offers a save dialog suggesting the real filename.
+            let name = row![
+                crate::theme::icon_text(crate::theme::icon::DOWNLOAD, 14).style(text::secondary),
+                remote_text(format!("[file: {filename}]")).size(15),
+            ]
+            .spacing(6)
+            .align_y(iced::Center);
+            let save = tooltip(
+                button(name)
+                    .on_press(Message::DownloadFile {
+                        url: url.clone(),
+                        filename: filename.clone(),
+                    })
+                    .style(crate::theme::ghost_button)
+                    .padding(0),
+                container(text("Save file").size(12)).padding(6),
+                tooltip::Position::Top,
+            );
             match caption {
-                Some(c) => column![name, remote_text(c.clone()).size(12)].spacing(2).into(),
-                None => name.into(),
+                Some(c) => column![save, remote_text(c.clone()).size(12)].spacing(2).into(),
+                None => save.into(),
             }
         }
         // Rendered through the normal path (not an early return) so the

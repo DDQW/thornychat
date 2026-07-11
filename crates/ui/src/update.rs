@@ -387,7 +387,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             // GIF, and SVG.
             if let Some(url) = app.zoomed_image.clone() {
                 let request_id = Uuid::new_v4();
-                app.media.download_requests.insert(request_id);
+                app.media.download_requests.insert(request_id, None);
                 send_cmd(app, ClientCommand::FetchMedia { mxc_url: url, request_id });
             }
             Task::none()
@@ -903,6 +903,14 @@ fn apply_timeline_effect(app: &mut App, effect: screens::timeline::Effect) -> Ta
         }
         screens::timeline::Effect::ZoomImage(url) => {
             app.zoomed_image = Some(url);
+            Task::none()
+        }
+        screens::timeline::Effect::DownloadFile { url, filename } => {
+            // Same pipeline as the lightbox Download button, but the save
+            // dialog suggests the message's real filename.
+            let request_id = Uuid::new_v4();
+            app.media.download_requests.insert(request_id, Some(filename));
+            send_cmd(app, ClientCommand::FetchMedia { mxc_url: url, request_id });
             Task::none()
         }
         screens::timeline::Effect::OpenDirectMessage(user_id) => {
@@ -2563,19 +2571,22 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
             ensure_media_fetched(app, urls);
         }
         ClientEvent::MediaFetched { request_id, bytes } => {
-            // Lightbox Download button: these bytes are destined for a file,
-            // not the display caches. Intercept before the display path (the
-            // request_id was never put in `pending`, so it wouldn't match
-            // below anyway).
-            if app.media.download_requests.remove(&request_id) {
-                let suggested =
-                    format!("thornychat-image.{}", crate::media_cache::image_extension(&bytes));
+            // Lightbox Download button / file-message save: these bytes are
+            // destined for a file, not the display caches. Intercept before
+            // the display path (the request_id was never put in `pending`,
+            // so it wouldn't match below anyway).
+            if let Some(filename) = app.media.download_requests.remove(&request_id) {
+                // File messages carry their real name; lightbox images get a
+                // generic one with the extension sniffed from the bytes.
+                let suggested = filename.unwrap_or_else(|| {
+                    format!("thornychat-image.{}", crate::media_cache::image_extension(&bytes))
+                });
                 return Task::future(async move {
                     if let Some(handle) =
                         rfd::AsyncFileDialog::new().set_file_name(&suggested).save_file().await
                     {
                         if let Err(error) = handle.write(&bytes).await {
-                            tracing::warn!(%error, "saving downloaded image failed");
+                            tracing::warn!(%error, "saving downloaded media failed");
                         }
                     }
                     Message::Noop
@@ -2644,8 +2655,8 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
             // A download re-fetch that failed: just drop the tracking entry so
             // it doesn't leak; nothing to blacklist (the display copy, if any,
             // is unaffected).
-            if app.media.download_requests.remove(&request_id) {
-                tracing::warn!(reason, "image download re-fetch failed");
+            if app.media.download_requests.remove(&request_id).is_some() {
+                tracing::warn!(reason, "media download re-fetch failed");
                 return Task::none();
             }
             // Negative-cache the URL — without this, the very next timeline
