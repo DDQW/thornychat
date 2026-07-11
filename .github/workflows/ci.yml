@@ -14,7 +14,7 @@ jobs:
   check:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Installs the toolchain pinned by rust-toolchain.toml (incl. clippy).
       - name: Install pinned toolchain
         run: rustup toolchain install
