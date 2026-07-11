@@ -925,6 +925,14 @@ fn apply_timeline_effect(app: &mut App, effect: screens::timeline::Effect) -> Ta
                 if app.timeline.autoscroll.is_some() { None } else { Some(app.cursor_position) };
             Task::none()
         }
+        screens::timeline::Effect::PersistMemberPanel(hidden) => {
+            app.chat.hide_members = hidden;
+            let chat = app.chat;
+            Task::future(async move {
+                chat.save().await;
+                Message::Noop
+            })
+        }
     }
 }
 

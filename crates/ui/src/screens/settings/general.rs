@@ -182,16 +182,8 @@ fn save_spellcheck_task(spellcheck: SpellcheckConfig) -> Task<Message> {
 /// Persists the timeline/chat preferences off the update thread, like the
 /// spell-check autosave above.
 fn save_chat_config_task(chat: ChatConfig) -> Task<Message> {
-    let (Some(path), Some(contents)) = (ChatConfig::config_path(), chat.to_json_pretty()) else {
-        return Task::none();
-    };
     Task::future(async move {
-        if let Some(parent) = path.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
-        if let Err(error) = tokio::fs::write(path, contents).await {
-            tracing::warn!(%error, "failed to save timeline settings");
-        }
+        chat.save().await;
         Message::ChatConfigSaved
     })
 }

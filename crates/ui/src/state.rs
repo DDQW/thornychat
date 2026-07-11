@@ -242,6 +242,11 @@ impl App {
         let sticker_collection = load_sticker_collection(&profile);
         let pending_restore_room = load_last_room(&profile);
         let built_theme = theme.to_iced_theme();
+        let chat = crate::chat_config::ChatConfig::load_or_default();
+        // The member-panel toggle lives on the long-lived timeline state (it
+        // already survives room switches); seeding it here is what makes it
+        // survive restarts too.
+        let timeline = screens::timeline::State { hide_members: chat.hide_members, ..Default::default() };
         Self {
             route: Route::Login,
             profile,
@@ -251,7 +256,7 @@ impl App {
             own_user_id: None,
             login: screens::login::State::default(),
             room_list: screens::room_list::State::default(),
-            timeline: screens::timeline::State::default(),
+            timeline,
             verification: screens::verification::State::default(),
             settings: screens::settings::State::new(&theme),
             call: screens::call::State::default(),
@@ -279,7 +284,7 @@ impl App {
             },
             encryption: crate::encryption_config::EncryptionConfig::load_or_default(),
             spellcheck: crate::spellcheck_config::SpellcheckConfig::load_or_default(),
-            chat: crate::chat_config::ChatConfig::load_or_default(),
+            chat,
             connectors: crate::connectors_config::ConnectorsConfig::load_or_default(),
             connectors_last: None,
             show_settings: false,

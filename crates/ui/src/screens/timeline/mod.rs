@@ -401,6 +401,10 @@ pub enum Effect {
     /// Toggle middle-click autoscroll on/off. When turning it on, the root
     /// dispatcher anchors it at the current window-global cursor position.
     ToggleAutoscroll,
+    /// The member panel was shown/hidden — the root dispatcher mirrors the
+    /// new hidden state into `ChatConfig` and persists it, so the choice
+    /// survives restarts.
+    PersistMemberPanel(bool),
 }
 
 /// Widget id of the message-list scrollable, targeted by quote-jump and
@@ -722,7 +726,7 @@ pub fn update(
             // Panel show/hide changes the list width → text rewraps → every
             // row's position changes legitimately.
             state.scroll_anchor = None;
-            (iced::Task::none(), Effect::None)
+            (iced::Task::none(), Effect::PersistMemberPanel(state.hide_members))
         }
         Message::ItemHovered(event_id) => {
             state.hovered_event_id = Some(event_id);
