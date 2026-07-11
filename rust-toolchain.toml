@@ -1,3 +1,5 @@
 [toolchain]
 channel = "stable"
 targets = ["x86_64-pc-windows-msvc"]
+# clippy rides along so CI's `rustup toolchain install` always has it.
+components = ["clippy"]

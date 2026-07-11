@@ -1,0 +1,27 @@
+# Runs on windows-latest only: ui/client-core pull in Windows-only
+# dependencies (ISpellChecker, WebView2, winreg), so no other OS compiles.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Installs the toolchain pinned by rust-toolchain.toml (incl. clippy).
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --locked
+      # Warnings are errors here: the workspace lints clean from a cold
+      # cache (warm local runs can replay stale MIR-lint results, so this
+      # from-clean run is the authoritative one).
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
