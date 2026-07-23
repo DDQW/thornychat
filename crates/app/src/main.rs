@@ -53,8 +53,21 @@ fn main() -> iced::Result {
     // a corrupt asset falls back to iced's default icon rather than
     // aborting launch. (The exe icon Explorer shows is separate — embedded
     // from app.rc by build.rs.)
-    let window_icon =
-        iced::window::icon::from_file_data(include_bytes!("../../../assets/icon-256.png"), None).ok();
+    //
+    // Decoded here rather than through `iced::window::icon::from_file_data`,
+    // which is gated behind iced's `image` feature — the one that would force
+    // image's full default codec set back into the build (see the workspace
+    // manifest). `from_rgba` lives in iced_core and carries no such gate.
+    let window_icon = image::load_from_memory_with_format(
+        include_bytes!("../../../assets/icon-256.png"),
+        image::ImageFormat::Png,
+    )
+    .ok()
+    .and_then(|decoded| {
+        let pixels = decoded.into_rgba8();
+        let (width, height) = pixels.dimensions();
+        iced::window::icon::from_rgba(pixels.into_raw(), width, height).ok()
+    });
 
     // 0.14 moved the boot closure to `application`'s first argument (was the
     // trailing `.run_with(...)`) and the window title to `.title(...)`. The

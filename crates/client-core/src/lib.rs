@@ -22,7 +22,7 @@ pub mod store;
 pub mod sync;
 pub mod verification;
 
-pub use client::{try_start, start_with_password, start_with_sso, logout, RunningClient};
+pub use client::{try_start, start_with_password, start_with_sso, RunningClient};
 pub use commands::ClientCommand;
 pub use error::{CoreError, CoreResult};
 pub use events::ClientEvent;

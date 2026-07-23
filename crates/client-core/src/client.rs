@@ -31,7 +31,7 @@ pub async fn try_start(
     };
 
     spawn_cache_eviction(&paths);
-    let (cmd_tx, worker_handle) = sync::spawn(client.clone(), event_tx, paths.media_cache_dir());
+    let (cmd_tx, worker_handle) = sync::spawn(client.clone(), event_tx, paths);
     Ok(Some(RunningClient { client, cmd_tx, worker_handle }))
 }
 
@@ -47,7 +47,7 @@ pub async fn start_with_password(
         session::login_password(&paths, homeserver, username, password).await?;
 
     spawn_cache_eviction(&paths);
-    let (cmd_tx, worker_handle) = sync::spawn(client.clone(), event_tx, paths.media_cache_dir());
+    let (cmd_tx, worker_handle) = sync::spawn(client.clone(), event_tx, paths);
     Ok(RunningClient { client, cmd_tx, worker_handle })
 }
 
@@ -62,7 +62,7 @@ pub async fn start_with_sso(
         session::login_sso(&paths, homeserver, identity_provider_id).await?;
 
     spawn_cache_eviction(&paths);
-    let (cmd_tx, worker_handle) = sync::spawn(client.clone(), event_tx, paths.media_cache_dir());
+    let (cmd_tx, worker_handle) = sync::spawn(client.clone(), event_tx, paths);
     Ok(RunningClient { client, cmd_tx, worker_handle })
 }
 
@@ -78,11 +78,4 @@ fn spawn_cache_eviction(paths: &AppPaths) {
         crate::media::evict_cache_dir(&media_dir, crate::media::MEDIA_CACHE_CAP_BYTES);
         crate::media::evict_cache_dir(&emoji_dir, crate::media::EMOJI_CACHE_CAP_BYTES);
     });
-}
-
-pub async fn logout(profile: &str, running: RunningClient) -> CoreResult<()> {
-    let paths = AppPaths::for_profile(profile)?;
-    session::logout(&paths, &running.client).await?;
-    running.worker_handle.abort();
-    Ok(())
 }

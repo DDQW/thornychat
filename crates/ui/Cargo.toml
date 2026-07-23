@@ -43,3 +43,13 @@ open = { workspace = true }
 # matrix-sdk, so this doesn't add a new crate to the build, just a new
 # direct edge to one already being compiled.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+
+[dev-dependencies]
+# `default-features = false` drops the plotters/rayon HTML-report stack —
+# the terminal output carries the same statistics, and this keeps a dev-only
+# dependency from dragging a second parallelism runtime into the tree.
+criterion = { version = "0.8", default-features = false }
+
+[[bench]]
+name = "text_render"
+harness = false

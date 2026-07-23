@@ -386,12 +386,37 @@ fn main_shell(app: &App) -> Element<'_, Message> {
 
     let security = screens::verification::view(&app.verification).map(Message::Verification);
 
-    column![
-        security,
-        row![sidebar, timeline].width(Length::Fill).height(Length::Fill),
-    ]
+    let mut shell = column![];
+    if app.session_expired {
+        shell = shell.push(session_expired_banner());
+    }
+    shell
+        .push(security)
+        .push(row![sidebar, timeline].width(Length::Fill).height(Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+/// Shown above the security cards when the homeserver has rejected the
+/// access token and no refresh was possible (`App::session_expired`) — the
+/// sync worker already stopped retrying rather than hammering a dead token,
+/// so this banner is the only way back in.
+fn session_expired_banner() -> Element<'static, Message> {
+    container(
+        row![
+            text("Your session is no longer valid.").size(13),
+            space::horizontal(),
+            button(text("Sign In Again").size(13))
+                .on_press(Message::SignInAgainClicked)
+                .padding([6, 12]),
+        ]
+        .spacing(12)
+        .align_y(iced::Center),
+    )
+    .padding(10)
     .width(Length::Fill)
-    .height(Length::Fill)
+    .style(crate::theme::panel)
     .into()
 }
 

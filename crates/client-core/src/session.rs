@@ -218,15 +218,35 @@ pub async fn login_password(
     username: &str,
     password: Zeroizing<String>,
 ) -> CoreResult<RestoredSession> {
-    let client = build_client(homeserver, &paths.state_store_dir()).await?;
+    let mut client = build_client(homeserver, &paths.state_store_dir()).await?;
 
-    client
+    if let Err(error) = client
         .matrix_auth()
         .login_username(username, password.as_str())
         .initial_device_display_name(DEVICE_DISPLAY_NAME)
         .send()
         .await
-        .map_err(|e| CoreError::LoginFailed(e.to_string()))?;
+    {
+        if !matches!(error, matrix_sdk::Error::CryptoStoreError(_)) {
+            return Err(CoreError::LoginFailed(error.to_string()));
+        }
+        // The store is bound to a different device's crypto account — most
+        // likely a same-process `logout` couldn't discard it (Windows kept
+        // it open via other live `Client` clones; see `logout`'s doc
+        // comment). Drop this client to release its handles, discard the
+        // stale store, and retry once against a clean one.
+        tracing::warn!(%error, "stale crypto store left from an earlier logout; discarding and retrying login");
+        drop(client);
+        discard_state_store(paths);
+        client = build_client(homeserver, &paths.state_store_dir()).await?;
+        client
+            .matrix_auth()
+            .login_username(username, password.as_str())
+            .initial_device_display_name(DEVICE_DISPLAY_NAME)
+            .send()
+            .await
+            .map_err(|e| CoreError::LoginFailed(e.to_string()))?;
+    }
 
     persist_session(paths, &client).await?;
     let session = client
@@ -252,16 +272,32 @@ pub async fn login_sso(
     homeserver: &str,
     identity_provider_id: Option<&str>,
 ) -> CoreResult<RestoredSession> {
-    let client = build_client(homeserver, &paths.state_store_dir()).await?;
+    let mut client = build_client(homeserver, &paths.state_store_dir()).await?;
 
-    let mut builder = client
-        .matrix_auth()
-        .login_sso(|sso_url| async move { open::that(sso_url).map_err(matrix_sdk::Error::Io) })
-        .initial_device_display_name(DEVICE_DISPLAY_NAME);
-    if let Some(idp) = identity_provider_id {
-        builder = builder.identity_provider_id(idp);
+    let sso_login = |client: &Client| {
+        let mut builder = client
+            .matrix_auth()
+            .login_sso(|sso_url| async move { open::that(sso_url).map_err(matrix_sdk::Error::Io) })
+            .initial_device_display_name(DEVICE_DISPLAY_NAME);
+        if let Some(idp) = identity_provider_id {
+            builder = builder.identity_provider_id(idp);
+        }
+        builder.send()
+    };
+
+    if let Err(error) = sso_login(&client).await {
+        if !matches!(error, matrix_sdk::Error::CryptoStoreError(_)) {
+            return Err(CoreError::LoginFailed(error.to_string()));
+        }
+        // Same self-heal as `login_password` — see its comment. Note this
+        // means re-opening the browser for a second SSO round trip; that's
+        // still far better than a hard failure with no way to recover.
+        tracing::warn!(%error, "stale crypto store left from an earlier logout; discarding and retrying login");
+        drop(client);
+        discard_state_store(paths);
+        client = build_client(homeserver, &paths.state_store_dir()).await?;
+        sso_login(&client).await.map_err(|e| CoreError::LoginFailed(e.to_string()))?;
     }
-    builder.send().await.map_err(|e| CoreError::LoginFailed(e.to_string()))?;
 
     persist_session(paths, &client).await?;
     let session = client

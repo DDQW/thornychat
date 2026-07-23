@@ -8,7 +8,6 @@
 //! purely through `ClientCommand` (in) / `ClientEvent` (out).
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,7 +30,7 @@ use matrix_sdk::ruma::{
     ServerName, UInt, UserId,
 };
 use matrix_sdk::send_queue::SendQueueRoomError;
-use matrix_sdk::Client;
+use matrix_sdk::{Client, SessionChange};
 use matrix_sdk_ui::sync_service::{self, SyncService};
 use matrix_sdk_ui::timeline::{AttachmentSource, Timeline, TimelineEventItemId};
 use tokio::sync::{broadcast, mpsc};
@@ -51,6 +50,8 @@ const SEND_QUEUE_RETRY_DELAY: Duration = Duration::from_secs(5);
 use crate::commands::{ClientCommand, RequestId};
 use crate::events::{ClientEvent, SyncState, UserSearchResult};
 use crate::rooms::{room_list, timeline};
+use crate::session;
+use crate::store::AppPaths;
 use crate::verification::{self, VerificationAction, VerificationSession};
 
 /// Everything kept alive for a room the UI currently has open: the shared
@@ -94,12 +95,12 @@ struct WorkerState {
 pub fn spawn(
     client: Client,
     event_tx: mpsc::UnboundedSender<ClientEvent>,
-    media_cache_dir: PathBuf,
+    paths: AppPaths,
 ) -> (mpsc::UnboundedSender<ClientCommand>, JoinHandle<()>) {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
     let handle = tokio::spawn(async move {
-        if let Err(err) = run(client, cmd_rx, event_tx.clone(), media_cache_dir).await {
+        if let Err(err) = run(client, cmd_rx, event_tx.clone(), paths).await {
             tracing::error!(?err, "sync worker exited with error");
             let _ = event_tx.send(ClientEvent::SyncStateChanged(SyncState::Error(
                 err.to_string(),
@@ -114,7 +115,7 @@ async fn run(
     client: Client,
     mut cmd_rx: mpsc::UnboundedReceiver<ClientCommand>,
     event_tx: mpsc::UnboundedSender<ClientEvent>,
-    media_cache_dir: PathBuf,
+    paths: AppPaths,
 ) -> anyhow::Result<()> {
     // `with_offline_mode`: sync errors park the service in an auto-retrying
     // Offline state instead of the terminal Error state. Without it, any
@@ -137,6 +138,31 @@ async fn run(
     // one doesn't touch `event_tx` at all, so it has no natural shutdown
     // signal of its own; that's fine, it just rides out with the process.
     let _send_queue_recovery = spawn_send_queue_recovery(client.clone());
+    // Detached: relays `SessionChange::UnknownToken` into the main loop
+    // (mpsc, same pattern as the pin/verification relays below) so it can
+    // stop the sync service — matrix-sdk-ui's offline-mode backoff (see
+    // `with_offline_mode` above) has no way to know retrying is futile once
+    // the token itself is dead, and was observed hammering the homeserver
+    // every ~150ms indefinitely. A raw `tokio::select!` arm on the broadcast
+    // receiver directly would silently stop polling forever after the first
+    // `Lagged` (the same hazard `spawn_send_queue_recovery` above avoids),
+    // hence the relay task.
+    let (session_expired_tx, mut session_expired_rx) = mpsc::unbounded_channel::<()>();
+    {
+        let mut session_change_rx = client.subscribe_to_session_changes();
+        tokio::spawn(async move {
+            loop {
+                match session_change_rx.recv().await {
+                    Ok(SessionChange::UnknownToken(_)) => {
+                        let _ = session_expired_tx.send(());
+                    }
+                    Ok(SessionChange::TokensRefreshed) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
     // Rooms the worker keeps subscribed for the session flow in here: the
     // joined-space discovery below reports the spaces it finds, and `JoinRoom`
     // reports what it joins. The worker owns the single active subscription
@@ -237,7 +263,16 @@ async fn run(
                     // UI dropped its sender; shut down cleanly.
                     break;
                 };
-                handle_command(&client, &sync_service, &call_manager, &mut worker_state, cmd, &event_tx, &media_cache_dir, &pin_tx).await;
+                handle_command(&client, &sync_service, &call_manager, &mut worker_state, cmd, &event_tx, &paths, &pin_tx).await;
+            }
+
+            Some(()) = session_expired_rx.recv() => {
+                tracing::warn!(
+                    "access token rejected by the server (M_UNKNOWN_TOKEN); \
+                     stopping sync instead of retrying against a dead token"
+                );
+                sync_service.stop().await;
+                let _ = event_tx.send(ClientEvent::SessionExpired);
             }
         }
     }
@@ -355,13 +390,16 @@ async fn handle_command(
     worker_state: &mut WorkerState,
     cmd: ClientCommand,
     event_tx: &mpsc::UnboundedSender<ClientEvent>,
-    media_cache_dir: &std::path::Path,
+    paths: &AppPaths,
     pin_tx: &mpsc::UnboundedSender<Vec<OwnedRoomId>>,
 ) {
     match cmd {
         ClientCommand::Logout => {
             call_manager.leave_all().await;
             sync_service.stop().await;
+            if let Err(error) = session::logout(paths, client).await {
+                tracing::warn!(%error, "failed to clear local session during logout");
+            }
             let _ = event_tx.send(ClientEvent::LoggedOut);
         }
 
@@ -928,7 +966,7 @@ async fn handle_command(
         ClientCommand::FetchMedia { mxc_url, request_id } => {
             let client = client.clone();
             let event_tx = event_tx.clone();
-            let cache_dir = media_cache_dir.to_path_buf();
+            let cache_dir = paths.media_cache_dir();
             tokio::spawn(async move {
                 match crate::media::fetch(&client, &cache_dir, &mxc_url).await {
                     Ok(bytes) => {

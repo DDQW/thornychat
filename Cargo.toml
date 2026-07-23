@@ -36,7 +36,11 @@ matrix-sdk-ui = { version = "0.18", default-features = false }
 matrix-sdk-sqlite = { version = "0.18", features = ["state-store", "crypto-store", "event-cache", "bundled"] }
 
 # GUI
-iced = { version = "0.14", features = ["tokio", "image", "svg", "advanced", "lazy", "markdown", "selector"] }
+# `image-without-codecs` rather than `image`: iced's `image` feature is defined
+# as ["image-without-codecs", "image/default"], so picking it would force the
+# full default format set back on regardless of what the `image` entry below
+# asks for. This keeps the codec choice ours to make, in one place.
+iced = { version = "0.14", features = ["tokio", "image-without-codecs", "svg", "advanced", "lazy", "markdown", "selector"] }
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
@@ -83,7 +87,25 @@ arboard = "3.6"
 webrtc = "0.13"
 
 # Media / content rendering
-image = { version = "0.25", features = ["png", "jpeg", "gif", "webp"] }
+# Formats listed explicitly instead of taking image's defaults, which drag in
+# `avif` and `exr` (plus rayon) for ~37 crates of dead weight: `avif` is
+# encode-only — decoding needs `avif-native`/dav1d, which we don't enable — so
+# rav1e and ravif compile an AV1 encoder that can never put a pixel on screen,
+# and nothing sends OpenEXR over Matrix. What's left is every format a peer
+# could plausibly send. Only works paired with iced's `image-without-codecs`.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+    "bmp",
+    "ico",
+    "tiff",
+    "qoi",
+    "tga",
+    "pnm",
+    "hdr",
+] }
 # Embedded YouTube playback: hosts the iframe player in a WebView2 child
 # window over the iced surface (Windows ships the WebView2 runtime).
 wry = "0.55"

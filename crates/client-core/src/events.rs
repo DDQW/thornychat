@@ -33,6 +33,11 @@ pub enum ClientEvent {
     // --- Phase 0: session / sync lifecycle ---
     SyncStateChanged(SyncState),
     LoggedOut,
+    /// The homeserver rejected the access token (`M_UNKNOWN_TOKEN`) and no
+    /// refresh was possible — the sync worker has already stopped retrying.
+    /// The UI should prompt the user to sign in again rather than sit on a
+    /// permanently offline session.
+    SessionExpired,
 
     // --- Phase 1: room list / timeline ---
     RoomListUpdated(Vec<RoomSummary>),
@@ -64,11 +69,12 @@ pub enum ClientEvent {
     TimelineStartReached { room_id: String },
 
     // --- Phase 4: custom emoji, media ---
-    /// Every custom emoji pack this account can currently use: the
-    /// personal pack (`im.ponies.user_emotes`), any packs explicitly
-    /// enabled via `im.ponies.emote_rooms`, and all of the currently-open
-    /// room's own packs (`im.ponies.room_emotes` under every state key).
-    /// Refetched whenever a room is opened.
+    /// Every custom emoji/sticker pack this account can currently use: the
+    /// personal pack (`im.ponies.user_emotes`), any packs explicitly enabled
+    /// via `im.ponies.emote_rooms`, all of the currently-open room's own packs
+    /// (`im.ponies.room_emotes` under every state key), and the packs of that
+    /// room's joined parent space(s), walked up the space chain (MSC2545's
+    /// canonical-space inheritance). Refetched whenever a room is opened.
     CustomEmojiPacksUpdated(Vec<EmojiPack>),
     MediaFetched { request_id: RequestId, bytes: Vec<u8> },
     MediaFetchFailed { request_id: RequestId, reason: String },

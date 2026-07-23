@@ -198,16 +198,16 @@ fn client_events(client: Client, profile: String) -> Subscription<Message> {
         let profile = data.profile.clone();
         iced::stream::channel(64, move |mut output: iced::futures::channel::mpsc::Sender<Message>| {
             async move {
-                let cache_dir = match client_core::store::AppPaths::for_profile(&profile) {
-                    Ok(paths) => paths.media_cache_dir(),
+                let paths = match client_core::store::AppPaths::for_profile(&profile) {
+                    Ok(paths) => paths,
                     Err(error) => {
-                        tracing::error!(%error, "failed to resolve media cache directory");
+                        tracing::error!(%error, "failed to resolve app data directory");
                         return;
                     }
                 };
 
                 let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-                let (cmd_tx, worker_handle) = client_core::sync::spawn(client, event_tx, cache_dir);
+                let (cmd_tx, worker_handle) = client_core::sync::spawn(client, event_tx, paths);
 
                 // The worker runs for the lifetime of the process (or until
                 // it stops itself on Logout); detach the handle rather than

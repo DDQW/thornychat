@@ -1,3 +1,9 @@
 /target
 .vs/
 *.pdb
+
+# Per-machine Claude Code state: settings.local.json is by definition local,
+# and worktrees/ holds full nested checkouts of this repo (each with its own
+# .git) that must never be committed into it.
+.claude/settings.local.json
+.claude/worktrees/

@@ -55,6 +55,11 @@ pub struct App {
     pub client: Option<matrix_sdk::Client>,
     pub cmd_tx: Option<mpsc::UnboundedSender<ClientCommand>>,
     pub sync_state: SyncState,
+    /// Set when the homeserver rejects the access token and no refresh was
+    /// possible (`ClientEvent::SessionExpired`) — the sync worker has
+    /// already stopped retrying, so this just gates the "sign in again"
+    /// banner rather than any retry logic of its own.
+    pub session_expired: bool,
     /// The logged-in user's Matrix ID, e.g. `@alice:matrix.org` — used to
     /// tell which timeline messages are "mine" (editable/deletable).
     pub own_user_id: Option<String>,
@@ -266,6 +271,7 @@ impl App {
             client: None,
             cmd_tx: None,
             sync_state: SyncState::Connecting,
+            session_expired: false,
             own_user_id: None,
             login: screens::login::State::default(),
             room_list: screens::room_list::State::default(),

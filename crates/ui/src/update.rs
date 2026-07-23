@@ -512,6 +512,10 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             Task::none()
         }
 
+        Message::SignInAgainClicked => {
+            send_cmd(app, ClientCommand::Logout);
+            Task::none()
+        }
         Message::ToggleSettings => {
             app.show_settings = !app.show_settings;
             // Re-read the autostart registry state each time the panel opens
@@ -2155,10 +2159,14 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
         ClientEvent::SyncStateChanged(state) => {
             app.sync_state = state;
         }
+        ClientEvent::SessionExpired => {
+            app.session_expired = true;
+        }
         ClientEvent::LoggedOut => {
             app.client = None;
             app.cmd_tx = None;
             app.own_user_id = None;
+            app.session_expired = false;
             // Session-scoped state must not leak into the next login: the
             // old account's rooms/timeline would linger, media requests
             // in flight on the dead worker would block refetching those

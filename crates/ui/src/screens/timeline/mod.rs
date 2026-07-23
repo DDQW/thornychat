@@ -3365,7 +3365,9 @@ fn with_avatar<'a>(
 /// A slice of a message body: literal text, a `:shortcode:` that resolved
 /// against a known custom emoji pack, a real unicode emoji typed inline, or
 /// a URL.
-enum BodySegment<'a> {
+#[doc(hidden)] // pub for benches/text_render.rs only; not API.
+#[derive(Debug)]
+pub enum BodySegment<'a> {
     Text(&'a str),
     Emoji(&'a client_core::events::CustomEmoji),
     /// The emoji's own canonical, fully-qualified string (from the `emojis`
@@ -3396,10 +3398,21 @@ pub fn first_url_in(text: &str) -> Option<String> {
 /// Splits one line into text / custom-emoji / link segments. Links are
 /// carved out first so a `:` inside a URL is never mistaken for a
 /// shortcode delimiter.
-fn tokenize_line<'a>(
+#[doc(hidden)] // pub for benches/text_render.rs only; not API.
+pub fn tokenize_line<'a>(
     line: &'a str,
     shortcode_index: &'a HashMap<String, client_core::events::CustomEmoji>,
 ) -> Vec<BodySegment<'a>> {
+    // Same "://" pre-filter `first_url_in` uses, and exact for the same
+    // reason: linkify's Url kind bails unless "://" follows the scheme
+    // (linkify url.rs:40), so a line without it has no link to find and the
+    // finder + scan are pure overhead. Only the emoji/shortcode pass is left.
+    if !line.contains("://") {
+        let mut segments = Vec::new();
+        tokenize_custom_emoji_into(line, shortcode_index, &mut segments);
+        return segments;
+    }
+
     let mut finder = linkify::LinkFinder::new();
     finder.kinds(&[linkify::LinkKind::Url]);
 
@@ -3432,7 +3445,18 @@ fn tokenize_custom_emoji_into<'a>(
     // eq_ignore_ascii_case scan) — the previous per-candidate linear scan
     // over every pack emoji ran per ':token:' per message per view call,
     // and even "meeting at 12:30" produces a candidate ("30").
-    let lookup = |code: &str| shortcode_index.get(&code.to_ascii_lowercase());
+    //
+    // Probe with the borrowed slice first: shortcodes are almost always
+    // already lowercase, and every candidate the scan throws at this — 12:30's
+    // "30" included — used to allocate an owned lowercase copy just to miss.
+    // Only a code actually carrying an uppercase byte pays for one now.
+    let lookup = |code: &str| match shortcode_index.get(code) {
+        Some(emoji) => Some(emoji),
+        None if code.bytes().any(|b| b.is_ascii_uppercase()) => {
+            shortcode_index.get(&code.to_ascii_lowercase())
+        }
+        None => None,
+    };
 
     let mut plain_start = 0;
     let mut search_from = 0;
@@ -3472,6 +3496,14 @@ fn tokenize_custom_emoji_into<'a>(
 /// matched in `s` and the emoji's canonical `'static` string.
 fn emoji_prefix(s: &str) -> Option<(usize, &'static str)> {
     const MAX_EMOJI_CHARS: usize = 8;
+    // Range gate before any table lookup: without it every codepoint of an
+    // accented-Latin or Cyrillic line — text with no emoji in it at all —
+    // paid up to MAX_EMOJI_CHARS `emojis::get` probes to learn nothing, which
+    // measured 117x a plain-ASCII line of the same length (11.6us vs 99ns).
+    // Bailing on the first char instead makes that line ~as cheap as ASCII.
+    if !s.chars().next().is_some_and(could_start_emoji) {
+        return None;
+    }
     // Fixed stack buffer, not a Vec — this runs once per char position of
     // every non-ASCII text segment, per view rebuild (the hottest loop).
     let mut ends = [0usize; MAX_EMOJI_CHARS];
@@ -3483,6 +3515,37 @@ fn emoji_prefix(s: &str) -> Option<(usize, &'static str)> {
         n += 1;
     }
     ends[..n].iter().rev().find_map(|&end| emojis::get(&s[..end]).map(|e| (end, e.as_str())))
+}
+
+/// Can `c` be the first codepoint of *any* emoji sequence? Purely a filter to
+/// keep [`emoji_prefix`] out of the emoji table for text that plainly isn't
+/// emoji — the blocks below are the only ones the table draws first
+/// codepoints from, and everything else (Latin-1 supplement, Latin Extended,
+/// Greek, Cyrillic, Hebrew, Arabic, CJK, Hangul, Kana) can be rejected on the
+/// spot.
+///
+/// A false positive here costs only the lookup that would have happened
+/// anyway, but a false negative would silently stop a real emoji from ever
+/// rendering — so the ranges are deliberately generous, and
+/// `every_emoji_passes_the_start_gate` checks them against every entry in the
+/// `emojis` table rather than trusting this list to have been written right.
+#[inline]
+fn could_start_emoji(c: char) -> bool {
+    matches!(
+        c,
+        // Keycap sequences: '1️⃣' is '1' + FE0F + 20E3.
+        '#' | '*' | '0'..='9'
+        // Latin-1: © and ®.
+        | '\u{00A9}' | '\u{00AE}'
+        // Punctuation, letterlike, arrows, technical, geometric, misc
+        // symbols, dingbats, supplemental arrows.
+        | '\u{2000}'..='\u{2BFF}'
+        // The four CJK-block marks that are emoji (〰 〽 ㊗ ㊙) — named
+        // individually so the Kana/CJK blocks around them stay excluded.
+        | '\u{3030}' | '\u{303D}' | '\u{3297}' | '\u{3299}'
+        // The emoji planes proper, incl. regional-indicator flag pairs.
+        | '\u{1F000}'..='\u{1FBFF}'
+    )
 }
 
 /// Splits `text` on real unicode emoji (plain-ASCII text, the common case,
@@ -3730,4 +3793,94 @@ fn reaction_picker<'a>(
             key: emoji.mxc_url.clone(),
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`could_start_emoji`] is a hand-written range list guarding the emoji
+    /// table, and a char it wrongly rejects would make that emoji silently
+    /// stop rendering — a bug no one would think to look for in a range list.
+    /// So check it against the table itself: every emoji the app can ever
+    /// match must get past the gate on its first codepoint.
+    #[test]
+    fn every_emoji_passes_the_start_gate() {
+        for emoji in emojis::iter() {
+            let first = emoji.as_str().chars().next().expect("no empty emoji in the table");
+            assert!(
+                could_start_emoji(first),
+                "gate rejects U+{:04X}, the first codepoint of {:?} ({})",
+                first as u32,
+                emoji.as_str(),
+                emoji.name(),
+            );
+        }
+    }
+
+    /// The gate only pays off if it actually rejects the text it was added
+    /// for — a range that crept wide enough to admit ordinary European text
+    /// would still be *correct*, so nothing else would catch it.
+    #[test]
+    fn ordinary_text_is_rejected_by_the_start_gate() {
+        for c in "Schöne Grüße aus München größer weiß Café naïve".chars() {
+            assert!(!could_start_emoji(c), "gate admits Latin U+{:04X} ({c:?})", c as u32);
+        }
+        for c in "привет как дела Ελληνικά".chars() {
+            assert!(!could_start_emoji(c), "gate admits U+{:04X} ({c:?})", c as u32);
+        }
+    }
+
+    /// The `:shortcode:` scan's borrowed-slice fast path must stay
+    /// case-insensitive against the lowercase-keyed index.
+    #[test]
+    fn shortcodes_match_regardless_of_case() {
+        let mut index = HashMap::new();
+        index.insert(
+            "thonk".to_string(),
+            client_core::events::CustomEmoji {
+                shortcode: "thonk".into(),
+                mxc_url: "mxc://example.org/thonk".into(),
+                is_emoticon: true,
+                is_sticker: false,
+                width: None,
+                height: None,
+            },
+        );
+
+        for body in [":thonk:", ":THONK:", ":ThOnK:"] {
+            let segments = tokenize_line(body, &index);
+            assert!(
+                matches!(segments.as_slice(), [BodySegment::Emoji(e)] if e.shortcode == "thonk"),
+                "{body:?} did not resolve to the thonk emoji: {segments:?}"
+            );
+        }
+    }
+
+    /// A line with no "://" skips linkify entirely now; one with a link must
+    /// still come back split around it.
+    #[test]
+    fn links_survive_the_prefilter() {
+        let index = HashMap::new();
+
+        let segments = tokenize_line("see https://example.org/x for more", &index);
+        assert!(
+            matches!(
+                segments.as_slice(),
+                [
+                    BodySegment::Text("see "),
+                    BodySegment::Link("https://example.org/x"),
+                    BodySegment::Text(" for more")
+                ]
+            ),
+            "link line tokenized wrong: {segments:?}"
+        );
+
+        // Colons, but no scheme separator — no link, one plain text segment.
+        let segments = tokenize_line("standup at 12:30 tomorrow", &index);
+        assert!(
+            matches!(segments.as_slice(), [BodySegment::Text("standup at 12:30 tomorrow")]),
+            "colon-but-no-link line tokenized wrong: {segments:?}"
+        );
+    }
 }

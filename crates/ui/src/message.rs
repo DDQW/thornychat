@@ -176,6 +176,10 @@ pub enum Message {
 
     // --- root shell controls (not owned by any one screen) ---
     ToggleSettings,
+    /// "Sign in again" clicked on the session-expired banner — reuses the
+    /// same logout command Settings' Sign Out button sends, which clears
+    /// the dead credentials and returns to the login screen.
+    SignInAgainClicked,
 
     // --- Settings panel resize (drag handle, bottom-right corner) ---
     /// Press on the grip: arms a drag, but the panel's size doesn't change

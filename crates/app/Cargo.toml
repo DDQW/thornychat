@@ -17,6 +17,9 @@ ui = { workspace = true }
 
 iced = { workspace = true }
 tokio = { workspace = true }
+# Decodes the embedded window icon (see main.rs) — already compiled for the
+# ui crate, so this is a new direct edge, not a new crate in the build.
+image = { workspace = true }
 
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
