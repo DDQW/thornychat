@@ -49,7 +49,7 @@ tokio-stream = "0.1"
 # Windows platform integration
 keyring = { version = "4", features = ["windows-native-keyring-store"] }
 tray-icon = "0.24"
-# 0.61 to match what wry 0.55 / webview2-com 0.38 already compile — sharing
+# 0.61 to match what wry 0.56 / webview2-com 0.38 already compile — sharing
 # one windows-rs version lets the video player's fullscreen code talk to the
 # raw WebView2 COM interfaces with unified types (no cross-version skew), and
 # drops the otherwise-separate 0.58 build.
@@ -57,6 +57,17 @@ windows = { version = "0.61", features = [
     "UI_Notifications",
     "Data_Xml_Dom",
     "Win32_System_Registry",
+    # Toast identity (see ui::platform::app_identity): the Start Menu shortcut
+    # that makes Win11 accept a toast from this unpackaged exe is an IShellLink
+    # (Win32_UI_Shell) whose AppUserModel properties go through IPropertyStore
+    # (_PropertiesSystem) as PROPVARIANTs (Com_StructuredStorage + System_Variant).
+    # Win32_Security is only here because RegCreateKeyExW takes a
+    # SECURITY_ATTRIBUTES pointer and is feature-gated on it.
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+    "Win32_Security",
     "UI_ViewManagement",
     # Windows Spell Checking API (ISpellChecker) + the COM plumbing to create
     # it — backs the composer's spell check / autocorrect.
@@ -84,7 +95,10 @@ rfd = "0.17"
 arboard = "3.6"
 
 # Calls
-webrtc = "0.13"
+# Not in the build yet: no crate depends on it, so this pin only fixes the
+# starting API surface for `client-core::calls::webrtc_session`. Kept current
+# so that work does not begin against a release that is already stale.
+webrtc = "0.20"
 
 # Media / content rendering
 # Formats listed explicitly instead of taking image's defaults, which drag in
@@ -108,7 +122,7 @@ image = { version = "0.25", default-features = false, features = [
 ] }
 # Embedded YouTube playback: hosts the iframe player in a WebView2 child
 # window over the iced surface (Windows ships the WebView2 runtime).
-wry = "0.55"
+wry = "0.56"
 # Raw WebView2 COM interface + typed event-handler helpers — used directly
 # (alongside wry) to honor the player's fullscreen button, which wry itself
 # doesn't surface (see ui::video_player). Same version wry pins, so no extra
