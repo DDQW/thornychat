@@ -183,6 +183,15 @@ pub fn spawn_forwarder(
             .filter(|room| room.state() == matrix_sdk::RoomState::Joined)
             .map(|room| to_summary(room, &dm_rooms, own_name.as_deref(), own_avatar.as_deref()))
             .collect();
+        // Last set actually sent, so an unchanged rebuild can be dropped
+        // instead of forwarded (see the compare at the bottom of the loop).
+        let mut last_sent = summaries.clone();
+        // The only place the sidebar's size is observable from a log. A change
+        // that quietly empties the room list — as a non-persistent state store
+        // does, since `client.rooms()` is seeded solely by `load_rooms()` — is
+        // otherwise invisible until someone looks at the window. Cheap: the
+        // dedupe below means this only fires when the list actually moved.
+        tracing::info!(rooms = summaries.len(), "room list updated (initial)");
         if event_tx.send(ClientEvent::RoomListUpdated(summaries)).is_err() {
             return;
         }
@@ -229,6 +238,20 @@ pub fn spawn_forwarder(
                 .filter(|room| room.state() == matrix_sdk::RoomState::Joined)
                 .map(|room| to_summary(room, &dm_rooms, own_name.as_deref(), own_avatar.as_deref()))
                 .collect();
+            // Both wakeup sources fire far more often than the sidebar
+            // actually changes: `room_info_notable_update_receiver` wakes on
+            // read receipts and presence in *any* joined room, and the
+            // debounce above only collapses bursts, it doesn't judge whether
+            // anything moved. Forwarding regardless meant a steady trickle of
+            // `RoomListUpdated` that the UI turned into a full `view()`
+            // rebuild and a GPU frame for no visible change — all day, in
+            // every joined room. The compare is O(rooms) over data already in
+            // hand, against a repaint of the entire window; it wins easily.
+            if summaries == last_sent {
+                continue;
+            }
+            last_sent.clone_from(&summaries);
+            tracing::info!(rooms = summaries.len(), "room list updated");
             if event_tx.send(ClientEvent::RoomListUpdated(summaries)).is_err() {
                 break;
             }

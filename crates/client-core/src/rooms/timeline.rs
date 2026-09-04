@@ -64,20 +64,22 @@ pub async fn open(
     // `convert_item` drops the SDK's content-less `TimelineStart` marker, which
     // would misalign every later indexed diff; `kept` records which SDK
     // positions survive conversion so `translate_diff` can renumber indices
-    // into the UI list's space.
+    // into the UI list's space. It holds the converted item itself rather than
+    // just a flag, so a `Set` landing on an identical item can be recognised
+    // as a no-op and dropped — see `translate_diff`.
     let (initial, mut diff_stream) = timeline.subscribe().await;
     let mut reply_details_requested = std::collections::HashSet::new();
     request_missing_reply_details(&timeline, initial.iter(), &mut reply_details_requested);
 
-    let mut kept: Vec<bool> = Vec::with_capacity(initial.len());
+    let mut kept: Vec<Option<TimelineItem>> = Vec::with_capacity(initial.len());
     let mut initial_items: Vec<TimelineItem> = Vec::new();
     for item in initial.iter() {
         match convert_item(item, own_user_id.as_deref()) {
             Some(converted) => {
-                kept.push(true);
+                kept.push(Some(converted.clone()));
                 initial_items.push(converted);
             }
-            None => kept.push(false),
+            None => kept.push(None),
         }
     }
     let _ = event_tx.send(ClientEvent::TimelineDiffs {
@@ -142,11 +144,11 @@ pub async fn open(
 fn translate_diff(
     diff: VectorDiff<Arc<SdkTimelineItem>>,
     own_user_id: Option<&UserId>,
-    kept: &mut Vec<bool>,
+    kept: &mut Vec<Option<TimelineItem>>,
 ) -> Option<TimelineDiff> {
     // UI index for SDK index `i`: the count of kept positions strictly before it.
-    fn ui_index(kept: &[bool], i: usize) -> usize {
-        kept[..i.min(kept.len())].iter().filter(|k| **k).count()
+    fn ui_index(kept: &[Option<TimelineItem>], i: usize) -> usize {
+        kept[..i.min(kept.len())].iter().filter(|k| k.is_some()).count()
     }
     match diff {
         VectorDiff::Append { values } => {
@@ -154,10 +156,10 @@ fn translate_diff(
             for value in &values {
                 match convert_item(value, own_user_id) {
                     Some(item) => {
-                        kept.push(true);
+                        kept.push(Some(item.clone()));
                         items.push(item);
                     }
-                    None => kept.push(false),
+                    None => kept.push(None),
                 }
             }
             (!items.is_empty()).then_some(TimelineDiff::Append(items))
@@ -168,27 +170,27 @@ fn translate_diff(
         }
         VectorDiff::PushFront { value } => {
             let converted = convert_item(&value, own_user_id);
-            kept.insert(0, converted.is_some());
+            kept.insert(0, converted.clone());
             converted.map(TimelineDiff::PushFront)
         }
         VectorDiff::PushBack { value } => {
             let converted = convert_item(&value, own_user_id);
-            kept.push(converted.is_some());
+            kept.push(converted.clone());
             converted.map(TimelineDiff::PushBack)
         }
         VectorDiff::PopFront => {
-            let was_kept = if kept.is_empty() { false } else { kept.remove(0) };
+            let was_kept = if kept.is_empty() { false } else { kept.remove(0).is_some() };
             was_kept.then_some(TimelineDiff::PopFront)
         }
         VectorDiff::PopBack => {
-            let was_kept = kept.pop().unwrap_or(false);
+            let was_kept = kept.pop().flatten().is_some();
             was_kept.then_some(TimelineDiff::PopBack)
         }
         VectorDiff::Insert { index, value } => {
             let index = index.min(kept.len());
             let ui = ui_index(kept, index);
             let converted = convert_item(&value, own_user_id);
-            kept.insert(index, converted.is_some());
+            kept.insert(index, converted.clone());
             converted.map(|item| TimelineDiff::Insert { index: ui, item })
         }
         VectorDiff::Set { index, value } => {
@@ -196,17 +198,30 @@ fn translate_diff(
                 return None;
             }
             let ui = ui_index(kept, index);
-            match (kept[index], convert_item(&value, own_user_id)) {
-                (true, Some(item)) => Some(TimelineDiff::Set { index: ui, item }),
-                (true, None) => {
-                    kept[index] = false;
+            match (kept[index].as_ref(), convert_item(&value, own_user_id)) {
+                // The SDK re-emits an item for anything that decorates it: a
+                // read receipt moving, sender-profile resolution, a shield
+                // recompute, an aggregation replay. Most of those convert to
+                // exactly what is already on screen — and the UI draws
+                // receipts only for the newest item anyway — so forwarding
+                // them cost a full `view()` rebuild and a GPU frame for no
+                // visible change, all day. When every diff in a batch is such
+                // a no-op, the caller's `diffs.is_empty()` guard then drops the
+                // batch before it ever reaches the UI.
+                (Some(previous), Some(item)) if *previous == item => None,
+                (Some(_), Some(item)) => {
+                    kept[index] = Some(item.clone());
+                    Some(TimelineDiff::Set { index: ui, item })
+                }
+                (Some(_), None) => {
+                    kept[index] = None;
                     Some(TimelineDiff::Remove { index: ui })
                 }
-                (false, Some(item)) => {
-                    kept[index] = true;
+                (None, Some(item)) => {
+                    kept[index] = Some(item.clone());
                     Some(TimelineDiff::Insert { index: ui, item })
                 }
-                (false, None) => None,
+                (None, None) => None,
             }
         }
         VectorDiff::Remove { index } => {
@@ -214,7 +229,7 @@ fn translate_diff(
                 return None;
             }
             let ui = ui_index(kept, index);
-            let was_kept = kept.remove(index);
+            let was_kept = kept.remove(index).is_some();
             was_kept.then_some(TimelineDiff::Remove { index: ui })
         }
         VectorDiff::Truncate { length } => {
@@ -228,10 +243,10 @@ fn translate_diff(
             for value in &values {
                 match convert_item(value, own_user_id) {
                     Some(item) => {
-                        kept.push(true);
+                        kept.push(Some(item.clone()));
                         items.push(item);
                     }
-                    None => kept.push(false),
+                    None => kept.push(None),
                 }
             }
             Some(TimelineDiff::Reset(items))
@@ -280,10 +295,22 @@ pub fn spawn_typing_forwarder(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let (_guard, mut rx) = room.subscribe_to_typing_notifications();
+        // Last set forwarded. The server re-announces typing state on a timer
+        // as well as on change, so the same set — very often the empty one —
+        // arrives repeatedly, and each forward costs the UI a full `view()`
+        // rebuild and a GPU frame. Deduping here rather than in `update()` is
+        // the whole point: by the time a message reaches the UI the repaint is
+        // already owed, whatever the handler then decides to do with it.
+        let mut last_sent: Vec<String> = Vec::new();
         loop {
             match rx.recv().await {
                 Ok(user_ids) => {
-                    let user_ids = user_ids.into_iter().map(|id| id.to_string()).collect();
+                    let user_ids: Vec<String> =
+                        user_ids.into_iter().map(|id| id.to_string()).collect();
+                    if user_ids == last_sent {
+                        continue;
+                    }
+                    last_sent.clone_from(&user_ids);
                     let event = ClientEvent::TypingUpdated { room_id: room_id.clone(), user_ids };
                     if event_tx.send(event).is_err() {
                         break;
@@ -409,6 +436,11 @@ fn convert_reply_preview(details: &InReplyToDetails) -> ReplyPreview {
             };
             (sender, summarize_content(&embedded.content, embedded.sender.as_str()), image_url)
         }
+        // The quoted event is gone for good — redacted or purged server-side,
+        // so the fetch 404s and no amount of waiting will fill this in. Say so,
+        // rather than showing the same "…" as a pending fetch and leaving a
+        // reply banner that looks like it's loading forever.
+        TimelineDetails::Error(_) => (String::new(), "Message unavailable".to_string(), None),
         _ => (String::new(), "…".to_string(), None),
     };
     ReplyPreview { event_id: details.event_id.to_string(), sender, snippet, image_url }

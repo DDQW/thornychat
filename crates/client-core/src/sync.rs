@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use matrix_sdk::encryption::verification::VerificationRequest;
 use matrix_sdk::notification_settings::{
@@ -30,7 +30,7 @@ use matrix_sdk::ruma::{
     ServerName, UInt, UserId,
 };
 use matrix_sdk::send_queue::SendQueueRoomError;
-use matrix_sdk::{Client, SessionChange};
+use matrix_sdk::{Client, Room, SessionChange};
 use matrix_sdk_ui::sync_service::{self, SyncService};
 use matrix_sdk_ui::timeline::{AttachmentSource, Timeline, TimelineEventItemId};
 use tokio::sync::{broadcast, mpsc};
@@ -46,6 +46,23 @@ use tokio::task::JoinHandle;
 /// free; this constant only matters for the narrower "one request timed out
 /// while sync stayed healthy" case.
 const SEND_QUEUE_RETRY_DELAY: Duration = Duration::from_secs(5);
+
+/// Backoff bounds for restarting the sync service after it lands in a state
+/// it will not leave on its own (see the `state_stream` arm). Offline mode
+/// covers the drops the SDK recognises as connectivity problems, retrying on
+/// its own schedule; everything else — a 5xx run from the homeserver, an
+/// expired sliding-sync session, a store error — terminates the supervisor,
+/// and only a fresh `start()` brings sync back. Doubles per attempt so a
+/// homeserver that stays down for hours is not hammered.
+const SYNC_RESTART_MIN_DELAY: Duration = Duration::from_secs(2);
+const SYNC_RESTART_MAX_DELAY: Duration = Duration::from_secs(60);
+/// How long the service has to hold `Running` before a restart counts as
+/// having worked and the backoff resets to the minimum. The supervisor flips
+/// to `Running` the moment the loops are spawned, not once a sync round trip
+/// has succeeded, so without this floor a service that comes up and dies
+/// again a second later would reset the backoff every cycle and settle into
+/// a fixed two-second retry — the hammering the backoff exists to avoid.
+const SYNC_RESTART_HEALTHY_AFTER: Duration = Duration::from_secs(60);
 
 use crate::commands::{ClientCommand, RequestId};
 use crate::events::{ClientEvent, SyncState, UserSearchResult};
@@ -88,6 +105,11 @@ struct WorkerState {
     /// UIAA session id awaiting completion via the fallback web page,
     /// captured from the original `bootstrap_cross_signing` failure.
     pending_cross_signing_session: Option<String>,
+    /// Set when the worker itself stops the sync service (logout, or a token
+    /// the server has rejected). Suppresses the automatic restart below,
+    /// which would otherwise undo the stop — and, for a dead token, put the
+    /// app straight back to hammering the homeserver.
+    sync_stopped_intentionally: bool,
 }
 
 /// Spawns the sync worker and returns the command sender the UI layer holds
@@ -197,39 +219,124 @@ async fn run(
         pinned_subscriptions: HashSet::new(),
         verification: None,
         pending_cross_signing_session,
+        sync_stopped_intentionally: false,
     };
     // Tracks whether the *previous* mapped state was Offline/Error, so the
     // edge back into Syncing (not every observation of it) is what triggers
     // send-queue recovery below — see the state_stream arm.
     let mut was_disconnected = false;
+    // Last state actually forwarded. The service observable can report the
+    // same state more than once, and every forward costs the UI a full
+    // `view()` rebuild and a GPU frame — so send transitions, not
+    // observations. Same shape as the room-list dedupe.
+    let mut last_sync_state: Option<SyncState> = None;
+    // Whether the sync service is currently parked in a state it will not
+    // leave on its own, when it last came up, and how many restarts have been
+    // tried since it was last healthy (the backoff exponent). A scheduled
+    // restart that fires after the service already recovered sees
+    // `sync_terminal == false` and does nothing, which is what collapses
+    // duplicate timers.
+    let mut sync_terminal = false;
+    let mut running_since: Option<Instant> = None;
+    let mut restart_attempts: u32 = 0;
+    let (restart_tx, mut restart_rx) = mpsc::unbounded_channel::<()>();
 
     loop {
         tokio::select! {
             Some(state) = state_stream.next() => {
-                let mapped = match state {
-                    sync_service::State::Idle => SyncState::Connecting,
-                    sync_service::State::Running => SyncState::Syncing,
-                    sync_service::State::Terminated => SyncState::Offline,
-                    sync_service::State::Error(_) => {
-                        SyncState::Error("sync service reported an error state".into())
-                    }
-                    sync_service::State::Offline => SyncState::Offline,
+                // The `terminal` half of the pair marks the two SDK states
+                // the supervisor never comes back from by itself: both leave
+                // the sync loops dead until something calls `start()` again.
+                // `State::Offline` is pointedly *not* one of them — that is
+                // offline mode's own retry loop (see `with_offline_mode`
+                // above), and restarting from here would cut across its
+                // backoff.
+                let (mapped, terminal) = match state {
+                    sync_service::State::Idle => (SyncState::Connecting, false),
+                    sync_service::State::Running => (SyncState::Syncing, false),
+                    sync_service::State::Terminated => (SyncState::Offline, true),
+                    sync_service::State::Error(_) => (
+                        SyncState::Error("sync service reported an error state".into()),
+                        true,
+                    ),
+                    sync_service::State::Offline => (SyncState::Offline, false),
                 };
-                // Reconnect-triggered send-queue recovery: catches a room
-                // whose queue disabled itself because the *whole* connection
-                // dropped (as opposed to a single request timing out while
-                // sync stayed healthy — `spawn_send_queue_recovery` handles
-                // that case instead). Gated on the edge, not every `Syncing`
-                // observation, because `SendQueue::set_enabled` does an
-                // unconditional local store read on every call.
-                if matches!(mapped, SyncState::Syncing) && was_disconnected {
-                    let client = client.clone();
-                    tokio::spawn(async move {
-                        client.send_queue().set_enabled(true).await;
-                    });
+                sync_terminal = terminal;
+                if matches!(mapped, SyncState::Syncing) {
+                    running_since.get_or_insert_with(Instant::now);
+                    if was_disconnected {
+                        // Reconnect-triggered send-queue recovery: catches a
+                        // room whose queue disabled itself because the
+                        // *whole* connection dropped (as opposed to a single
+                        // request timing out while sync stayed healthy —
+                        // `spawn_send_queue_recovery` handles that case
+                        // instead). Gated on the edge, not every `Syncing`
+                        // observation, because `SendQueue::set_enabled` does
+                        // an unconditional local store read on every call.
+                        let client = client.clone();
+                        tokio::spawn(async move {
+                            client.send_queue().set_enabled(true).await;
+                        });
+                        // Same edge, same reason: a sliding-sync session that
+                        // expired while we were away — or a restart of the
+                        // service below — comes back without the room
+                        // subscriptions this worker owns, and an unsubscribed
+                        // room quietly stops appending live events. That is
+                        // the "it reconnected but this room is frozen" half
+                        // of the problem, and re-sending the set is both
+                        // idempotent and once per reconnect.
+                        resubscribe(
+                            &sync_service,
+                            &worker_state.pinned_subscriptions,
+                            &worker_state.open_rooms,
+                            None,
+                        )
+                        .await;
+                    }
                 }
                 was_disconnected = matches!(mapped, SyncState::Offline | SyncState::Error(_));
-                let _ = event_tx.send(ClientEvent::SyncStateChanged(mapped));
+                if last_sync_state.as_ref() != Some(&mapped) {
+                    last_sync_state = Some(mapped.clone());
+                    let _ = event_tx.send(ClientEvent::SyncStateChanged(mapped));
+                }
+
+                // Nothing else in the process calls `start()` a second time,
+                // so without this the app parks in a terminal state — under
+                // a UI that promises "you'll reconnect automatically" — until
+                // it is relaunched.
+                if terminal && !worker_state.sync_stopped_intentionally {
+                    // Only a run that actually held clears the backoff.
+                    if running_since.is_some_and(|since| since.elapsed() >= SYNC_RESTART_HEALTHY_AFTER)
+                    {
+                        restart_attempts = 0;
+                    }
+                    running_since = None;
+                    let delay = SYNC_RESTART_MIN_DELAY
+                        .saturating_mul(1 << restart_attempts.min(5))
+                        .min(SYNC_RESTART_MAX_DELAY);
+                    restart_attempts = restart_attempts.saturating_add(1);
+                    tracing::warn!(
+                        ?delay,
+                        attempt = restart_attempts,
+                        "sync service reached a terminal state; scheduling a restart"
+                    );
+                    let restart_tx = restart_tx.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(delay).await;
+                        let _ = restart_tx.send(());
+                    });
+                }
+            }
+
+            Some(()) = restart_rx.recv() => {
+                // Both guards matter: the service may have recovered on its
+                // own since this timer was armed, and a logout or a rejected
+                // token may have stopped it deliberately in the meantime.
+                if sync_terminal && !worker_state.sync_stopped_intentionally {
+                    tracing::info!("restarting the sync service after a terminal state");
+                    let _ = event_tx.send(ClientEvent::SyncStateChanged(SyncState::Connecting));
+                    sync_service.start().await;
+                }
             }
 
             Some(request) = incoming_verification_rx.recv() => {
@@ -271,6 +378,7 @@ async fn run(
                     "access token rejected by the server (M_UNKNOWN_TOKEN); \
                      stopping sync instead of retrying against a dead token"
                 );
+                worker_state.sync_stopped_intentionally = true;
                 sync_service.stop().await;
                 let _ = event_tx.send(ClientEvent::SessionExpired);
             }
@@ -380,6 +488,52 @@ async fn resubscribe(
     sync_service.room_list_service().subscribe_to_rooms(&refs).await;
 }
 
+/// Re-resolve every custom emoji pack in the background and hand the result
+/// to the UI. Detached so neither opening a room nor opening a picker waits
+/// on it: `fetch_all` pulls full room state for the open room and each parent
+/// space.
+///
+/// `fetch_all` returning `None` means a source failed for transport reasons —
+/// nothing is sent, so the UI keeps the pack set it already has rather than
+/// blanking every custom emoji over a network blip.
+fn spawn_emoji_pack_refresh(
+    client: &Client,
+    room: Room,
+    event_tx: &mpsc::UnboundedSender<ClientEvent>,
+) {
+    let client = client.clone();
+    let event_tx = event_tx.clone();
+    tokio::spawn(async move {
+        if let Some(packs) = crate::rooms::emoji_packs::fetch_all(&client, Some(&room)).await {
+            let _ = event_tx.send(ClientEvent::CustomEmojiPacksUpdated(packs));
+        }
+    });
+}
+
+/// Pull a real chunk of history right after a timeline (re)opens — sync alone
+/// only seeds it with the last ~20 events, which needn't even fill a tall
+/// viewport. (Restored original behavior: this was removed while hunting the
+/// scroll bug, but prepended history never moves a *bottom-anchored* view —
+/// the jumps it seemed to cause were the top-anchoring root bug.) Detached:
+/// items arrive via the timeline's own diff stream.
+fn spawn_initial_backfill(
+    timeline: Arc<Timeline>,
+    room_id: String,
+    event_tx: mpsc::UnboundedSender<ClientEvent>,
+) {
+    tokio::spawn(async move {
+        match timeline.paginate_backwards(60).await {
+            Ok(true) => {
+                let _ = event_tx.send(ClientEvent::TimelineStartReached { room_id });
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(%room_id, %error, "initial back-pagination failed");
+            }
+        }
+    });
+}
+
 // One parameter per worker-owned resource a command can touch; bundling them
 // into a context struct would just move the same list one level down.
 #[allow(clippy::too_many_arguments)]
@@ -396,6 +550,7 @@ async fn handle_command(
     match cmd {
         ClientCommand::Logout => {
             call_manager.leave_all().await;
+            worker_state.sync_stopped_intentionally = true;
             sync_service.stop().await;
             if let Err(error) = session::logout(paths, client).await {
                 tracing::warn!(%error, "failed to clear local session during logout");
@@ -462,19 +617,7 @@ async fn handle_command(
                         event_tx.clone(),
                     );
 
-                    let emoji_client = client.clone();
-                    let emoji_event_tx = event_tx.clone();
-                    let emoji_room = room.clone();
-                    tokio::spawn(async move {
-                        // None = transport failure somewhere; keep the UI's
-                        // current pack set instead of wiping custom emoji
-                        // over a network blip.
-                        if let Some(packs) =
-                            crate::rooms::emoji_packs::fetch_all(&emoji_client, Some(&emoji_room)).await
-                        {
-                            let _ = emoji_event_tx.send(ClientEvent::CustomEmojiPacksUpdated(packs));
-                        }
-                    });
+                    spawn_emoji_pack_refresh(client, room.clone(), event_tx);
 
                     let tags_event_tx = event_tx.clone();
                     let tags_room = room.clone();
@@ -501,29 +644,7 @@ async fn handle_command(
                         let _ = call_event_tx.send(ClientEvent::CallStateUpdated(state));
                     });
 
-                    // Pull a real chunk of history right away — sync alone
-                    // only seeds the timeline with the last ~20 events.
-                    // (Restored original behavior: this was removed while
-                    // hunting the scroll bug, but prepended history never
-                    // moves a *bottom-anchored* view — the jumps it seemed
-                    // to cause were the top-anchoring root bug.) Detached:
-                    // items arrive via the timeline's own diff stream.
-                    let paginate_timeline = timeline.clone();
-                    let paginate_event_tx = event_tx.clone();
-                    let paginate_room_id = room_id.clone();
-                    tokio::spawn(async move {
-                        match paginate_timeline.paginate_backwards(60).await {
-                            Ok(true) => {
-                                let _ = paginate_event_tx.send(ClientEvent::TimelineStartReached {
-                                    room_id: paginate_room_id,
-                                });
-                            }
-                            Ok(false) => {}
-                            Err(error) => {
-                                tracing::warn!(room_id = %paginate_room_id, %error, "initial back-pagination failed");
-                            }
-                        }
-                    });
+                    spawn_initial_backfill(timeline.clone(), room_id.clone(), event_tx.clone());
 
                     worker_state
                         .open_rooms
@@ -533,6 +654,18 @@ async fn handle_command(
                     tracing::warn!(%room_id, %error, "failed to open room timeline");
                 }
             }
+        }
+
+        ClientCommand::RefreshEmojiPacks { room_id } => {
+            let Ok(parsed_room_id) = RoomId::parse(&room_id) else {
+                tracing::warn!(%room_id, "emoji pack refresh for an unparseable room id");
+                return;
+            };
+            let Some(room) = client.get_room(&parsed_room_id) else {
+                tracing::debug!(%room_id, "emoji pack refresh for a room not in the local store");
+                return;
+            };
+            spawn_emoji_pack_refresh(client, room, event_tx);
         }
 
         ClientCommand::CloseRoom { room_id } => {
@@ -546,6 +679,50 @@ async fn handle_command(
                 None,
             )
             .await;
+        }
+
+        ClientCommand::ShrinkTimeline { room_id } => {
+            // Guard on the room actually being open: a stale shrink arriving
+            // after a room switch must not resurrect a closed timeline.
+            let Some(handles) = worker_state.open_rooms.remove(&room_id) else {
+                return;
+            };
+            tracing::info!(%room_id, "shrinking timeline window (reopening)");
+            // Dropping the handles aborts the diff forwarder and releases the
+            // `Timeline` — at which point the event cache's *auto-shrink*
+            // collapses the room's in-memory chunk back to the newest page.
+            // That check (`auto_shrink_if_no_subscribers`) runs in a
+            // background task after the aborted tasks are actually reaped, so
+            // give it a beat before resubscribing; reopen too fast and the
+            // fresh timeline re-seeds with the full accumulated window, and
+            // the shrink was for nothing. (If the race is lost anyway, the
+            // UI sees an oversized reset and simply asks again on the next
+            // diff batch.) Sleeping inline also parks every queued command
+            // behind the swap, which is what makes it atomic for senders.
+            drop(handles);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            match timeline::open(client, room_id.clone(), event_tx.clone()).await {
+                Ok((timeline, timeline_task)) => {
+                    // Unlike OpenRoom, no member/emoji/tag/call refetches:
+                    // none of those changed — only the timeline is new.
+                    let typing_task = timeline::spawn_typing_forwarder(
+                        timeline.room().clone(),
+                        room_id.clone(),
+                        event_tx.clone(),
+                    );
+                    spawn_initial_backfill(timeline.clone(), room_id.clone(), event_tx.clone());
+                    worker_state
+                        .open_rooms
+                        .insert(room_id, RoomHandles { timeline, timeline_task, typing_task });
+                }
+                Err(error) => {
+                    // The old timeline is already gone; the room is left
+                    // closed (sends will fail until it's reopened by a room
+                    // switch). Rare — `open` on an already-open room only
+                    // fails if the store itself is failing.
+                    tracing::warn!(%room_id, %error, "failed to reopen timeline after shrink");
+                }
+            }
         }
 
         ClientCommand::OpenDirectMessage { user_id, encrypted, request_id } => {
@@ -597,7 +774,10 @@ async fn handle_command(
             let timeline = handles.timeline.clone();
             let event_tx = event_tx.clone();
             tokio::spawn(async move {
-                match timeline.paginate_backwards(50).await {
+                // 80 per page: served from the local event-cache store until
+                // stored history runs out, so a bigger page just means fewer
+                // prefetch boundaries while scrolling — not slower requests.
+                match timeline.paginate_backwards(80).await {
                     Ok(reached_start) => {
                         if reached_start {
                             let _ = event_tx.send(ClientEvent::TimelineStartReached { room_id });

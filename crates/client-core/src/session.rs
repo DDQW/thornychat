@@ -11,6 +11,7 @@ use std::path::Path;
 use matrix_sdk::{
     authentication::matrix::MatrixSession,
     config::SyncSettings,
+    cross_process_lock::CrossProcessLockConfig,
     ruma::{
         api::client::session::get_login_types::v3::LoginType, OwnedDeviceId, OwnedUserId,
     },
@@ -161,21 +162,33 @@ pub async fn try_restore(paths: &AppPaths) -> CoreResult<Option<RestoredSession>
         }
     };
 
-    // From here on, failures are store problems (meta.homeserver is a full
-    // URL, so build_client does no network discovery; restore_session is
-    // local store activation): a corrupt sqlite store or one bound to a
-    // different device (MismatchedAccount). Propagating them would wedge
-    // startup permanently — interactive login builds on the SAME store and
-    // fails identically. Self-heal like the corruption paths above: drop
-    // the session and store, fall back to a clean interactive login. The
-    // keyring entry is left in place (overwritten by the next login).
+    // A *store* failure here can only be self-healed by starting clean:
+    // interactive login builds on the SAME store and would fail identically,
+    // wedging startup forever. So a corrupt sqlite store still discards.
+    //
+    // Everything else must not. `build_client` does reach the network even
+    // when handed a full homeserver URL — the comment that used to sit here
+    // claimed otherwise, and on 2026-08-24 a `error sending request` at launch
+    // took that branch and deleted the session, the cache, and this device's
+    // E2EE identity. Launching before the network is up (autostart at boot, or
+    // straight after a resume) is exactly when that happens, so the cost of
+    // guessing wrong here is high and recurring.
     let client = match build_client(&meta.homeserver, &paths.state_store_dir()).await {
         Ok(client) => client,
-        Err(error) => {
+        Err(error) if error.is_unusable_store() => {
             tracing::warn!(%error, "state store unusable, falling back to interactive login");
             let _ = std::fs::remove_file(&meta_path);
             discard_state_store(paths);
             return Ok(None);
+        }
+        Err(error) => {
+            // Session left untouched: the caller retries, and a later attempt
+            // (or the next launch) restores it.
+            tracing::warn!(
+                %error,
+                "could not build the client; keeping the saved session for a retry"
+            );
+            return Err(error);
         }
     };
 
@@ -190,6 +203,20 @@ pub async fn try_restore(paths: &AppPaths) -> CoreResult<Option<RestoredSession>
     };
 
     if let Err(error) = client.restore_session(session).await {
+        let error = CoreError::from(error);
+        // The mirror image of the build step above, and a blacklist rather
+        // than a whitelist because `matrix_sdk::Error` is broad: almost
+        // everything here really is a local problem that only a clean store
+        // fixes (a crypto account bound to a dead device id, `MismatchedAccount`,
+        // a half-written store). A transport error is the one thing that
+        // certainly isn't, and must never cost the session.
+        if error.is_transient_transport() {
+            tracing::warn!(
+                %error,
+                "could not reach the homeserver while restoring; keeping the saved session"
+            );
+            return Err(error);
+        }
         tracing::warn!(%error, "session restore failed against the state store, falling back to interactive login");
         // Drop the client (and its open store handles) before discarding —
         // Windows can't delete files another handle has open. If the
@@ -368,9 +395,47 @@ fn discard_state_store(paths: &AppPaths) {
     }
 }
 
+/// Builds the client with the cross-process store lock **disabled**.
+///
+/// This is the single biggest reduction in idle disk writes available here, and
+/// it costs nothing behaviourally.
+///
+/// `ClientBuilder` defaults to `CrossProcessLockConfig::MultiProcess`
+/// (`matrix-sdk/src/client/builder/mod.rs`), which arms a lease-renewal task
+/// with `LEASE_DURATION_MS = 500` and `EXTEND_LEASE_EVERY_MS = 50`
+/// (`matrix-sdk-common/src/cross_process_lock.rs`). That is a committed
+/// `INSERT … ON CONFLICT DO UPDATE` on the event-cache store's `lease_locks`
+/// table **twenty times a second, forever**, whether or not anything happened.
+/// On top of it, the event-cache lock is acquired *before* the "nothing
+/// changed" early-return in `handle_timeline_inner`, so every room in every
+/// sync response pays another one even when its update is empty.
+///
+/// Measured here: the app wrote 129.9 KB/s and 64.6 write-ops/s while
+/// completely idle, with the event-cache WAL touched in 100% of two-second
+/// sampling windows and pinned at SQLite's 1000-page checkpoint threshold.
+///
+/// `SingleProcess` makes `try_lock_once` a no-op that touches no database and
+/// spawns no renew task. That is the honest description of this app: one
+/// instance owns a profile at a time, and nothing here calls
+/// `Encryption::enable_cross_process_store_lock`, so no code path depends on
+/// the multi-process behaviour.
+///
+/// **Do not set this back to `MultiProcess` without a reason.** Its only
+/// purpose is letting a second process share these databases safely — if that
+/// ever becomes a goal (a background notification helper, say), this is the
+/// line that has to change first, and the write cost comes back with it.
+///
+/// Note what is deliberately *not* done: the state store stays on disk. It
+/// looks like a cache but is not one — `client.rooms()` reads an in-memory map
+/// whose only cold-start seed is `load_rooms()` from that store, and the
+/// sidebar's names, heroes and member counts are all persisted `RoomInfo`
+/// fields. Running it from memory leaves the app with unnamed rooms and no
+/// spaces, which is exactly what happened when it was tried. It is also only
+/// ~7% of the write traffic, so there is nothing to gain.
 async fn build_client(homeserver: &str, store_dir: &Path) -> CoreResult<Client> {
     let client = Client::builder()
         .server_name_or_homeserver_url(homeserver)
+        .cross_process_store_config(CrossProcessLockConfig::SingleProcess)
         .sqlite_store(store_dir, None)
         .build()
         .await?;

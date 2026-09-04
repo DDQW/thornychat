@@ -40,6 +40,17 @@ use serde::Deserialize;
 
 use crate::events::{CustomEmoji, EmojiPack};
 
+/// A pack source that could not be read because the request itself failed.
+///
+/// Deliberately detail-free: the underlying `matrix_sdk::Error` is logged at
+/// the point it happens, and every caller reacts the same way — keep the
+/// packs already gathered rather than let a transient failure wipe them from
+/// the UI. Distinct from `Ok(None)` / `Ok(vec![])`, which mean the pack
+/// genuinely isn't there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("failed to fetch emoji pack data")]
+pub struct PackFetchError;
+
 #[derive(Debug, Deserialize)]
 struct PackImage {
     url: String,
@@ -151,10 +162,10 @@ fn pack_content_to_emoji_pack(fallback_name: String, content: PackContent) -> Op
     Some(EmojiPack { name, emojis })
 }
 
-/// `Err(())` = transport failure (the data may well exist server-side);
+/// `Err(PackFetchError)` = transport failure (the data may well exist server-side);
 /// `Ok(None)` = genuinely no pack. Deserialize failures are persistent data
 /// problems, not transient, so they count as absence.
-async fn fetch_user_pack(client: &Client) -> Result<Option<EmojiPack>, ()> {
+async fn fetch_user_pack(client: &Client) -> Result<Option<EmojiPack>, PackFetchError> {
     let event_type = GlobalAccountDataEventType::from("im.ponies.user_emotes");
     let raw = match client.account().account_data_raw(event_type).await {
         Ok(Some(raw)) => raw,
@@ -164,7 +175,7 @@ async fn fetch_user_pack(client: &Client) -> Result<Option<EmojiPack>, ()> {
         }
         Err(error) => {
             tracing::warn!(%error, "failed to fetch im.ponies.user_emotes");
-            return Err(());
+            return Err(PackFetchError);
         }
     };
     let content: PackContent = match raw.deserialize_as_unchecked() {
@@ -177,10 +188,10 @@ async fn fetch_user_pack(client: &Client) -> Result<Option<EmojiPack>, ()> {
     Ok(pack_content_to_emoji_pack("Personal".to_string(), content))
 }
 
-/// `Err(())` when the enabled-packs account data or any referenced pack
+/// `Err(PackFetchError)` when the enabled-packs account data or any referenced pack
 /// failed to fetch for transport reasons — a partial result would make the
 /// caller wipe the missing packs from the UI.
-async fn fetch_enabled_room_packs(client: &Client) -> Result<Vec<EmojiPack>, ()> {
+async fn fetch_enabled_room_packs(client: &Client) -> Result<Vec<EmojiPack>, PackFetchError> {
     let event_type = GlobalAccountDataEventType::from("im.ponies.emote_rooms");
     let raw = match client.account().account_data_raw(event_type).await {
         Ok(Some(raw)) => raw,
@@ -190,7 +201,7 @@ async fn fetch_enabled_room_packs(client: &Client) -> Result<Vec<EmojiPack>, ()>
         }
         Err(error) => {
             tracing::warn!(%error, "failed to fetch im.ponies.emote_rooms");
-            return Err(());
+            return Err(PackFetchError);
         }
     };
     tracing::info!(raw = %raw.json(), "DIAGNOSTIC: im.ponies.emote_rooms raw account data");
@@ -233,9 +244,9 @@ async fn fetch_enabled_room_packs(client: &Client) -> Result<Vec<EmojiPack>, ()>
 /// `im.ponies.room_emotes` is never synced into the local state store and
 /// `Room::get_state_event` (a local-cache-only read) always misses even when
 /// the event genuinely exists server-side.
-/// `Err(())` = transport failure; `Ok(None)` = no such pack (404, empty, or
+/// `Err(PackFetchError)` = transport failure; `Ok(None)` = no such pack (404, empty, or
 /// undeserializable content).
-pub async fn fetch_room_pack(room: &Room, state_key: &str) -> Result<Option<EmojiPack>, ()> {
+pub async fn fetch_room_pack(room: &Room, state_key: &str) -> Result<Option<EmojiPack>, PackFetchError> {
     let request = get_state_event_for_key::v3::Request::new(
         room.room_id().to_owned(),
         StateEventType::from("im.ponies.room_emotes"),
@@ -258,7 +269,7 @@ pub async fn fetch_room_pack(room: &Room, state_key: &str) -> Result<Option<Emoj
                 return Ok(None);
             }
             tracing::warn!(room_id = %room.room_id(), %error, "failed to fetch im.ponies.room_emotes state event");
-            return Err(());
+            return Err(PackFetchError);
         }
     };
 
@@ -292,15 +303,15 @@ pub async fn fetch_room_pack(room: &Room, state_key: &str) -> Result<Option<Emoj
 /// never includes these custom/relationship events, so a local-cache read
 /// misses them even when they exist server-side.
 ///
-/// `Err(())` = transport failure; per-event deserialize failures are
+/// `Err(PackFetchError)` = transport failure; per-event deserialize failures are
 /// persistent data problems and just skip that one event.
-async fn scan_room_state(room: &Room) -> Result<(Vec<EmojiPack>, Vec<OwnedRoomId>), ()> {
+async fn scan_room_state(room: &Room) -> Result<(Vec<EmojiPack>, Vec<OwnedRoomId>), PackFetchError> {
     let request = get_state_events::v3::Request::new(room.room_id().to_owned());
     let response = match room.client().send(request).await {
         Ok(response) => response,
         Err(error) => {
             tracing::warn!(room_id = %room.room_id(), %error, "failed to fetch room state for emoji packs");
-            return Err(());
+            return Err(PackFetchError);
         }
     };
 
@@ -386,8 +397,8 @@ async fn scan_room_state(room: &Room) -> Result<(Vec<EmojiPack>, Vec<OwnedRoomId
 
 /// Every image pack in the room, across ALL state keys — the packs half of
 /// [`scan_room_state`] (see it for why the whole room state has to be pulled).
-/// `Err(())` = transport failure.
-pub async fn fetch_room_packs(room: &Room) -> Result<Vec<EmojiPack>, ()> {
+/// `Err(PackFetchError)` = transport failure.
+pub async fn fetch_room_packs(room: &Room) -> Result<Vec<EmojiPack>, PackFetchError> {
     Ok(scan_room_state(room).await?.0)
 }
 
@@ -453,7 +464,7 @@ async fn fetch_space_packs(
         }
         let (space_packs, grandparents) = match scan_room_state(&space).await {
             Ok(result) => result,
-            Err(()) => {
+            Err(PackFetchError) => {
                 tracing::warn!(space_id = %space_id, "failed to fetch parent-space state; skipping its packs");
                 continue;
             }

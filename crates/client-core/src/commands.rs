@@ -27,6 +27,14 @@ pub enum ClientCommand {
     // --- Phase 1: room list / timeline navigation ---
     OpenRoom { room_id: String },
     CloseRoom { room_id: String },
+    /// Drop and re-open the room's timeline so its window collapses back to
+    /// the newest page. Sent by the UI when days of live appends have grown
+    /// the item list past its cap (see `ui`'s `MAX_LIVE_ITEMS`) — the trimmed
+    /// history stays one back-pagination away, exactly as if the room had
+    /// just been opened. The swap is atomic within the command loop: commands
+    /// queued behind this one see the new timeline handles, so there is no
+    /// window where sends fail with "room is not open".
+    ShrinkTimeline { room_id: String },
     LoadOlderTimelineEvents { room_id: String, request_id: RequestId },
 
     // --- Phase 2: sending ---
@@ -91,6 +99,19 @@ pub enum ClientCommand {
     /// position still advances server-side without telling anyone else.
     MarkRoomRead { room_id: String, public_receipt: bool },
     FetchMedia { mxc_url: String, request_id: RequestId },
+
+    /// Re-resolve every MSC2545 custom emoji pack this account can use, with
+    /// `room_id` as the "currently open room" for the room/space-scoped
+    /// sources. Custom emoji are the one piece of room state the client is
+    /// never pushed: sliding sync's `required_state` is a fixed list that
+    /// doesn't include `im.ponies.*`, so a pack edited server-side (a new
+    /// emote added to the room pack, say) stays invisible until something
+    /// re-fetches it. `OpenRoom` does that once per room open — which left a
+    /// long-running session parked in one room showing yesterday's pack.
+    /// The UI sends this when a picker opens, throttled; a transport failure
+    /// keeps the packs already loaded.
+    RefreshEmojiPacks { room_id: String },
+
 
     // --- Phase 3: cross-signing bootstrap ---
     /// Retry after the user completed the UIAA fallback web page prompted
