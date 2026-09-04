@@ -21,6 +21,16 @@
 //! This is the standard release-build approach for ThornyChat - prefer
 //! `cargo xtask` over a bare `cargo build --release` (which produces only the
 //! generic variant).
+//!
+//! It also carries the local dev installer for Win11 toast notifications,
+//! which need an AUMID registration this repo can't get from a bare exe (see
+//! `ui::platform::app_identity`):
+//!
+//!   cargo xtask install-dev [--debug]   register this machine for toasts
+//!   cargo xtask uninstall-dev           undo that
+//!   cargo xtask toast-test [--debug]    fire one toast to prove it works
+//!
+//! Those three only ever *run* an already-built exe - none of them build.
 
 use std::env;
 use std::fs::OpenOptions;
@@ -34,6 +44,60 @@ const VARIANTS: [&str; 2] = ["znver4", "znver5"];
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
 
+    let args: Vec<String> = env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        // Bare `cargo xtask` stays the three-variant release build.
+        None => build_all(&root),
+        Some("install-dev") => identity(&root, "--install-dev", &args[1..]),
+        Some("uninstall-dev") => identity(&root, "--uninstall-dev", &args[1..]),
+        Some("toast-test") => identity(&root, "--toast-test", &args[1..]),
+        Some(other) => {
+            eprintln!("error: unknown command `{other}`");
+            eprintln!();
+            eprintln!("usage:");
+            eprintln!("  cargo xtask                        build the three release variants");
+            eprintln!("  cargo xtask install-dev [--debug]  register this build for Win11 toasts");
+            eprintln!("  cargo xtask uninstall-dev          remove that registration");
+            eprintln!("  cargo xtask toast-test [--debug]   fire a test toast");
+            exit(2);
+        }
+    }
+}
+
+/// Runs one of the app's toast-identity commands against an already-built exe
+/// (see `ui::platform::app_identity`). Deliberately doesn't build anything: it
+/// registers the binary you have, and says so plainly when there isn't one,
+/// rather than kicking off a multi-minute release build as a side effect.
+///
+/// `--debug` targets `target/<triple>/debug/thornychat.exe` instead, for when
+/// the binary you actually run is a `cargo run` build. The registration points
+/// at whichever exe it was run from, so installing from one and then running
+/// the other means re-running install-dev.
+fn identity(root: &Path, flag: &str, rest: &[String]) {
+    let profile = if rest.iter().any(|a| a == "--debug") { "debug" } else { "release" };
+    let exe = root.join("target").join("x86_64-pc-windows-msvc").join(profile).join("thornychat.exe");
+    if !exe.exists() {
+        eprintln!("error: {} not found.", exe.display());
+        eprintln!(
+            "       build it first ({}), then re-run this command.",
+            if profile == "debug" { "cargo build" } else { "cargo xtask" }
+        );
+        exit(1);
+    }
+
+    // Inheriting stdio is what makes the child's output visible: the release
+    // exe is GUI-subsystem and never gets a console of its own, but it writes
+    // to the handles this console process passes down.
+    let status = Command::new(&exe).arg(flag).status().unwrap_or_else(|e| {
+        eprintln!("error: failed to run {}: {e}", exe.display());
+        exit(1);
+    });
+    if !status.success() {
+        exit(status.code().unwrap_or(1));
+    }
+}
+
+fn build_all(root: &Path) {
     // The linker can't overwrite a running exe - catch that up front instead
     // of failing minutes into a build. Opening for write trips the same file
     // lock the linker would; a copy running from some other directory doesn't
@@ -57,9 +121,9 @@ fn main() {
 
     // Generic first: no target-cpu flag, default target dir - identical to
     // what a plain `cargo build --release` produces.
-    build("generic (baseline x86-64)", &root, None);
+    build("generic (baseline x86-64)", root, None);
     for v in VARIANTS {
-        build(v, &root, Some(v));
+        build(v, root, Some(v));
     }
 
     println!();

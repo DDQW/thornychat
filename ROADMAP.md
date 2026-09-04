@@ -30,7 +30,8 @@ see README "Building").
   typing, reply/quote w/ jump-to-quoted + thumbnails, send retry, slash
   commands (`/me`, `/plain`, `/join`, `/knock`, `/leave`|`/part`, `/invite`,
   `/kick`, `/ban`; `//` escapes) + in-app manual, right-click cut/copy/paste
-  menu, Windows ISpellChecker suggestion bar w/ opt-in autocorrect.
+  menu, Windows ISpellChecker typo marking in-composer + suggestion bar
+  w/ opt-in autocorrect.
 - E2EE: cross-signing bootstrap w/ UIAA fallback, SAS verify, opt-in key
   backup/recovery (Settings → Security), trust shields.
 - Media & rich content: reactions (no-bg pills, hover attribution, full
@@ -106,18 +107,25 @@ Done: autostart (HKCU Run + `--minimized`, toggled from Settings); icon +
 version resource embedded via `app.rc`/`embed-resource`; window
 size/position/maximized remembered across launches. (System accent color
 via `UISettings` was considered and dropped — the theming engine's custom
-accents cover it.)
+accents cover it.) Toast identity settled (`platform/app_identity.rs`):
+AUMID `Woelki.ThornyChat` + toast-activator CLSID, registered on a dev
+machine by `cargo xtask install-dev` (Start Menu shortcut + two HKCU keys,
+no MSIX/signing), verifiable with `cargo xtask toast-test`; basic
+title/body toasts go out through `platform::notifications::show`.
 
 Remaining:
 - Push-rule evaluation → `ClientEvent::Notification` (client-core `push.rs`
   still only reads/writes notification *settings*; the Notification event
-  is never emitted).
-- WinRT toast notifications (actionable, inline reply) —
-  `platform/notifications.rs` is a stub; needs AUMID/package identity —
-  validate early, affects packaging.
+  is never emitted) — nothing calls `notifications::show` until this lands.
+- Toast actions (buttons, inline reply): needs an
+  `INotificationActivationCallback` COM server on the already-registered
+  activator CLSID. Until it exists the app answers a toast click's
+  `-ToastActivated` launch by exiting.
 - Tray icon w/ unread badge, minimize-to-tray, single-instance enforcement
   (`platform/tray.rs` is a stub).
-- MSIX packaging (primary) + NSIS/WiX installer fallback.
+- MSIX packaging (primary) + NSIS/WiX installer fallback. Whichever ships
+  must write the same AUMID and activator CLSID as `install-dev`, or every
+  pinned taskbar entry and per-app notification setting starts over.
 
 ## Backlog / known gaps (roughly by value)
 
