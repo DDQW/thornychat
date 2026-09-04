@@ -8,15 +8,19 @@
 //! needed to correlate the eventual
 //! `ClientEvent::CommandSucceeded`/`CommandFailed`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::sync::Arc;
 
 use client_core::commands::RequestId;
 use client_core::events::{EmojiPack, ReplyPreview, RoomMember};
-use iced::widget::{button, column, container, row, text, text_input};
+use iced::advanced::text::editor::{Cursor, Position};
+use iced::widget::text_editor::{self, Action, Binding, Edit, KeyPress};
+use iced::widget::{button, column, container, row, text};
 use iced::{Element, Length, Task};
 
 use crate::spellcheck_config::SpellcheckConfig;
+use crate::spellcheck_highlight::{is_checkable, words, Word};
 
 /// Which tab the composer's picker shows while open. Set by whichever button
 /// opened it (emoji vs sticker) and by the in-panel tab bar.
@@ -29,6 +33,13 @@ pub enum PickerTab {
 
 #[derive(Debug, Clone, Default)]
 pub struct State {
+    /// The draft as the editor holds it — the widget's own buffer, and the
+    /// only thing with a caret.
+    pub content: text_editor::Content,
+    /// Mirror of `content.text()`, refreshed after every edit. Everything
+    /// downstream (send, captions, the mention filter) reads the draft as a
+    /// plain string, and rebuilding it once per edit is far cheaper than
+    /// walking the editor's lines at each of those call sites.
     pub body: String,
     pub show_emoji_picker: bool,
     pub picker_tab: PickerTab,
@@ -79,6 +90,16 @@ pub struct State {
     pub context_menu: Option<iced::Point>,
 }
 
+impl State {
+    /// Puts a draft back in the composer, caret at the end — for when a send
+    /// fails and the carried text has to be restored. Goes through the same
+    /// rebuild every programmatic edit does, so the editor and the `body`
+    /// mirror can't drift apart.
+    pub fn restore_draft(&mut self, body: String) {
+        set_body(self, body, None);
+    }
+}
+
 /// A file waiting in the composer to be sent (picked via the dialog or
 /// pasted from the clipboard).
 #[derive(Debug, Clone)]
@@ -103,22 +124,33 @@ pub struct CarriedText {
     pub replying_to: Option<ReplyPreview>,
 }
 
+/// How many word verdicts to remember before dropping the lot. The cache is
+/// a latency trick, not a store — a long session in one composer shouldn't
+/// grow it without bound.
+const VERDICT_CACHE_CAP: usize = 512;
+
 /// Spell-check state for the composer, recomputed on every edit. Holds only
-/// the speller's plain-data verdict so `view` never has to talk to COM.
+/// the speller's plain-data verdicts so `view` never has to talk to COM.
 #[derive(Debug, Clone, Default)]
 pub struct SpellState {
     /// The flagged word the suggestion bar targets, or `None`.
     pub flagged: Option<Flagged>,
+    /// Which words to draw in the danger colour inside the editor, handed
+    /// straight to the highlighter. See [`crate::spellcheck_highlight`].
+    pub highlight: crate::spellcheck_highlight::Settings,
     /// Set for exactly one edit after an autocorrect: if the next edit is the
     /// Backspace that would delete the space we just added, we restore the
     /// original word instead ("undo autocorrect", like a phone keyboard).
     pending_revert: Option<Revert>,
-    /// Memo of the speller's verdict for the last word checked, so the
-    /// synchronous COM call isn't repeated on every keystroke while the
-    /// draft ends in whitespace and the trailing word hasn't changed.
-    /// Keyed by the word (not its range — edits earlier in the body shift
-    /// the range without changing the word).
-    last_checked: Option<(String, crate::spellcheck::Analysis)>,
+    /// Per-word memo of [`crate::spellcheck::is_misspelled`]. Every keystroke
+    /// re-checks the whole draft, and the speller is a synchronous COM call —
+    /// without this, a long draft would pay for all of it on every key.
+    /// Keyed by the word (not its range — edits earlier in the body shift the
+    /// range without changing the word).
+    verdicts: HashMap<String, bool>,
+    /// Memo of the bar's suggestion list, so parking the caret next to a typo
+    /// doesn't re-run the speller's expensive `Suggest` on every keystroke.
+    flag_memo: Option<(String, Vec<String>)>,
 }
 
 /// A misspelled word the suggestion bar is offering fixes for.
@@ -132,66 +164,134 @@ pub struct Flagged {
 
 #[derive(Debug, Clone)]
 struct Revert {
-    /// Body value a single Backspace produces (corrected text minus the
-    /// trailing space) — the trigger that means "undo the autocorrect".
-    undo_trigger: String,
-    /// Body to restore on undo (the user's original word, no trailing space).
-    reverted: String,
+    /// Byte range the correction occupies in the body autocorrect left behind.
+    range: Range<usize>,
+    /// The word autocorrect put there — checked before undoing, so a body
+    /// edited out from under us is never corrupted.
+    corrected: String,
+    /// The word the user actually typed, to put back.
+    original: String,
+}
+
+impl Revert {
+    /// The body and caret to restore when the Backspace that just ran was the
+    /// "undo the autocorrect" one: the caret must have landed exactly where
+    /// the boundary character used to be, with the correction still intact.
+    fn undo(&self, body: &str, cursor: usize) -> Option<(String, usize)> {
+        if cursor != self.range.end
+            || body.get(self.range.clone()) != Some(self.corrected.as_str())
+        {
+            return None;
+        }
+        let mut restored = body.to_string();
+        restored.replace_range(self.range.clone(), &self.original);
+        Some((restored, self.range.start + self.original.len()))
+    }
 }
 
 impl SpellState {
-    /// Re-runs the speller on the last completed word of `body` and updates
-    /// the suggestion bar. Clears the bar (a no-op otherwise) when spell check
-    /// is disabled, or the trailing word is still being typed / isn't prose.
-    fn recompute(&mut self, body: &str, cfg: &SpellcheckConfig) {
-        self.recompute_cached(body, cfg, None);
-    }
-
-    /// Like [`Self::recompute`], but reuses `cached` (an analysis of the
-    /// trailing word computed this same edit, e.g. by autocorrect) instead of
-    /// asking the speller again. Also memoizes per word so repeated calls
-    /// while the trailing word is unchanged (every keystroke of a mid-body
-    /// edit while the draft ends in whitespace) skip the COM round trip.
-    fn recompute_cached(
-        &mut self,
-        body: &str,
-        cfg: &SpellcheckConfig,
-        cached: Option<crate::spellcheck::Analysis>,
-    ) {
+    /// Re-checks every word in `body` and refreshes both the in-editor marks
+    /// and the suggestion bar. `cursor` is the caret's byte offset into
+    /// `body`. Clears everything when spell check is turned off.
+    fn recompute(&mut self, body: &str, cursor: usize, cfg: &SpellcheckConfig) {
         self.flagged = None;
         if !cfg.enabled {
+            self.set_misspelled(HashSet::new());
             return;
         }
-        let Some((range, word, raw)) = last_completed_word(body) else {
+
+        // The word under the caret is still being typed; flagging it would
+        // paint it red halfway through and unpaint it at the end. Words are
+        // matched by text, so this necessarily spares an identical word
+        // elsewhere in the draft too — until the next space brings it back.
+        let in_progress = word_being_typed(body, cursor).map(|word| word.core.to_string());
+
+        let mut misspelled = HashSet::new();
+        for word in words(body) {
+            if !is_checkable(word.raw)
+                || in_progress.as_deref() == Some(word.core)
+                || misspelled.contains(word.core)
+            {
+                continue;
+            }
+            if self.verdict(word.core) {
+                misspelled.insert(word.core.to_string());
+            }
+        }
+        self.set_misspelled(misspelled);
+
+        // The bar targets the flagged word the caret is in or has just left,
+        // so clicking into a red word offers its fixes.
+        let Some(target) = flag_target(body, cursor) else {
             return;
         };
-        if !is_checkable(&raw) {
+        if !self.highlight.misspelled.contains(target.core) {
             return;
         }
-        let analysis = if let Some(analysis) = cached {
-            // Fresh from this same edit (autocorrect ran the speller and
-            // left the body untouched) — reuse it and refresh the memo.
-            self.last_checked = Some((word.clone(), analysis.clone()));
-            analysis
-        } else {
-            match &self.last_checked {
-                Some((checked, verdict)) if *checked == word => verdict.clone(),
-                _ => {
-                    let fresh = crate::spellcheck::analyze(&word);
-                    self.last_checked = Some((word.clone(), fresh.clone()));
-                    fresh
-                }
+        let suggestions = match &self.flag_memo {
+            Some((word, suggestions)) if word == target.core => suggestions.clone(),
+            _ => {
+                let suggestions = crate::spellcheck::analyze(target.core).suggestions;
+                self.flag_memo = Some((target.core.to_string(), suggestions.clone()));
+                suggestions
             }
         };
-        if analysis.misspelled && !analysis.suggestions.is_empty() {
-            self.flagged = Some(Flagged { range, word, suggestions: analysis.suggestions });
+        if !suggestions.is_empty() {
+            self.flagged = Some(Flagged {
+                range: target.range,
+                word: target.core.to_string(),
+                suggestions,
+            });
         }
+    }
+
+    /// Cached [`crate::spellcheck::is_misspelled`].
+    fn verdict(&mut self, word: &str) -> bool {
+        if let Some(known) = self.verdicts.get(word) {
+            return *known;
+        }
+        if self.verdicts.len() >= VERDICT_CACHE_CAP {
+            self.verdicts.clear();
+        }
+        let verdict = crate::spellcheck::is_misspelled(word);
+        self.verdicts.insert(word.to_string(), verdict);
+        verdict
+    }
+
+    /// Swaps in a new set of flagged words, bumping the revision only when it
+    /// actually changed — that revision is the whole of the highlighter's
+    /// equality check, and bumping it re-runs the highlighter over every line.
+    fn set_misspelled(&mut self, misspelled: HashSet<String>) {
+        if *self.highlight.misspelled == misspelled {
+            return;
+        }
+        self.highlight.revision = self.highlight.revision.wrapping_add(1);
+        self.highlight.misspelled = Arc::new(misspelled);
+    }
+
+    /// Drops every memoized verdict — the personal dictionary just changed,
+    /// which can flip the answer for any word, not just the one added.
+    fn forget_verdicts(&mut self) {
+        self.verdicts.clear();
+        self.flag_memo = None;
+    }
+
+    /// Clears everything for a fresh draft. The highlighter revision survives:
+    /// it has to stay monotonic, or the widget could mistake the new empty
+    /// state for the one it is already showing.
+    fn reset(&mut self) {
+        let revision = self.highlight.revision;
+        *self = Self::default();
+        self.highlight.revision = revision;
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    BodyChanged(String),
+    /// The editor performed an edit or a caret move. Carries the widget's own
+    /// action rather than the resulting string: the caret is what lets
+    /// autocorrect find the word you just finished anywhere in the draft.
+    Action(Action),
     Send,
     ToggleEmojiPicker,
     ToggleStickerPicker,
@@ -286,38 +386,53 @@ pub fn update(
     spell: &SpellcheckConfig,
 ) -> (Task<Message>, Effect) {
     match message {
-        Message::BodyChanged(body) => {
-            let typing = Effect::Typing(!body.trim().is_empty());
-            let previous = std::mem::replace(&mut state.body, body);
-            // A stale send/attach error shouldn't pin itself above the
-            // composer once the user has moved on.
-            state.error = None;
+        Message::Action(action) => {
+            // The editor reports caret moves, clicks, drags and scrolls
+            // through here too — only a real edit should clear the error or
+            // re-announce that we're typing.
+            let is_edit = matches!(action, Action::Edit(_));
+            let was_backspace = matches!(action, Action::Edit(Edit::Backspace));
+            let finished_word = ends_word(&action);
+            if is_edit {
+                // A stale send/attach error shouldn't pin itself above the
+                // composer once the user has moved on.
+                state.error = None;
+            }
             // Typing dismisses the edit menu (its backdrop only swallows mouse
-            // events, so the focused input still receives keystrokes).
+            // events, so the focused editor still receives keystrokes).
             state.context_menu = None;
+
+            // A revert is good for exactly one edit — whatever that edit
+            // turns out to be.
+            let revert = state.spell.pending_revert.take();
+            state.content.perform(action);
+            state.body = state.content.text();
+            let typing = if is_edit {
+                Effect::Typing(!state.body.trim().is_empty())
+            } else {
+                Effect::None
+            };
 
             // Backspace immediately after an autocorrect undoes it (restores
             // the original word) instead of just deleting the space.
-            if let Some(revert) = state.spell.pending_revert.take() {
-                if state.body == revert.undo_trigger {
-                    state.body = revert.reverted;
-                    state.spell.recompute(&state.body, spell);
+            if was_backspace {
+                if let Some((body, caret)) = revert
+                    .and_then(|revert| revert.undo(&state.body, cursor_offset(&state.content)))
+                {
+                    set_body(state, body, Some(caret));
+                    recompute_spell(state, spell);
                     return (Task::none(), typing);
                 }
             }
 
-            // Autocorrect only fires on the "typed a space at the end" edit —
-            // the one shape we can locate the finished word in without a
-            // cursor position from the text input. When it ran the speller
-            // and left the body untouched, its analysis is handed straight
-            // to recompute so the word isn't analyzed twice per space.
-            let cached = if spell.autocorrect && typed_trailing_boundary(&previous, &state.body) {
-                maybe_autocorrect(state)
-            } else {
-                None
-            };
+            // Autocorrect fires on the edit that finishes a word — a space or
+            // a newline. The caret says which word that was, so it works
+            // mid-line and not only at the end of the draft.
+            if spell.autocorrect && finished_word {
+                maybe_autocorrect(state);
+            }
 
-            state.spell.recompute_cached(&state.body, spell, cached);
+            recompute_spell(state, spell);
             (Task::none(), typing)
         }
         Message::Send => {
@@ -428,30 +543,37 @@ pub fn update(
             (Task::none(), Effect::SendSticker { url, body, width, height })
         }
         Message::EmojiPicked(glyph) => {
-            state.body.push_str(glyph);
+            insert_at_caret(state, glyph);
             // The body changed by insertion, not by the undo-trigger
             // Backspace — a stale revert would misfire on a later deletion
             // and rewrite text the user didn't ask to restore.
             state.spell.pending_revert = None;
-            state.spell.recompute(&state.body, spell);
+            recompute_spell(state, spell);
             (Task::none(), Effect::EmojiUsed(glyph.to_string()))
         }
         Message::CustomEmojiPicked { shortcode, mxc_url } => {
-            state.body.push_str(&format!(":{shortcode}: "));
+            insert_at_caret(state, &format!(":{shortcode}: "));
             state.spell.pending_revert = None;
-            state.spell.recompute(&state.body, spell);
+            recompute_spell(state, spell);
             // Record usage by the mxc URL — the same key custom reactions use,
             // so an emoji's frequency is one tally across both and the
             // "Frequently used" row shows it once.
             (Task::none(), Effect::EmojiUsed(mxc_url))
         }
         Message::MentionCandidateClicked(user_id, display_name) => {
-            if let Some(at_pos) = state.body.rfind('@') {
-                state.body.truncate(at_pos);
+            // Rebuilt through `set_body` rather than poked into `state.body`:
+            // the editor owns the text now, and a body it doesn't know about
+            // would be overwritten by the next keystroke.
+            let mut body = state.body.clone();
+            if let Some(at_pos) = body.rfind('@') {
+                body.truncate(at_pos);
             }
-            state.body.push('@');
-            state.body.push_str(&display_name);
-            state.body.push(' ');
+            body.push('@');
+            body.push_str(&display_name);
+            body.push(' ');
+            // Caret to the end — completion only ever rewrites the trailing
+            // word (see `active_mention_query`).
+            set_body(state, body, None);
             if !state.mentioned.iter().any(|(id, _)| *id == user_id) {
                 state.mentioned.push((user_id, display_name));
             }
@@ -459,7 +581,7 @@ pub fn update(
             // A just-picked mention is never a typo — don't spell-flag the
             // tail of a multi-word display name ("@John Smyth" → "Smyth"
             // would pop "Did you mean: Smith", and clicking it would corrupt
-            // the mention text). Any later edit recomputes via BodyChanged.
+            // the mention text). Any later edit recomputes via `Action`.
             state.spell.flagged = None;
             (Task::none(), Effect::None)
         }
@@ -511,11 +633,14 @@ pub fn update(
                 // word we flagged, so a body edited out from under the bar is
                 // never corrupted.
                 if state.body.get(flagged.range.clone()) == Some(flagged.word.as_str()) {
-                    state.body.replace_range(flagged.range, &replacement);
+                    let caret = flagged.range.start + replacement.len();
+                    let mut body = state.body.clone();
+                    body.replace_range(flagged.range, &replacement);
+                    set_body(state, body, Some(caret));
                 }
             }
             state.spell.pending_revert = None;
-            state.spell.recompute(&state.body, spell);
+            recompute_spell(state, spell);
             (Task::none(), Effect::None)
         }
         Message::SpellAddToDictionary => {
@@ -524,8 +649,8 @@ pub fn update(
             }
             // The dictionary just changed — the memoized verdict for this
             // word is stale (it would keep flagging the word just added).
-            state.spell.last_checked = None;
-            state.spell.recompute(&state.body, spell);
+            state.spell.forget_verdicts();
+            recompute_spell(state, spell);
             (Task::none(), Effect::None)
         }
         Message::OpenContextMenu => {
@@ -562,24 +687,24 @@ pub fn update(
             )
         }
         Message::InsertText(text) => {
-            state.body.push_str(&text);
+            insert_at_caret(state, &text);
             // A paste isn't the autocorrect-undo Backspace — drop any pending
             // revert so a later deletion doesn't misfire (as with emoji).
             state.spell.pending_revert = None;
             state.error = None;
-            state.spell.recompute(&state.body, spell);
+            recompute_spell(state, spell);
             let typing = Effect::Typing(!state.body.trim().is_empty());
             // Focus so the caret lands after the pasted text, ready to keep
             // typing without an extra click.
             (iced::widget::operation::focus(input_id()), typing)
         }
         Message::SendSucceeded => {
-            state.body.clear();
+            set_body(state, String::new(), None);
             state.mentioned.clear();
             state.replying_to = None;
             state.pending_request = None;
             state.error = None;
-            state.spell = SpellState::default();
+            state.spell.reset();
             (Task::none(), Effect::Typing(false))
         }
         Message::SendFailed(reason) => {
@@ -599,116 +724,146 @@ fn active_mention_query(body: &str) -> Option<&str> {
     last_word.strip_prefix('@')
 }
 
-/// Applies the speller's high-confidence replacement to the just-finished
-/// word, if it offers one, and records how to undo it on the next Backspace.
-/// Called only after `typed_trailing_boundary`, so the finished word is the
-/// last completed word of `body`.
+/// The caret as an absolute byte offset into `State::body`.
 ///
-/// Returns the analysis when the speller ran AND the body was left untouched
-/// — the caller hands it to `recompute_cached` so the same word isn't
-/// analyzed twice per space. Returns `None` when the speller never ran or
-/// the body was rewritten (the analysis would describe the old word).
-fn maybe_autocorrect(state: &mut State) -> Option<crate::spellcheck::Analysis> {
-    let (range, word, raw) = last_completed_word(&state.body)?;
-    // Don't silently rewrite mentions/URLs/code, and leave leading-capital
-    // words (names, sentence starts) alone — the suggestion bar still offers
-    // those, but autocorrect shouldn't touch them.
-    if !is_checkable(&raw) || !starts_lowercase(&word) {
-        return None;
+/// `Content` reports the caret as a line/column pair, but everything the
+/// spell checker does is expressed in byte ranges over the flat draft, so
+/// the two have to be converted at every boundary.
+fn cursor_offset(content: &text_editor::Content) -> usize {
+    let cursor = content.cursor();
+    let mut offset = 0;
+    for (index, line) in content.lines().enumerate() {
+        if index == cursor.position.line {
+            return offset + cursor.position.column.min(line.text.len());
+        }
+        offset += line.text.len() + line_ending_len(line.ending);
     }
-    let analysis = crate::spellcheck::analyze(&word);
-    let Some(replacement) = analysis.replacement.clone() else {
-        return Some(analysis);
-    };
-    if replacement == word {
-        return Some(analysis);
-    }
-    // The last char of the body is the boundary (space) the user just typed;
-    // both the undo trigger and the restore target drop it.
-    let Some(boundary) = state.body.chars().next_back() else {
-        return Some(analysis);
-    };
-    let boundary_len = boundary.len_utf8();
-
-    let original_body = state.body.clone();
-    state.body.replace_range(range, &replacement);
-
-    let undo_trigger = state.body[..state.body.len() - boundary_len].to_string();
-    let reverted = original_body[..original_body.len() - boundary_len].to_string();
-    state.spell.pending_revert = Some(Revert { undo_trigger, reverted });
-    None
+    offset
 }
 
-/// The last whitespace-completed word in `body`: its byte range, the cleaned
-/// word (surrounding punctuation stripped), and the raw whitespace-delimited
-/// token it came from (used for the skip decisions in [`is_checkable`]).
-/// `None` while the user is still typing the final word — i.e. `body` doesn't
-/// end in whitespace — so a half-typed word is never flagged or corrected.
-fn last_completed_word(body: &str) -> Option<(Range<usize>, String, String)> {
-    if !body.chars().next_back()?.is_whitespace() {
-        return None;
+/// The inverse of [`cursor_offset`]: an absolute byte offset expressed as the
+/// line/column the editor can be moved to. Offsets past the end clamp to it.
+fn position_at(content: &text_editor::Content, offset: usize) -> Cursor {
+    let mut consumed = 0;
+    let mut last = Position { line: 0, column: 0 };
+    for (index, line) in content.lines().enumerate() {
+        let end = consumed + line.text.len();
+        if offset <= end {
+            return Cursor {
+                position: Position { line: index, column: offset - consumed },
+                selection: None,
+            };
+        }
+        consumed = end + line_ending_len(line.ending);
+        last = Position { line: index, column: line.text.len() };
     }
-    // End of the token: just past the last non-whitespace char.
-    let token_end = body
-        .char_indices()
-        .rev()
-        .find(|(_, c)| !c.is_whitespace())
-        .map(|(i, c)| i + c.len_utf8())?;
-    // Start of the token: just past the previous whitespace (or the start).
-    let token_start = body[..token_end]
-        .char_indices()
-        .rev()
-        .find(|(_, c)| c.is_whitespace())
-        .map(|(i, c)| i + c.len_utf8())
-        .unwrap_or(0);
-    let raw = &body[token_start..token_end];
-
-    // Trim to the alphanumeric core so the range we'd replace excludes
-    // surrounding punctuation ("helo," → correct just "helo").
-    let core_start = raw.char_indices().find(|(_, c)| c.is_alphanumeric()).map(|(i, _)| i)?;
-    let core_end = raw
-        .char_indices()
-        .rev()
-        .find(|(_, c)| c.is_alphanumeric())
-        .map(|(i, c)| i + c.len_utf8())?;
-    let range = (token_start + core_start)..(token_start + core_end);
-    let word = body[range.clone()].to_string();
-    Some((range, word, raw.to_string()))
+    Cursor { position: last, selection: None }
 }
 
-/// Whether a raw token is ordinary prose worth spell-checking — filters out
-/// the things chat is full of that a dictionary would wrongly flag: mentions,
-/// emoji shortcodes, URLs/paths, code-ish identifiers, acronyms, and anything
-/// carrying a digit.
-fn is_checkable(raw: &str) -> bool {
-    // Needs at least two letters to be a word worth checking.
-    if raw.chars().filter(|c| c.is_alphabetic()).count() < 2 {
-        return false;
+/// How many bytes `Content::text()` writes for a line ending. `None` means the
+/// line has no ending of its own — `text()` falls back to the platform default
+/// there, so the accounting has to as well.
+fn line_ending_len(ending: text_editor::LineEnding) -> usize {
+    if ending == text_editor::LineEnding::None {
+        text_editor::LineEnding::default().as_str().len()
+    } else {
+        ending.as_str().len()
     }
-    // Mentions and emoji shortcodes.
-    if raw.starts_with('@') || raw.starts_with(':') || raw.contains('@') {
-        return false;
+}
+
+/// Replaces the draft wholesale and puts the caret at `caret` (or the end).
+///
+/// This is the path every *programmatic* edit takes — emoji, mentions, paste,
+/// autocorrect, clearing on send. `Content` has no "replace this range"
+/// operation, so it is rebuilt and the caret restored by hand; that's O(draft),
+/// which for a chat message is nothing.
+fn set_body(state: &mut State, body: String, caret: Option<usize>) {
+    state.body = body;
+    state.content = text_editor::Content::with_text(&state.body);
+    let caret = caret.unwrap_or(state.body.len());
+    let position = position_at(&state.content, caret);
+    state.content.move_to(position);
+}
+
+/// Inserts `text` at the caret, leaving the caret just after it.
+fn insert_at_caret(state: &mut State, text: &str) {
+    let at = cursor_offset(&state.content);
+    let mut body = state.body.clone();
+    body.insert_str(at, text);
+    set_body(state, body, Some(at + text.len()));
+}
+
+/// Re-runs the spell check over the whole draft against the current caret.
+fn recompute_spell(state: &mut State, cfg: &SpellcheckConfig) {
+    let cursor = cursor_offset(&state.content);
+    state.spell.recompute(&state.body, cursor, cfg);
+}
+
+/// Whether an action finishes a word — the moment autocorrect gets to act.
+/// A paste isn't one of them: it can drop in any amount of text, and silently
+/// rewriting part of what someone pasted is not a fix anyone asked for.
+fn ends_word(action: &Action) -> bool {
+    match action {
+        Action::Edit(Edit::Insert(c)) => c.is_whitespace(),
+        Action::Edit(Edit::Enter) => true,
+        _ => false,
     }
-    // URLs / paths / snake_case identifiers.
-    if raw.contains("://")
-        || raw.contains('/')
-        || raw.contains('\\')
-        || raw.contains('_')
-        || raw.starts_with("www.")
-    {
-        return false;
-    }
-    // Versions, IDs, l33t — anything with a digit.
-    if raw.chars().any(|c| c.is_numeric()) {
-        return false;
-    }
-    // ALL-CAPS acronyms (GG, LOL) and MixedCase code identifiers (camelCase,
-    // PascalCase): flag neither. A plain Capitalized first letter is fine —
-    // autocorrect guards proper nouns separately (see `starts_lowercase`).
-    let letters: Vec<char> = raw.chars().filter(|c| c.is_alphabetic()).collect();
-    let all_upper = letters.iter().all(|c| c.is_uppercase());
-    let internal_upper = letters.iter().skip(1).any(|c| c.is_uppercase());
-    !(all_upper || internal_upper)
+}
+
+/// The word the caret is at the trailing edge of — the one being typed right
+/// now. Deliberately *not* "the word the caret is inside": clicking into the
+/// middle of a finished typo has to leave it marked, or the suggestion bar
+/// would empty out at the exact moment you reached for it.
+fn word_being_typed(body: &str, cursor: usize) -> Option<Word<'_>> {
+    words(body).find(|word| word.raw_range.end == cursor)
+}
+
+/// The word the caret has just finished: the last one that ends *before* it.
+/// A caret at a word's trailing edge means it is still being typed, so nothing
+/// is finished there.
+fn word_before_cursor(body: &str, cursor: usize) -> Option<Word<'_>> {
+    words(body).take_while(|word| word.raw_range.end < cursor).last()
+}
+
+/// The word the suggestion bar should offer fixes for: the one the caret is
+/// in, or — when the caret sits on whitespace — the one it just left.
+fn flag_target(body: &str, cursor: usize) -> Option<Word<'_>> {
+    words(body).take_while(|word| word.raw_range.start <= cursor).last()
+}
+
+/// Corrects the word the caret just finished, if the speller offers a
+/// plausible fix, and records how to undo it on the next Backspace.
+///
+/// Called on the edit that ends a word, so the target is the token immediately
+/// left of the caret — which is what makes this work mid-line rather than only
+/// at the very end of the draft.
+fn maybe_autocorrect(state: &mut State) {
+    let cursor = cursor_offset(&state.content);
+    // Everything the correction needs is copied out here: applying it borrows
+    // `state` mutably, which ends the borrow the word itself holds on `body`.
+    let Some((range, original)) = word_before_cursor(&state.body, cursor).and_then(|word| {
+        // Don't silently rewrite mentions/URLs/code, and leave leading-capital
+        // words (names, sentence starts) alone — the suggestion bar still
+        // offers those, but autocorrect shouldn't touch them.
+        (is_checkable(word.raw) && starts_lowercase(word.core))
+            .then(|| (word.range.clone(), word.core.to_string()))
+    }) else {
+        return;
+    };
+    let Some(correction) = crate::spellcheck::top_correction(&original) else {
+        return;
+    };
+
+    // Only the word is swapped — the boundary character the user just typed,
+    // and anything after it, stays put, so the caret keeps its distance from
+    // the end of the word.
+    let caret = cursor - original.len() + correction.len();
+    let corrected = range.start..(range.start + correction.len());
+    let mut body = state.body.clone();
+    body.replace_range(range, &correction);
+    set_body(state, body, Some(caret));
+    state.spell.pending_revert =
+        Some(Revert { range: corrected, corrected: correction, original });
 }
 
 /// Autocorrect only rewrites words that start lowercase — a leading capital
@@ -717,18 +872,34 @@ fn starts_lowercase(word: &str) -> bool {
     word.chars().next().is_some_and(|c| c.is_lowercase())
 }
 
-/// True when `current` is `previous` with exactly one trailing whitespace
-/// char appended — the "typed a space at the very end" edit. Restricting
-/// autocorrect to this shape avoids mangling mid-string edits or pastes,
-/// which we can't locate without a cursor position.
-fn typed_trailing_boundary(previous: &str, current: &str) -> bool {
-    match current.strip_prefix(previous) {
-        Some(added) => {
-            let mut chars = added.chars();
-            chars.next().is_some_and(|c| c.is_whitespace()) && chars.next().is_none()
-        }
-        None => false,
+
+/// Padding inside the composer's editor, matching what the old single-line
+/// input used.
+const INPUT_PADDING: u16 = 6;
+
+/// How tall the editor is allowed to grow before it starts scrolling. Five
+/// lines is enough for a paragraph without the composer eating the timeline.
+const MAX_INPUT_LINES: f32 = 5.0;
+
+/// One line of composer text, in pixels: iced's default 16px text at its
+/// default 1.3 line height.
+const INPUT_LINE_HEIGHT: f32 = 20.8;
+
+/// The editor's total height for `lines` lines of text — `min_height` and
+/// `max_height` bound the whole widget, padding included.
+fn input_height(lines: f32) -> f32 {
+    INPUT_LINE_HEIGHT * lines + f32::from(INPUT_PADDING) * 2.0
+}
+
+/// Enter sends; Shift+Enter breaks the line. Everything else keeps iced's
+/// defaults — including the Ctrl+C/X/V/A that the right-click edit menu
+/// synthesises as real key chords.
+fn send_on_enter(press: KeyPress) -> Option<Binding<Message>> {
+    let enter = iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter);
+    if press.key == enter && !press.modifiers.shift() {
+        return Some(Binding::Custom(Message::Send));
     }
+    Binding::from_key_press(press)
 }
 
 /// Stable widget id for the composer's text input — lets the root dispatcher
@@ -908,16 +1079,28 @@ pub fn view<'a>(
     };
     // Wrapped in a mouse_area only to catch the right-click that opens the
     // edit menu. mouse_area delegates to its child first and bails when the
-    // child captures, so the text_input's own left-click caret placement,
-    // drag-select, and Enter-to-send are untouched (it ignores right-clicks,
-    // which is exactly what lets them fall through to `on_right_press`).
+    // child captures, so the editor's own left-click caret placement and
+    // drag-select are untouched (it ignores right-clicks, which is exactly
+    // what lets them fall through to `on_right_press`).
     let input: Element<'_, Message> = iced::widget::mouse_area(
-        text_input(placeholder, &state.body)
+        iced::widget::text_editor(&state.content)
             .id(input_id())
-            .on_input(Message::BodyChanged)
-            .on_submit(Message::Send)
-            .padding(6)
-            .width(Length::Fill),
+            .placeholder(placeholder)
+            .on_action(Message::Action)
+            .padding(INPUT_PADDING)
+            // Width is already `Length::Fill` by default, and the builder only
+            // accepts a fixed pixel width — so it's left alone here.
+            .min_height(input_height(1.0))
+            .max_height(input_height(MAX_INPUT_LINES))
+            .wrapping(text::Wrapping::Word)
+            .key_binding(send_on_enter)
+            // Always attached — it changes the widget's type, so it can't be
+            // added conditionally. Spell check being off just means the set of
+            // words to mark is empty (see `SpellState::recompute`).
+            .highlight_with::<crate::spellcheck_highlight::Highlighter>(
+                state.spell.highlight.clone(),
+                crate::spellcheck_highlight::format,
+            ),
     )
     .on_right_press(Message::OpenContextMenu)
     .into();
@@ -1079,71 +1262,239 @@ mod tests {
     use super::*;
 
     #[test]
-    fn no_completed_word_while_typing() {
-        // No trailing whitespace → the final word is still being typed.
-        assert_eq!(last_completed_word("teh"), None);
-        assert_eq!(last_completed_word(""), None);
-        assert_eq!(last_completed_word("   "), None);
-    }
-
-    #[test]
-    fn completed_word_is_the_last_before_trailing_space() {
-        let (range, word, raw) = last_completed_word("teh ").unwrap();
-        assert_eq!((range, word.as_str(), raw.as_str()), (0..3, "teh", "teh"));
-
-        let (range, word, _) = last_completed_word("hello world ").unwrap();
-        assert_eq!(&"hello world "[range.clone()], "world");
-        assert_eq!((range, word.as_str()), (6..11, "world"));
-    }
-
-    #[test]
-    fn surrounding_punctuation_is_trimmed_but_kept_in_raw() {
-        // The replace range excludes the comma; the raw token keeps it so
-        // skip heuristics still see the full token.
-        let (range, word, raw) = last_completed_word("wat, ").unwrap();
-        assert_eq!((range, word.as_str(), raw.as_str()), (0..3, "wat", "wat,"));
-    }
-
-    #[test]
-    fn ranges_are_utf8_byte_offsets() {
-        // 'é' is two bytes — the range must land on char boundaries.
-        let body = "café ";
-        let (range, word, _) = last_completed_word(body).unwrap();
-        assert_eq!(range, 0..5);
-        assert_eq!(word, "café");
-        assert_eq!(&body[range], "café");
-    }
-
-    #[test]
-    fn checkable_accepts_prose_rejects_chat_tokens() {
-        assert!(is_checkable("teh"));
-        assert!(is_checkable("hello"));
-        assert!(is_checkable("Hello")); // capitalized is fine for the bar
-
-        assert!(!is_checkable("a")); // needs 2+ letters
-        assert!(!is_checkable("GG")); // acronym
-        assert!(!is_checkable("camelCase")); // code
-        assert!(!is_checkable("v2")); // has a digit
-        assert!(!is_checkable("@bob")); // mention
-        assert!(!is_checkable(":smile:")); // emoji shortcode
-        assert!(!is_checkable("http://x.com")); // url
-        assert!(!is_checkable("a/b")); // path
-        assert!(!is_checkable("co_op")); // identifier
-    }
-
-    #[test]
-    fn trailing_boundary_is_a_single_appended_space() {
-        assert!(typed_trailing_boundary("teh", "teh "));
-        assert!(!typed_trailing_boundary("teh", "teh x")); // more than a space
-        assert!(!typed_trailing_boundary("teh ", "teh")); // a deletion
-        assert!(!typed_trailing_boundary("teh", "teh  ")); // two spaces (paste)
-        assert!(!typed_trailing_boundary("teh", "xteh ")); // not an append
-    }
-
-    #[test]
     fn autocorrect_skips_leading_capital() {
         assert!(starts_lowercase("teh"));
         assert!(!starts_lowercase("Teh"));
         assert!(!starts_lowercase(""));
+    }
+
+    #[test]
+    fn the_finished_word_is_the_one_left_of_the_caret() {
+        // "teh| cat" — the space was just typed at offset 3.
+        let word = word_before_cursor("teh cat", 4).unwrap();
+        assert_eq!((word.range, word.core), (0..3, "teh"));
+
+        // Nothing is finished until the caret has passed a boundary.
+        assert!(word_before_cursor("teh", 3).is_none());
+        assert!(word_before_cursor("", 0).is_none());
+    }
+
+    #[test]
+    fn a_word_finished_mid_line_is_found_too() {
+        // "one teh| two" — this is what the old end-of-draft-only trigger
+        // could never see.
+        let word = word_before_cursor("one teh two", 8).unwrap();
+        assert_eq!((word.range, word.core), (4..7, "teh"));
+    }
+
+    #[test]
+    fn only_the_caret_s_trailing_edge_counts_as_still_typing() {
+        // Typing left to right, the caret sits at the end of the word.
+        assert_eq!(word_being_typed("recieve", 7).unwrap().core, "recieve");
+        // Clicked into the middle of it — that word is finished, and stays
+        // marked so the bar has something to offer.
+        assert!(word_being_typed("recieve", 3).is_none());
+        // On whitespace, nothing is in progress.
+        assert!(word_being_typed("recieve ", 8).is_none());
+    }
+
+    #[test]
+    fn the_bar_targets_the_word_the_caret_just_left() {
+        // Caret inside a word: that word.
+        assert_eq!(flag_target("one teh two", 6).unwrap().core, "teh");
+        // Caret on the space after it (offset 7): still that word.
+        assert_eq!(flag_target("one teh two", 7).unwrap().core, "teh");
+        // Caret at the leading edge of the next word: that word instead.
+        assert_eq!(flag_target("one teh two", 8).unwrap().core, "two");
+        assert!(flag_target("   ", 3).is_none());
+    }
+
+    #[test]
+    fn undo_restores_the_typed_word_only_at_the_right_caret() {
+        let revert = Revert {
+            range: 0..3,
+            corrected: "the".to_string(),
+            original: "teh".to_string(),
+        };
+        // Backspace ate the space, leaving the caret at the word's end.
+        assert_eq!(revert.undo("the", 3), Some(("teh".to_string(), 3)));
+        // Caret somewhere else — this Backspace wasn't the undo.
+        assert_eq!(revert.undo("the cat", 7), None);
+        // The correction is gone, so there is nothing to put back.
+        assert_eq!(revert.undo("th", 3), None);
+    }
+
+    #[test]
+    fn only_a_boundary_keystroke_triggers_autocorrect() {
+        assert!(ends_word(&Action::Edit(Edit::Insert(' '))));
+        assert!(ends_word(&Action::Edit(Edit::Enter)));
+        assert!(!ends_word(&Action::Edit(Edit::Insert('x'))));
+        assert!(!ends_word(&Action::Edit(Edit::Backspace)));
+        // A paste can drop in any amount of text — never a correction cue.
+        assert!(!ends_word(&Action::Edit(Edit::Paste(Arc::new(
+            "teh ".to_string()
+        )))));
+        assert!(!ends_word(&Action::SelectAll));
+    }
+
+    #[test]
+    fn the_caret_survives_a_programmatic_rewrite() {
+        let mut state = State::default();
+        set_body(&mut state, "hello world".to_string(), Some(5));
+        assert_eq!(cursor_offset(&state.content), 5);
+
+        // Past the end clamps rather than panicking.
+        set_body(&mut state, "hi".to_string(), Some(99));
+        assert_eq!(cursor_offset(&state.content), 2);
+
+        // No caret given means "put it at the end", which is what every
+        // append-shaped edit wants.
+        set_body(&mut state, "abc".to_string(), None);
+        assert_eq!(cursor_offset(&state.content), 3);
+    }
+
+    #[test]
+    fn the_caret_offset_accounts_for_earlier_lines() {
+        let mut state = State::default();
+        // Offset 8 is the 'i' of "line2": 5 + 1 newline + 2.
+        set_body(&mut state, "line1
+line2".to_string(), Some(8));
+        assert_eq!(cursor_offset(&state.content), 8);
+
+        // ...and the round trip back through `position_at` lands there.
+        let body = state.body.clone();
+        set_body(&mut state, body, Some(8));
+        assert_eq!(cursor_offset(&state.content), 8);
+    }
+
+    /// Spell check is exercised through `SpellState` directly: body and caret
+    /// go in as plain data, so these run without a live speller — the seeded
+    /// `verdicts`/`flag_memo` stand in for one.
+    const ON: SpellcheckConfig = SpellcheckConfig { enabled: true, autocorrect: false };
+    const OFF: SpellcheckConfig = SpellcheckConfig { enabled: false, autocorrect: false };
+
+    /// A `SpellState` that already "knows" `teh` is wrong and what to offer
+    /// for it, so `recompute` never reaches the COM speller.
+    fn seeded() -> SpellState {
+        let mut spell = SpellState::default();
+        spell.verdicts.insert("teh".to_string(), true);
+        spell.flag_memo =
+            Some(("teh".to_string(), vec!["the".to_string(), "ten".to_string()]));
+        spell
+    }
+
+    #[test]
+    fn turning_spell_check_off_clears_every_mark() {
+        let mut spell = seeded();
+        spell.recompute("teh ", 4, &ON);
+        assert!(spell.highlight.misspelled.contains("teh"));
+
+        spell.recompute("teh ", 4, &OFF);
+        assert!(spell.highlight.misspelled.is_empty());
+        assert!(spell.flagged.is_none());
+    }
+
+    #[test]
+    fn chat_tokens_are_never_checked() {
+        // These would all be flagged by a dictionary; none of them is a typo.
+        let mut spell = SpellState::default();
+        for body in [
+            "@alice:example.org ",
+            "https://example.org/page ",
+            ":shrug: ",
+            "ACRONYM ",
+        ] {
+            spell.recompute(body, body.len(), &ON);
+            assert!(spell.highlight.misspelled.is_empty(), "{body:?} was checked");
+        }
+    }
+
+    #[test]
+    fn the_word_still_being_typed_is_not_marked_yet() {
+        let mut spell = seeded();
+        // Caret at the trailing edge: "teh" is mid-word, so it stays unpainted
+        // rather than flashing red halfway through.
+        spell.recompute("teh", 3, &ON);
+        assert!(spell.highlight.misspelled.is_empty());
+        assert!(spell.flagged.is_none());
+
+        // The space finishes it, and now it is marked.
+        spell.recompute("teh ", 4, &ON);
+        assert!(spell.highlight.misspelled.contains("teh"));
+    }
+
+    #[test]
+    fn the_bar_targets_the_flagged_word_at_the_caret() {
+        let mut spell = seeded();
+        spell.recompute("teh ", 4, &ON);
+        let flagged = spell.flagged.clone().expect("the bar should target \"teh\"");
+        assert_eq!((flagged.range, flagged.word.as_str()), (0..3, "teh"));
+        assert_eq!(flagged.suggestions, ["the", "ten"]);
+    }
+
+    #[test]
+    fn the_highlighter_revision_only_moves_when_the_marks_do() {
+        let mut spell = seeded();
+        spell.recompute("teh ", 4, &ON);
+        let revision = spell.highlight.revision;
+        // Same marks, so the highlighter must not be asked to re-run.
+        spell.recompute("teh ", 4, &ON);
+        assert_eq!(spell.highlight.revision, revision);
+
+        // A real change bumps it.
+        spell.recompute("", 0, &ON);
+        assert_ne!(spell.highlight.revision, revision);
+    }
+
+    #[test]
+    fn a_reset_draft_keeps_the_revision_monotonic() {
+        let mut spell = seeded();
+        spell.recompute("teh ", 4, &ON);
+        let revision = spell.highlight.revision;
+        spell.reset();
+        assert!(spell.flagged.is_none());
+        assert!(spell.highlight.misspelled.is_empty());
+        // A rewound revision could be mistaken for state already on screen.
+        assert_eq!(spell.highlight.revision, revision);
+    }
+
+    #[test]
+    fn a_space_autocorrects_the_word_just_finished_and_backspace_undoes_it() {
+        const AUTO: SpellcheckConfig =
+            SpellcheckConfig { enabled: true, autocorrect: true };
+        // Drives the real update path, so it needs the OS speller; where there
+        // is none, `top_correction` yields nothing and there is nothing to
+        // assert (see [`crate::spellcheck`]).
+        let Some(expected) = crate::spellcheck::top_correction("teh") else {
+            return;
+        };
+
+        let mut state = State::default();
+        for c in "teh".chars() {
+            let _ = update(&mut state, Message::Action(Action::Edit(Edit::Insert(c))), &AUTO);
+        }
+        // Mid-word: nothing has been rewritten yet.
+        assert_eq!(state.body, "teh");
+
+        let _ = update(&mut state, Message::Action(Action::Edit(Edit::Insert(' '))), &AUTO);
+        assert_eq!(state.body, format!("{expected} "));
+        // The boundary character stays put and the caret stays after it.
+        assert_eq!(cursor_offset(&state.content), expected.len() + 1);
+
+        // The very next Backspace undoes the correction instead of just
+        // eating the space.
+        let _ = update(&mut state, Message::Action(Action::Edit(Edit::Backspace)), &AUTO);
+        assert_eq!(state.body, "teh");
+    }
+
+    #[test]
+    fn with_autocorrect_off_a_space_only_flags() {
+        let mut state = State::default();
+        for c in "teh".chars() {
+            let _ = update(&mut state, Message::Action(Action::Edit(Edit::Insert(c))), &ON);
+        }
+        let _ = update(&mut state, Message::Action(Action::Edit(Edit::Insert(' '))), &ON);
+        // Checking is on, so the word is marked — but never rewritten.
+        assert_eq!(state.body, "teh ");
     }
 }

@@ -16,6 +16,7 @@ pub mod screens;
 pub mod slash;
 pub mod spellcheck;
 pub mod spellcheck_config;
+pub mod spellcheck_highlight;
 pub mod state;
 pub mod steam;
 pub mod subscriptions;

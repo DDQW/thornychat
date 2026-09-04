@@ -7,7 +7,7 @@
 //! keys" for the user: it injects the real Ctrl chord at the OS level with
 //! `SendInput`, exactly as a keypress would arrive, and the focused input then
 //! copies/cuts its actual selection through its normal handler (which, for
-//! Cut, publishes the edit back to us as an ordinary `BodyChanged`).
+//! Cut, publishes the edit back to us as an ordinary editor `Action`).
 //!
 //! Only Cut and Copy come through here. Paste is handled app-side (append the
 //! clipboard text / stage its files) so it still works when the input isn't
