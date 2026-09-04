@@ -220,16 +220,20 @@ pub fn top_correction(word: &str) -> Option<String> {
 /// without a live speller.
 ///
 /// A `CORRECTIVE_ACTION_REPLACE` pick is trusted as-is — the engine gets those
-/// right ("teh" → "the", "yuo" → "you", "recieve" → "receive").
+/// right ("teh" to "the", "yuo" to "you", "recieve" to "receive").
 ///
-/// A mere suggestion has to earn it twice over. It must be within a couple of
-/// edits of what was typed — the speller's first guess at a word it doesn't
-/// recognise at all can be arbitrarily far away — *and* it must be strictly
-/// closer than every other guess in the list. The engine's ranking is not
-/// evidence: asked about "im" it offers "mi", "imp", "I'm", "am", "in", all
-/// one edit away, and leads with the worst of them. When several candidates
-/// tie, there is no obvious answer to apply silently, so the word stays
-/// flagged and the suggestion bar does the offering instead.
+/// A mere guess has to be within a couple of edits of what was typed: the
+/// speller's first idea about a word it doesn't recognise at all can be
+/// arbitrarily far away, and silently swapping *that* in is the behaviour that
+/// makes autocorrect hated. Distance decides the shortlist; among the
+/// candidates that tie for closest, the engine's own ranking decides, because
+/// for real typos that ranking is good ("disappointet" ranks "disappointed"
+/// ahead of the equally-close "disappointer").
+///
+/// Where the ranking is *not* good is chat slang the dictionary simply lacks —
+/// asked about "im" the engine leads with "mi". That is handled upstream by
+/// not checking those words at all, rather than by second-guessing the
+/// ranking here; see `spellcheck_highlight::is_checkable`.
 fn pick_correction(
     word: &str,
     replacement: Option<&str>,
@@ -242,33 +246,23 @@ fn pick_correction(
     // get a tighter budget than long ones.
     let typed: Vec<char> = word.to_lowercase().chars().collect();
     let max = if typed.len() <= 4 { 1 } else { 2 };
-    let mut best: Option<(usize, &String)> = None;
-    let mut tied = false;
-    for suggestion in suggestions {
-        let candidate: Vec<char> = suggestion.to_lowercase().chars().collect();
-        // A candidate differing only in case isn't a typo fix worth making
-        // silently, and it shouldn't block one either.
-        if candidate == typed {
-            continue;
-        }
-        let Some(distance) = edit_distance_at_most(&typed, &candidate, max) else {
-            continue;
-        };
-        match best {
-            // A new closest guess clears any tie the old one was in.
-            None => best = Some((distance, suggestion)),
-            Some((closest, _)) if distance < closest => {
-                best = Some((distance, suggestion));
-                tied = false;
+    suggestions
+        .iter()
+        .filter_map(|suggestion| {
+            let candidate: Vec<char> = suggestion.to_lowercase().chars().collect();
+            // A candidate differing only in case isn't a typo fix worth making
+            // silently — and it shouldn't crowd out one that is.
+            if candidate == typed {
+                return None;
             }
-            Some((closest, _)) if distance == closest => tied = true,
-            Some(_) => {}
-        }
-    }
-    match best {
-        Some((_, suggestion)) if !tied => Some(suggestion.clone()),
-        _ => None,
-    }
+            let distance = edit_distance_at_most(&typed, &candidate, max)?;
+            Some((distance, suggestion))
+        })
+        // `min_by_key` keeps the first of an equal-minimum run, and the
+        // suggestions arrive ranked — so this is "closest, ties to the
+        // engine's preference".
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, suggestion)| suggestion.clone())
 }
 
 /// Edit distance between two char slices, or `None` as soon as it's certain to
@@ -438,19 +432,23 @@ mod tests {
     }
 
     #[test]
-    fn a_tie_between_near_misses_is_left_to_the_bar() {
-        // "the" and "ten" are both one edit from "teh". Ranking alone isn't
-        // enough to pick one silently — for "im" the live speller ranks the
-        // nonsense "mi" ahead of "I'm" and "in", all at one edit, which is
-        // exactly the swap this rule exists to refuse.
-        let suggestions = vec!["the".to_string(), "ten".to_string()];
-        assert_eq!(pick_correction("teh", None, &suggestions), None);
-        let im = vec!["mi".to_string(), "imp".to_string(), "in".to_string()];
-        assert_eq!(pick_correction("im", None, &im), None);
+    fn the_ranking_breaks_a_tie_between_equally_close_guesses() {
+        // The case this exists for: both are one edit from "disappointet",
+        // and the engine ranks the overwhelmingly likelier one first.
+        let suggestions = vec!["disappointed".to_string(), "disappointer".to_string()];
+        assert_eq!(
+            pick_correction("disappointet", None, &suggestions),
+            Some("disappointed".to_string())
+        );
+
+        // Same shape, shorter word: "the" and "ten" are both one edit from
+        // "teh", and "the" is what the engine offers first.
+        let teh = vec!["the".to_string(), "ten".to_string()];
+        assert_eq!(pick_correction("teh", None, &teh), Some("the".to_string()));
     }
 
     #[test]
-    fn a_strictly_closer_guess_wins_over_the_ranking() {
+    fn a_closer_guess_still_wins_over_the_ranking() {
         // Ranked first but two edits out; the one-edit guess behind it is the
         // unambiguous answer, so the ranking doesn't get to veto it.
         let suggestions = vec!["privileged".to_string(), "privilege".to_string()];

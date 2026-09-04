@@ -1487,6 +1487,46 @@ line2".to_string(), Some(8));
         assert_eq!(state.body, "teh");
     }
 
+    /// Types `body` one character at a time through the real update path and
+    /// returns the draft it leaves behind.
+    fn typed(body: &str, cfg: &SpellcheckConfig) -> String {
+        let mut state = State::default();
+        for c in body.chars() {
+            let _ = update(&mut state, Message::Action(Action::Edit(Edit::Insert(c))), cfg);
+        }
+        state.body
+    }
+
+    #[test]
+    fn a_typo_the_speller_only_guesses_at_is_still_corrected() {
+        const AUTO: SpellcheckConfig =
+            SpellcheckConfig { enabled: true, autocorrect: true };
+        // "disappointet" gets no CORRECTIVE_ACTION_REPLACE — just two guesses
+        // one edit away, "disappointed" and "disappointer". Needs the OS
+        // speller, so it degrades to a no-op where there isn't one.
+        let Some(expected) = crate::spellcheck::top_correction("disappointet") else {
+            return;
+        };
+        assert_eq!(expected, "disappointed");
+        assert_eq!(typed("disappointet ", &AUTO), "disappointed ");
+    }
+
+    #[test]
+    fn chat_slang_is_left_alone_by_both_marking_and_autocorrect() {
+        const AUTO: SpellcheckConfig =
+            SpellcheckConfig { enabled: true, autocorrect: true };
+        // The speller offers "goanna" for "gonna" and "urn" for "ur"; neither
+        // word should be rewritten or marked.
+        assert_eq!(typed("gonna ", &AUTO), "gonna ");
+        assert_eq!(typed("ur ", &AUTO), "ur ");
+
+        let mut state = State::default();
+        for c in "gonna ".chars() {
+            let _ = update(&mut state, Message::Action(Action::Edit(Edit::Insert(c))), &AUTO);
+        }
+        assert!(state.spell.highlight.misspelled.is_empty());
+    }
+
     #[test]
     fn with_autocorrect_off_a_space_only_flags() {
         let mut state = State::default();

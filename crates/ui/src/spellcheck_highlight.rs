@@ -79,6 +79,27 @@ pub fn words(line: &str) -> impl Iterator<Item = Word<'_>> {
     })
 }
 
+/// Chat register the OS dictionary doesn't carry.
+///
+/// These are not typos, and the speller's guesses at them are not near
+/// misses — they are the closest *dictionary* word, which for informal
+/// English is reliably wrong: "goanna" for "gonna", "urn" for "ur", "mi" for
+/// "im", "prolyl" for "prolly", "irk" for "ikr". Marking them red is noise,
+/// and letting autocorrect near them is worse, so they are excluded from
+/// checking outright rather than left for the distance guard downstream to
+/// sort out (see `crate::spellcheck::pick_correction`).
+///
+/// Deliberately narrow: every entry here is a word the speller was observed
+/// to flag *and* to suggest badly for. Apostrophe-less contractions the
+/// engine fixes correctly — "dont" to "don't", "thats" to "that's", "whats",
+/// "shes" — are left checkable on purpose. Sorted, for `binary_search`.
+const CHAT_WORDS: &[&str] = &[
+    "aint", "cuz", "dunno", "finna", "gonna", "gotta", "hes", "iirc", "ikr",
+    "im", "imho", "imma", "imo", "irl", "ive", "kinda", "lemme", "ngl", "nvm",
+    "plz", "prolly", "smh", "sorta", "tbh", "tho", "tryna", "ur", "wanna",
+    "wdym", "yall",
+];
+
 /// Whether a raw token is ordinary prose worth spell-checking — filters out
 /// the things chat is full of that a dictionary would wrongly flag: mentions,
 /// emoji shortcodes, URLs/paths, code-ish identifiers, acronyms, and anything
@@ -86,6 +107,14 @@ pub fn words(line: &str) -> impl Iterator<Item = Word<'_>> {
 pub fn is_checkable(raw: &str) -> bool {
     // Needs at least two letters to be a word worth checking.
     if raw.chars().filter(|c| c.is_alphabetic()).count() < 2 {
+        return false;
+    }
+    // Chat slang, before anything else: these are correctly spelled here even
+    // though no dictionary says so. Edge punctuation is trimmed so "gonna,"
+    // matches; internal punctuation is not, so "he's" stays checkable while
+    // "hes" doesn't.
+    let bare = raw.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+    if CHAT_WORDS.binary_search(&bare.as_str()).is_ok() {
         return false;
     }
     // Mentions and emoji shortcodes.
@@ -303,5 +332,35 @@ mod tests {
         // for bumping it whenever the set does.
         assert_eq!(a, b);
         assert_ne!(a, Settings { revision: 8, misspelled: a.misspelled.clone() });
+    }
+
+    #[test]
+    fn chat_slang_is_not_checked() {
+        // The speller flags every one of these and suggests badly for it:
+        // "goanna" for "gonna", "urn" for "ur", "prolyl" for "prolly".
+        for word in ["gonna", "wanna", "ur", "im", "prolly", "tbh", "yall"] {
+            assert!(!is_checkable(word), "{word} should be left alone");
+        }
+        // Edge punctuation is trimmed, so it matches in real prose...
+        assert!(!is_checkable("gonna,"));
+        assert!(!is_checkable("(tho)"));
+        // ...but internal punctuation is not: "he's" is ordinary prose, and
+        // only the apostrophe-less "hes" is slang.
+        assert!(is_checkable("he's"));
+        assert!(!is_checkable("hes"));
+    }
+
+    #[test]
+    fn the_chat_lexicon_is_sorted_for_binary_search() {
+        assert!(CHAT_WORDS.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn contractions_the_speller_fixes_correctly_stay_checkable() {
+        // "dont" to "don't" and "thats" to "that's" are corrections worth
+        // having, so they are deliberately not in the lexicon.
+        for word in ["dont", "thats", "whats", "shes"] {
+            assert!(is_checkable(word), "{word} should still be checked");
+        }
     }
 }
