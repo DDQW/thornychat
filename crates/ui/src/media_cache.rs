@@ -76,6 +76,18 @@ pub struct State {
     /// stay in `pending_urls`, so `is_known` keeps suppressing re-fetches while
     /// they wait.
     pub staged: Vec<StagedMedia>,
+    /// Resident bytes of everything in the content caches above, maintained
+    /// by `flush_staged` / `note_inserted` and `evict_unreferenced`.
+    pub bytes: u64,
+    /// Insertion order, so eviction can drop the least recently *added* entry
+    /// first. Deliberately not last-*used*: `view()` takes `&self` and cannot
+    /// record a touch, and protecting everything currently on screen (see
+    /// `evict_unreferenced`) already covers the case an LRU would exist for.
+    seq: std::collections::HashMap<String, u64>,
+    next_seq: u64,
+    /// Bytes each cached URL accounts for, so eviction can subtract exactly
+    /// what it frees rather than re-deriving a size from a decoded handle.
+    sizes: std::collections::HashMap<String, u64>,
     /// Armed between scheduling a flush and it firing, so a burst starts the
     /// coalescing timer exactly once.
     pub flush_scheduled: bool,
@@ -120,21 +132,106 @@ impl State {
             match item {
                 StagedMedia::Raster(url, handle) => {
                     self.pending_urls.remove(&url);
+                    self.note_inserted(&url, handle_bytes(&handle));
                     self.images.insert(url, handle);
                 }
                 StagedMedia::Svg(url, handle) => {
                     self.pending_urls.remove(&url);
+                    // Deliberately unaccounted: vector emotes are a couple of
+                    // kilobytes each and sit far below `MIN_EVICTABLE_BYTES`,
+                    // so counting them could only ever push larger, genuinely
+                    // evictable media out on their behalf.
                     self.mxc_svgs.insert(url, handle);
                 }
                 StagedMedia::Gif(url, frames) => {
                     self.pending_urls.remove(&url);
+                    self.note_inserted(&url, frames.decoded_bytes());
                     self.mxc_gifs.insert(url, frames);
                 }
             }
         }
         true
     }
+
+    /// Records the footprint of a newly cached entry. Re-inserting the same
+    /// URL replaces its accounting rather than double-counting it.
+    pub fn note_inserted(&mut self, url: &str, bytes: u64) {
+        if let Some(previous) = self.sizes.insert(url.to_string(), bytes) {
+            self.bytes = self.bytes.saturating_sub(previous);
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.seq.insert(url.to_string(), seq);
+    }
+
+    /// Drops cached media until the total is back under `budget`, oldest
+    /// first, **never touching anything in `live`**.
+    ///
+    /// That protection is what makes this safe to run at any moment: `live` is
+    /// every URL the current screen references, so eviction can only ever
+    /// reach media that is off-screen. An evicted item is re-fetched if it
+    /// scrolls back into view — from the on-disk cache, which is capped at
+    /// 512 MB and was written when the item was first fetched, so the round
+    /// trip is local and cheap.
+    ///
+    /// Returns the number of entries dropped.
+    ///
+    /// Note what this does and does not reclaim. It bounds *host* memory
+    /// immediately. It does not hand VRAM back: `iced_wgpu`'s atlas only ever
+    /// grows (`atlas.rs` has no shrink path, and `raster::Cache::trim` runs
+    /// only on frames where a new image was inserted), so video memory stays
+    /// at its high-water mark until the process restarts. What this prevents
+    /// is that mark climbing all day.
+    pub fn evict_unreferenced(
+        &mut self,
+        live: &HashSet<String>,
+        budget: u64,
+        min_bytes: u64,
+    ) -> usize {
+        if self.bytes <= budget {
+            return 0;
+        }
+        let mut candidates: Vec<(u64, String)> = self
+            .sizes
+            .iter()
+            .filter(|(url, bytes)| **bytes >= min_bytes && !live.contains(*url))
+            .map(|(url, _)| (self.seq.get(url).copied().unwrap_or(0), url.clone()))
+            .collect();
+        candidates.sort_unstable();
+
+        let mut dropped = 0;
+        for (_, url) in candidates {
+            if self.bytes <= budget {
+                break;
+            }
+            // Only one of these can hold the key; the rest are cheap misses.
+            let hit = self.images.remove(&url).is_some()
+                | self.mxc_svgs.remove(&url).is_some()
+                | self.mxc_gifs.remove(&url).is_some()
+                | self.web_images.remove(&url).is_some();
+            let freed = self.sizes.remove(&url).unwrap_or(0);
+            self.seq.remove(&url);
+            self.bytes = self.bytes.saturating_sub(freed);
+            if hit {
+                dropped += 1;
+            }
+        }
+        dropped
+    }
 }
+
+/// Encoded byte length behind a raster handle, or 0 for the variants this app
+/// never constructs (paths, borrowed pixel buffers).
+fn handle_bytes(handle: &image::Handle) -> u64 {
+    match handle {
+        image::Handle::Bytes(_, bytes) => bytes.len() as u64,
+        image::Handle::Rgba { pixels, .. } => pixels.len() as u64,
+        // Never constructed here — the file is read by the SDK, not mmapped.
+        image::Handle::Path(_, _) => 0,
+    }
+}
+
 
 /// Renders an `mxc://`-keyed piece of fetched Matrix media. Checks the
 /// animated-GIF cache first (so emotes actually play), then raster, then
@@ -274,4 +371,89 @@ pub fn fingerprint(bytes: &[u8]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut hasher);
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Caches one raster entry of `bytes` length under `url`.
+    fn cache(state: &mut State, url: &str, bytes: usize) {
+        let handle = image::Handle::from_bytes(vec![0u8; bytes]);
+        state.note_inserted(url, bytes as u64);
+        state.images.insert(url.to_string(), handle);
+    }
+
+    fn live(urls: &[&str]) -> HashSet<String> {
+        urls.iter().map(|u| (*u).to_string()).collect()
+    }
+
+    #[test]
+    fn under_budget_nothing_is_touched() {
+        let mut state = State::default();
+        cache(&mut state, "mxc://a", 100);
+        cache(&mut state, "mxc://b", 100);
+        assert_eq!(state.evict_unreferenced(&live(&[]), 1_000, 0), 0);
+        assert_eq!(state.images.len(), 2);
+        assert_eq!(state.bytes, 200);
+    }
+
+    /// The property the whole design rests on: anything the current screen
+    /// refers to survives, however far over budget the cache is.
+    #[test]
+    fn referenced_media_is_never_evicted() {
+        let mut state = State::default();
+        cache(&mut state, "mxc://onscreen", 500);
+        cache(&mut state, "mxc://offscreen", 500);
+        let dropped = state.evict_unreferenced(&live(&["mxc://onscreen"]), 0, 0);
+        assert_eq!(dropped, 1);
+        assert!(state.images.contains_key("mxc://onscreen"));
+        assert!(!state.images.contains_key("mxc://offscreen"));
+        assert_eq!(state.bytes, 500, "freed bytes must leave the running total");
+    }
+
+    /// Avatars and emotes sit under the size floor and must be untouchable,
+    /// which is what makes it safe that they are hard to enumerate as live.
+    #[test]
+    fn entries_below_the_size_floor_are_never_evicted() {
+        let mut state = State::default();
+        cache(&mut state, "mxc://tiny", 10);
+        assert_eq!(state.evict_unreferenced(&live(&[]), 0, 256 * 1024), 0);
+        assert!(state.images.contains_key("mxc://tiny"));
+    }
+
+    #[test]
+    fn eviction_is_oldest_first_and_stops_at_the_budget() {
+        let mut state = State::default();
+        cache(&mut state, "mxc://first", 100);
+        cache(&mut state, "mxc://second", 100);
+        cache(&mut state, "mxc://third", 100);
+        // Budget 150 → must drop exactly the two oldest.
+        assert_eq!(state.evict_unreferenced(&live(&[]), 150, 0), 2);
+        assert!(!state.images.contains_key("mxc://first"));
+        assert!(!state.images.contains_key("mxc://second"));
+        assert!(state.images.contains_key("mxc://third"));
+        assert_eq!(state.bytes, 100);
+    }
+
+    /// Re-caching the same URL must replace its accounting, not add to it —
+    /// otherwise the running total drifts up and evicts for no reason.
+    #[test]
+    fn re_inserting_a_url_does_not_double_count() {
+        let mut state = State::default();
+        cache(&mut state, "mxc://a", 100);
+        cache(&mut state, "mxc://a", 400);
+        assert_eq!(state.bytes, 400);
+    }
+
+    /// An evicted URL must stop reporting as cached, or it would never be
+    /// re-fetched when it scrolls back into view.
+    #[test]
+    fn an_evicted_url_is_no_longer_known() {
+        let mut state = State::default();
+        cache(&mut state, "mxc://gone", 500);
+        assert!(state.is_known("mxc://gone"));
+        state.evict_unreferenced(&live(&[]), 0, 0);
+        assert!(!state.is_known("mxc://gone"));
+    }
 }

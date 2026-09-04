@@ -41,6 +41,15 @@ impl std::fmt::Debug for OpaqueCmdSender {
 // `Clone` because iced's `button::on_press`/`text_input::on_submit` take
 // the message by value and require it — root-shell controls (the own-profile
 // row) hand this enum to widgets directly.
+/// Why restoring the saved session failed, and whether trying again could
+/// help. `retryable` means the homeserver was unreachable — the session is
+/// still on disk, untouched, so a later attempt can still succeed.
+#[derive(Debug, Clone)]
+pub struct RestoreFailure {
+    pub message: String,
+    pub retryable: bool,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     /// Every event the sync worker emits, forwarded verbatim through the
@@ -52,10 +61,11 @@ pub enum Message {
     WorkerStarted(OpaqueCmdSender),
 
     /// Result of the startup attempt to restore a previously saved session.
-    RestoreResult(Result<Option<OpaqueClient>, String>),
+    RestoreResult(Result<Option<OpaqueClient>, RestoreFailure>),
 
     /// Result of an interactive login attempt (password or SSO).
     LoginResult(Result<OpaqueClient, String>),
+
 
     Login(screens::login::Message),
     RoomList(screens::room_list::Message),
@@ -150,8 +160,12 @@ pub enum Message {
     /// Maximized-state answer for the pending geometry save.
     WindowGeometryProbed(bool),
     /// Cursor moved (window-global coords) — tracked so right-click menus can
-    /// open at the pointer (see `state::App::cursor_position`).
+    /// open at the pointer (see `state::App::cursor_position`). Only delivered
+    /// while the window has focus; see `subscriptions::cursor_events`.
     CursorMoved(iced::Point),
+    /// Window gained or lost focus. Gates cursor tracking (see
+    /// `state::App::window_focused`).
+    WindowFocusChanged(bool),
 
     // --- middle-click autoscroll (see `timeline::State::autoscroll`) ---
     /// One frame of the autoscroll glide: scroll the timeline toward the

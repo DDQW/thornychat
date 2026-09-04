@@ -5,6 +5,7 @@ use iced::{Element, Length, Task};
 
 use crate::chat_config::ChatConfig;
 use crate::spellcheck_config::SpellcheckConfig;
+use crate::window_config::WindowConfig;
 
 #[derive(Debug, Clone)]
 pub struct State {
@@ -62,6 +63,10 @@ pub enum Message {
     ConfirmLogout,
     CancelLogout,
     AutostartToggled(bool),
+    PreferIntegratedGpuToggled(bool),
+    PreferDx12BackendToggled(bool),
+    /// Window-config autosave finished; nothing to do (mirrors `SpellcheckSaved`).
+    WindowConfigSaved,
     SpellcheckToggled(bool),
     AutocorrectToggled(bool),
     ShowMembershipEventsToggled(bool),
@@ -79,6 +84,7 @@ pub fn update(
     state: &mut State,
     spellcheck: &mut SpellcheckConfig,
     chat: &mut ChatConfig,
+    window: &mut WindowConfig,
     profile: &str,
     message: Message,
 ) -> (Task<Message>, super::Effect) {
@@ -102,6 +108,26 @@ pub fn update(
             }
             (Task::none(), super::Effect::None)
         }
+        Message::PreferIntegratedGpuToggled(on) => {
+            // Only read at startup (`WindowConfig::apply_gpu_preference`), so
+            // this takes effect on the next launch — the copy note under the
+            // toggle says so. Saving reuses the geometry file's own writer.
+            window.prefer_integrated_gpu = on;
+            (
+                Task::perform(WindowConfig::save(*window), |()| Message::WindowConfigSaved),
+                super::Effect::None,
+            )
+        }
+        Message::PreferDx12BackendToggled(on) => {
+            // Same story as the GPU preference: only read at startup, so this
+            // lands on the next launch.
+            window.prefer_dx12_backend = on;
+            (
+                Task::perform(WindowConfig::save(*window), |()| Message::WindowConfigSaved),
+                super::Effect::None,
+            )
+        }
+        Message::WindowConfigSaved => (Task::none(), super::Effect::None),
         Message::SpellcheckToggled(on) => {
             spellcheck.enabled = on;
             (save_spellcheck_task(*spellcheck), super::Effect::None)
@@ -193,6 +219,7 @@ pub fn view<'a>(
     account: AccountInfo<'a>,
     spellcheck: &'a SpellcheckConfig,
     chat: &'a ChatConfig,
+    window: &'a WindowConfig,
 ) -> Element<'a, Message> {
     let info_row = |label: &'static str, value: String| {
         row![text(label).size(12).width(Length::Fixed(110.0)), text(value).size(13)].spacing(8)
@@ -240,20 +267,39 @@ pub fn view<'a>(
     ]
     .spacing(6);
 
+    // Machine-level, like autostart above, and deliberately not part of the
+    // shareable theme file: which GPU to draw on is a property of this PC.
+    let graphics_section = column![
+        text("Graphics").size(14).font(crate::theme::SEMIBOLD_FONT),
+        spell_toggle(
+            "Prefer the integrated GPU",
+            "Draw on the low-power graphics chip instead of the dedicated card.              On a laptop this is the difference between the discrete GPU staying              awake all day and never spinning up at all. Machines with only one              GPU are unaffected. Takes effect the next time you start ThornyChat.",
+            window.prefer_integrated_gpu,
+            Message::PreferIntegratedGpuToggled,
+        ),
+        spell_toggle(
+            "Use Direct3D 12",
+            "Draw through Windows' own graphics API instead of loading the Vulkan              and OpenGL driver stacks alongside it. Measured here: 8 fewer threads,              27 MB less memory and 53 MB less video memory, with no change in CPU.              Takes effect the next time you start ThornyChat.",
+            window.prefer_dx12_backend,
+            Message::PreferDx12BackendToggled,
+        ),
+    ]
+    .spacing(6);
+
     let spelling_section = column![
         text("Spelling").size(14).font(crate::theme::SEMIBOLD_FONT),
         spell_toggle(
             "Check spelling",
-            "Show suggestions above the message box for a misspelled word. Uses the \
-             Windows spell checker and your personal dictionary; nothing changes until \
-             you tap a suggestion.",
+            "Mark misspelled words in red as you type, and offer fixes for the one \
+             you click into. Uses the Windows spell checker and your personal \
+             dictionary; nothing changes until you pick a suggestion.",
             spellcheck.enabled,
             Message::SpellcheckToggled,
         ),
         spell_toggle(
             "Autocorrect",
-            "Silently fix an obvious typo when you finish a word with a space. Press \
-             Backspace right afterwards to undo the change.",
+            "Fix a misspelled word the moment you finish it with a space. Press \
+             Backspace right afterwards to get back what you typed.",
             spellcheck.autocorrect,
             Message::AutocorrectToggled,
         ),
@@ -308,6 +354,7 @@ pub fn view<'a>(
         account_section,
         sign_out_section,
         autostart_section,
+        graphics_section,
         spelling_section,
         timeline_section,
         diagnostics_section,

@@ -23,13 +23,69 @@ pub struct WindowConfig {
     pub y: Option<f32>,
     /// Reopen maximized, with `width`/`height` as the restore frame.
     pub maximized: bool,
+    /// Ask wgpu for the integrated GPU rather than the discrete one.
+    ///
+    /// `iced_wgpu` hardcodes `PowerPreference::HighPerformance`
+    /// (`window/compositor.rs`), which on a hybrid-graphics laptop binds the
+    /// discrete GPU for the life of the process and stops it powering down —
+    /// tens of watts, all day, to draw a chat window. A 2D UI has no use for
+    /// that card. Applied in `main` by setting `WGPU_POWER_PREF`, the env var
+    /// wgpu already reads.
+    ///
+    /// Safe to default on: wgpu ranks candidates
+    /// integrated < discrete < other < virtual < CPU
+    /// (`wgpu-core/src/instance.rs`, `get_order`), so a machine with only a
+    /// discrete card still gets that card, and the software rasterizer
+    /// ("Microsoft Basic Render Driver") sorts last under either preference
+    /// and is never reachable this way.
+    pub prefer_integrated_gpu: bool,
+    /// Pin wgpu to the Direct3D 12 backend instead of letting it load every
+    /// backend and pick one.
+    ///
+    /// `iced_wgpu` defaults to `Backends::all()` (`settings.rs`), so Windows
+    /// loads the Vulkan stack *and* the D3D12 stack *and* OpenGL, then uses
+    /// one. Which one it picks is not a considered choice: `request_adapter`
+    /// sorts only by device type, and both backends report the same
+    /// `DiscreteGpu`, so the tie breaks on enumeration order.
+    ///
+    /// Measured on this machine (RX 7900 XTX, 9x180s samples per arm, same
+    /// logged-in profile, equal downtime):
+    ///
+    /// |            | Vulkan | Dx12  |
+    /// |------------|--------|-------|
+    /// | CPU        | 33.97 ms/s | 34.43 ms/s (no difference) |
+    /// | threads    | 167    | 159   |
+    /// | working set| 221 MB | 194 MB |
+    /// | VRAM       | 176 MB | 123 MB |
+    /// | modules    | 80     | 72    |
+    ///
+    /// DXGI and `d3d12.dll` load either way (they are on the presentation
+    /// path), so Vulkan was purely additive — `vulkan-1.dll` plus the AMD ICD
+    /// on top of a stack already paid for. D3D12 is also the safer thing to
+    /// pin on Windows: it ships in-box and has a WARP fallback device, where a
+    /// working Vulkan ICD is a driver-install detail.
+    ///
+    /// Note this is *not* about the `SurfaceError::Other` hang
+    /// (`docs/iced-surface-error-other-hang.md`): that was written up against
+    /// DX12, but it reproduced on Vulkan here on 2026-09-03 (4.5 hours,
+    /// ~529k error lines), so it is not backend-specific and is not a reason
+    /// to prefer either one.
+    pub prefer_dx12_backend: bool,
 }
 
 impl Default for WindowConfig {
     fn default() -> Self {
         // Matches `iced::window::Settings::default()`'s size, so a missing
         // file and a fresh install behave identically.
-        Self { width: 1024.0, height: 768.0, x: None, y: None, maximized: false }
+        Self {
+            width: 1024.0,
+            height: 768.0,
+            x: None,
+            y: None,
+            maximized: false,
+            prefer_integrated_gpu: true,
+            prefer_dx12_backend: true,
+        }
     }
 }
 
@@ -63,6 +119,27 @@ impl WindowConfig {
             self.y = None;
         }
         self
+    }
+
+    /// Points wgpu at the low-power adapter, unless the environment already
+    /// says otherwise.
+    ///
+    /// Must run before iced builds its compositor (wgpu reads the variable
+    /// when the adapter is requested) and before any other thread exists —
+    /// `set_var` is process-global and unsynchronized. `main` satisfies both.
+    /// An explicit `WGPU_POWER_PREF` always wins, so the escape hatch for a
+    /// user who wants the discrete card keeps working even with the setting
+    /// on; the accepted values are wgpu's own (`low`, `high`, `none`).
+    pub fn apply_gpu_preference(&self) {
+        if self.prefer_integrated_gpu && std::env::var_os("WGPU_POWER_PREF").is_none() {
+            std::env::set_var("WGPU_POWER_PREF", "low");
+        }
+        // Pinning one backend is what actually stops the other driver stacks
+        // from loading; a comma list would keep them all and buy nothing,
+        // because wgpu orders candidates by device type, not by list position.
+        if self.prefer_dx12_backend && std::env::var_os("WGPU_BACKEND").is_none() {
+            std::env::set_var("WGPU_BACKEND", "dx12");
+        }
     }
 
     pub fn size(&self) -> iced::Size {
@@ -121,4 +198,87 @@ fn position_reachable(x: f32, y: f32) -> bool {
     // window can always be grabbed and dragged.
     let (probe_x, probe_y) = (x + 100.0, y + 20.0);
     probe_x >= left && probe_x <= left + width && probe_y >= top && probe_y <= top + height
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `window.json` written before `prefer_integrated_gpu` existed must
+    /// still load, and must opt in — `#[serde(default)]` fills the missing
+    /// field from `Default`, so the low-power preference reaches existing
+    /// installs rather than only new ones.
+    #[test]
+    fn legacy_file_without_the_gpu_field_defaults_to_preferring_integrated() {
+        let legacy = r#"{
+            "width": 1920.0,
+            "height": 1009.0,
+            "x": -16000.0,
+            "y": -16000.0,
+            "maximized": true
+        }"#;
+        let config: WindowConfig = serde_json::from_str(legacy).expect("legacy file should parse");
+        assert!(config.prefer_integrated_gpu);
+        assert!(config.prefer_dx12_backend);
+        assert!(config.maximized);
+        assert_eq!(config.width, 1920.0);
+    }
+
+    /// The one test that touches `WGPU_POWER_PREF`, so it can set and restore
+    /// it without racing the rest of the suite. Covers all three arms of
+    /// `apply_gpu_preference`: opted in, opted out, and overridden by the
+    /// environment.
+    #[test]
+    fn apply_gpu_preference_respects_the_setting_and_the_environment() {
+        let previous = std::env::var_os("WGPU_POWER_PREF");
+        let on = WindowConfig::default();
+        let off = WindowConfig {
+            prefer_integrated_gpu: false,
+            prefer_dx12_backend: false,
+            ..WindowConfig::default()
+        };
+
+        let previous_backend = std::env::var_os("WGPU_BACKEND");
+
+        // Opted in, nothing preset: low-power adapter, D3D12 backend.
+        std::env::remove_var("WGPU_POWER_PREF");
+        std::env::remove_var("WGPU_BACKEND");
+        on.apply_gpu_preference();
+        assert_eq!(std::env::var("WGPU_POWER_PREF").as_deref(), Ok("low"));
+        assert_eq!(std::env::var("WGPU_BACKEND").as_deref(), Ok("dx12"));
+
+        // Opted out: leaves the environment alone, so iced_wgpu's own
+        // HighPerformance / Backends::all() defaults stand.
+        std::env::remove_var("WGPU_POWER_PREF");
+        std::env::remove_var("WGPU_BACKEND");
+        off.apply_gpu_preference();
+        assert!(std::env::var_os("WGPU_POWER_PREF").is_none());
+        assert!(std::env::var_os("WGPU_BACKEND").is_none());
+
+        // User-set values always win, even with the settings on.
+        std::env::set_var("WGPU_POWER_PREF", "high");
+        std::env::set_var("WGPU_BACKEND", "vulkan");
+        on.apply_gpu_preference();
+        assert_eq!(std::env::var("WGPU_POWER_PREF").as_deref(), Ok("high"));
+        assert_eq!(std::env::var("WGPU_BACKEND").as_deref(), Ok("vulkan"));
+
+        match previous {
+            Some(value) => std::env::set_var("WGPU_POWER_PREF", value),
+            None => std::env::remove_var("WGPU_POWER_PREF"),
+        }
+        match previous_backend {
+            Some(value) => std::env::set_var("WGPU_BACKEND", value),
+            None => std::env::remove_var("WGPU_BACKEND"),
+        }
+    }
+
+    /// An explicit `false` survives a round trip — the Settings toggle has to
+    /// be able to turn this back off and have it stick.
+    #[test]
+    fn the_gpu_preference_round_trips() {
+        let off = WindowConfig { prefer_integrated_gpu: false, ..WindowConfig::default() };
+        let json = serde_json::to_string(&off).expect("serialize");
+        let back: WindowConfig = serde_json::from_str(&json).expect("deserialize");
+        assert!(!back.prefer_integrated_gpu);
+    }
 }

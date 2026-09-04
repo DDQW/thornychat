@@ -275,7 +275,7 @@ pub fn view<'a>(state: &'a State, theme: &'a ThemeConfig) -> Element<'a, Message
 
     let scale_row = row![
         text(format!("UI scale: {:.0}%", theme.ui_scale * 100.0)).size(12).width(Length::Fixed(220.0)),
-        slider(0.8..=1.5, theme.ui_scale, Message::UiScaleChanged).step(0.05).width(Length::Fixed(200.0)),
+        slider(0.8..=1.5, theme.ui_scale, Message::UiScaleChanged).step(0.05_f32).width(Length::Fixed(200.0)),
     ]
     .spacing(8)
     .align_y(iced::Center);
@@ -283,7 +283,7 @@ pub fn view<'a>(state: &'a State, theme: &'a ThemeConfig) -> Element<'a, Message
     let radius_row = row![
         text(format!("Corner radius: {:.0}px", theme.corner_radius)).size(12).width(Length::Fixed(220.0)),
         slider(0.0..=16.0, theme.corner_radius, Message::CornerRadiusChanged)
-            .step(1.0)
+            .step(1.0_f32)
             .width(Length::Fixed(200.0)),
     ]
     .spacing(8)

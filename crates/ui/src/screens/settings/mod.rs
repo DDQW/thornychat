@@ -17,6 +17,7 @@ use crate::privacy_config::PrivacyConfig;
 use crate::screens::verification;
 use crate::spellcheck_config::SpellcheckConfig;
 use crate::theme_config::ThemeConfig;
+use crate::window_config::WindowConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -120,6 +121,7 @@ pub fn update(
     spellcheck: &mut SpellcheckConfig,
     chat: &mut ChatConfig,
     connectors: &mut ConnectorsConfig,
+    window: &mut WindowConfig,
     profile: &str,
     message: Message,
 ) -> (Task<Message>, Effect) {
@@ -129,7 +131,7 @@ pub fn update(
             (Task::none(), Effect::None)
         }
         Message::General(msg) => {
-            let (task, effect) = general::update(&mut state.general, spellcheck, chat, profile, msg);
+            let (task, effect) = general::update(&mut state.general, spellcheck, chat, window, profile, msg);
             (task.map(Message::General), effect)
         }
         Message::Privacy(msg) => {
@@ -165,6 +167,7 @@ pub fn view<'a>(
     spellcheck: &'a SpellcheckConfig,
     chat: &'a ChatConfig,
     connectors: &'a ConnectorsConfig,
+    window: &'a WindowConfig,
     account: general::AccountInfo<'a>,
     default_modes: (client_core::events::NotificationMode, client_core::events::NotificationMode),
     verification: &'a verification::State,
@@ -189,7 +192,7 @@ pub fn view<'a>(
     );
 
     let body: Element<'_, Message> = match state.tab {
-        Tab::General => general::view(&state.general, account, spellcheck, chat).map(Message::General),
+        Tab::General => general::view(&state.general, account, spellcheck, chat, window).map(Message::General),
         Tab::Privacy => privacy::view(privacy).map(Message::Privacy),
         Tab::Connectors => connectors::view(connectors).map(Message::Connectors),
         Tab::Encryption => encryption::view(encryption).map(Message::Encryption),

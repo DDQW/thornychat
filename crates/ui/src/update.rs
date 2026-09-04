@@ -8,6 +8,19 @@ use crate::message::Message;
 use crate::screens;
 use crate::state::App;
 
+/// How many times to retry restoring the session when the homeserver can't be
+/// reached. Roughly two minutes of trying at the backoff below, which covers a
+/// resume or a boot racing the network without leaving someone staring at a
+/// spinner forever.
+const MAX_RESTORE_ATTEMPTS: u32 = 6;
+
+/// Backoff before restore attempt `attempt` (1-based): 2s, 4s, 8s, 16s, 30s,
+/// 30s. Capped so a long outage keeps checking at a steady, quiet rate.
+fn restore_backoff(attempt: u32) -> std::time::Duration {
+    let secs = 2u64.saturating_pow(attempt.min(5)).min(30);
+    std::time::Duration::from_secs(secs)
+}
+
 pub fn update(app: &mut App, message: Message) -> Task<Message> {
     // Glue for the inline video player: while one is playing, any message
     // at all may have reflowed the timeline (scrolls, arriving messages,
@@ -31,6 +44,7 @@ pub fn update(app: &mut App, message: Message) -> Task<Message> {
 fn update_inner(app: &mut App, message: Message) -> Task<Message> {
     match message {
         Message::RestoreResult(Ok(Some(opaque_client))) => {
+            app.restore_attempts = 0;
             app.adopt_client(opaque_client.0);
             Task::none()
         }
@@ -38,8 +52,28 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             // No saved session; stay on the login screen.
             Task::none()
         }
-        Message::RestoreResult(Err(reason)) => {
-            app.login.status = screens::login::Status::Error(reason);
+        Message::RestoreResult(Err(failure)) => {
+            // An unreachable homeserver is not a reason to dump someone on a
+            // login form: the saved session is still on disk (see
+            // `client_core::session::try_restore`), and launching before the
+            // network is up — autostart at boot, or right after a resume — is
+            // routine. Back off and try again instead.
+            if failure.retryable && app.restore_attempts < MAX_RESTORE_ATTEMPTS {
+                app.restore_attempts += 1;
+                let delay = restore_backoff(app.restore_attempts);
+                tracing::warn!(
+                    attempt = app.restore_attempts,
+                    delay_secs = delay.as_secs(),
+                    reason = %failure.message,
+                    "could not reach the homeserver to restore the session; retrying"
+                );
+                app.login.status = screens::login::Status::Reconnecting(format!(
+                    "Can't reach the homeserver — retrying in {}s…",
+                    delay.as_secs()
+                ));
+                return crate::state::restore_task(app.profile.clone(), delay);
+            }
+            app.login.status = screens::login::Status::Error(failure.message);
             Task::none()
         }
 
@@ -164,6 +198,11 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             );
             let task = task.map(Message::Timeline);
             let effect_task = apply_timeline_effect(app, effect);
+            // After the effect, so a just-issued pagination is visible to
+            // the gates. This call is what drops accumulated scrollback the
+            // moment the user returns to the live edge (Scrolled flipping
+            // `at_bottom`), instead of waiting for the next message.
+            maybe_shrink_timeline(app);
             Task::batch([task, effect_task])
         }
 
@@ -222,6 +261,18 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             // One state mutation promoting the whole staged batch → a single
             // view rebuild / reflow for the burst instead of one per fetch.
             app.media.flush_staged();
+            // The batch just grew the cache, so this is the natural moment to
+            // give the budget back. Piggybacking on the flush also means the
+            // eviction rides the same single rebuild rather than causing one.
+            let live = referenced_urls(app);
+            let dropped = app.media.evict_unreferenced(
+                &live,
+                MEDIA_MEMORY_BUDGET_BYTES,
+                MIN_EVICTABLE_BYTES,
+            );
+            if dropped > 0 {
+                tracing::debug!(dropped, bytes = app.media.bytes, "media cache evicted");
+            }
             Task::none()
         }
 
@@ -258,6 +309,9 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
         Message::WebImageFetched(url, result) => {
             app.media.web_pending.remove(&url);
             if let Ok(bytes) = result {
+                // Tweet photos and Steam capsules are full-size JPEGs, so these
+                // count against the cache budget like any other raster.
+                app.media.note_inserted(&url, bytes.len() as u64);
                 app.media.web_images.insert(url, iced::widget::image::Handle::from_bytes(bytes));
             }
             Task::none()
@@ -506,6 +560,14 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             app.cursor_position = position;
             Task::none()
         }
+        Message::WindowFocusChanged(focused) => {
+            // Gates the cursor-tracking subscription (see `subscriptions`).
+            // The stale `cursor_position` left behind by a blur is harmless:
+            // the only things that read it need a click on this window first,
+            // and focus — with a fresh move — always arrives before that.
+            app.window_focused = focused;
+            Task::none()
+        }
         Message::AutoscrollTick => autoscroll_tick(app),
         Message::AutoscrollEnd => {
             app.timeline.autoscroll = None;
@@ -569,6 +631,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 &mut app.spellcheck,
                 &mut app.chat,
                 &mut app.connectors,
+                &mut app.window_config,
                 &app.profile,
                 msg,
             );
@@ -890,7 +953,12 @@ fn apply_timeline_effect(app: &mut App, effect: screens::timeline::Effect) -> Ta
             retry_send(app);
             Task::none()
         }
-        screens::timeline::Effect::EnsureEmojiFetched(emojis) => ensure_emoji_fetched(app, emojis),
+        screens::timeline::Effect::EnsureEmojiFetched(emojis) => {
+            // The reaction picker opened — same staleness check as the
+            // composer's picker below.
+            refresh_emoji_packs_if_stale(app);
+            ensure_emoji_fetched(app, emojis)
+        }
         screens::timeline::Effect::SetNotificationMode(mode) => {
             if let Some(room_id) = app.timeline.room_id.clone() {
                 let request_id = Uuid::new_v4();
@@ -1214,6 +1282,47 @@ fn mark_open_room_read(app: &mut App) {
     }
 }
 
+/// Live-growth cap enforcement: past `MAX_LIVE_ITEMS`, ask the worker to
+/// reopen the timeline window (newest ~80 items, older history one
+/// pagination away — same as freshly opening the room). Only while quietly
+/// tailing the live edge: at the bottom the reset is invisible (the tail
+/// items are identical before and after), while a shrink under an open
+/// search/edit/picker/video or a scrolled-up reader would yank state out
+/// from under them — those cases simply wait for the next quiet check.
+///
+/// Called wherever the gating state can change: after every timeline
+/// message (returning to the bottom from a deep scrollback is the one that
+/// matters — the drop must not wait for the next arriving event), after
+/// every diff batch (live growth in an already-quiet room), and when a
+/// pagination resolves (a prefetch still in flight when the user lands at
+/// the bottom blocks the first check). `pending_shrink` keeps the repeated
+/// calls from stacking requests.
+fn maybe_shrink_timeline(app: &mut App) {
+    let Some(room_id) = app.timeline.room_id.clone() else { return };
+    let should_shrink = {
+        let t = &app.timeline;
+        t.items.len() > screens::timeline::MAX_LIVE_ITEMS
+            && !t.pending_shrink
+            && t.at_bottom
+            && !t.search_open
+            && t.editing.is_none()
+            && t.confirm_delete.is_none()
+            && t.reacting_to.is_none()
+            && t.inline_video.is_none()
+            && !t.loading_older
+            && t.pending_paginate_request.is_none()
+    };
+    if should_shrink {
+        app.timeline.pending_shrink = true;
+        tracing::info!(
+            len = app.timeline.items.len(),
+            %room_id,
+            "timeline past the live-growth cap — shrinking the window"
+        );
+        send_cmd(app, ClientCommand::ShrinkTimeline { room_id });
+    }
+}
+
 fn apply_composer_effect(app: &mut App, effect: screens::timeline::composer::Effect) -> Task<Message> {
     use screens::timeline::composer::Effect as ComposerEffect;
     match effect {
@@ -1241,8 +1350,14 @@ fn apply_composer_effect(app: &mut App, effect: screens::timeline::composer::Eff
             set_typing(app, typing);
             Task::none()
         }
-        ComposerEffect::EnsureEmojiFetched(emojis) => ensure_emoji_fetched(app, emojis),
+        ComposerEffect::EnsureEmojiFetched(emojis) => {
+            refresh_emoji_packs_if_stale(app);
+            ensure_emoji_fetched(app, emojis)
+        }
         ComposerEffect::EnsureStickersFetched => {
+            // Sticker packs are the same MSC2545 state events as emoji
+            // packs, so the sticker tab is a pack-staleness moment too.
+            refresh_emoji_packs_if_stale(app);
             // Pack sticker images are already fetched on pack load; the
             // collected ones (loaded from disk) may not be yet.
             let urls: Vec<String> =
@@ -1289,6 +1404,46 @@ fn record_emoji_use(app: &mut App, key: String) -> Task<Message> {
         let _ = tokio::fs::write(path, contents).await;
         Message::Noop
     })
+}
+
+/// How long a resolved custom-emoji pack set is trusted before a picker
+/// opening re-resolves it. Each refresh pulls full room state for the open
+/// room and every parent space (member events included), so this is a real
+/// request, not a free one — but a minute is short enough that "the admin
+/// just added an emote" resolves itself by opening the picker again.
+const EMOJI_PACK_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Re-resolves the custom emoji packs if the loaded set has gone stale.
+///
+/// Nothing pushes pack edits to this client: sliding sync's `required_state`
+/// is a fixed list with no `im.ponies.*` in it, so packs are only ever known
+/// as of the last explicit fetch — which used to happen solely on room open.
+/// A session left in one room therefore kept that moment's packs for as long
+/// as it ran, and an emote added server-side afterwards simply never
+/// appeared. Opening a picker is when the user is actually looking for one,
+/// so it re-resolves here, throttled by [`EMOJI_PACK_REFRESH_INTERVAL`].
+///
+/// The stamp moves when the request goes out, not only when a result comes
+/// back: a refresh that fails sends no event at all, and retrying on every
+/// picker open would hammer a homeserver that is already having a bad time.
+/// (`CustomEmojiPacksUpdated` re-stamps it too, so a room open's own
+/// resolution counts.)
+fn refresh_emoji_packs_if_stale(app: &mut App) {
+    let Some(room_id) = app.timeline.room_id.clone() else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    if app
+        .emoji_packs_refreshed_at
+        .is_some_and(|last| now.duration_since(last) < EMOJI_PACK_REFRESH_INTERVAL)
+    {
+        return;
+    }
+    let Some(cmd_tx) = &app.cmd_tx else {
+        return;
+    };
+    app.emoji_packs_refreshed_at = Some(now);
+    let _ = cmd_tx.send(ClientCommand::RefreshEmojiPacks { room_id });
 }
 
 /// Issues an async Twemoji-SVG fetch for every emoji in `emojis` that isn't
@@ -1634,6 +1789,57 @@ fn image_urls_in_timeline(
         .filter(|url| !media.is_known(url))
         .map(str::to_owned)
         .collect()
+}
+
+/// Resident-bytes ceiling for the decoded media caches.
+///
+/// Before this there was no in-memory bound at all — `images`, `mxc_gifs`,
+/// `mxc_svgs`, `emoji` and `web_images` grew for the life of the process and
+/// were not even cleared on logout. The only cap in the codebase was the
+/// on-disk one (`client_core::media`, 512 MB), which is also what makes
+/// eviction cheap here: anything dropped is re-read locally if it comes back
+/// on screen.
+const MEDIA_MEMORY_BUDGET_BYTES: u64 = 192 * 1024 * 1024;
+
+/// Only entries at least this large are ever evicted.
+///
+/// The budget exists for photos, stickers and decoded GIF frames — the things
+/// that are megabytes each. Avatars and custom emotes are a few kilobytes and
+/// are referenced from places harder to enumerate than the timeline (the
+/// roster, the picker, inline shortcodes), so excluding them entirely removes
+/// any chance of evicting something on screen because a reference site was
+/// missed. Thousands of them still add up to only a few MB.
+const MIN_EVICTABLE_BYTES: u64 = 256 * 1024;
+
+/// Every media URL the current screen refers to — the set eviction must not
+/// touch. Deliberately broader than it strictly needs to be: a false positive
+/// here costs a few cached bytes, a false negative costs a visible reload.
+fn referenced_urls(app: &App) -> std::collections::HashSet<String> {
+    let mut live: std::collections::HashSet<String> = app
+        .room_list
+        .rooms
+        .iter()
+        .filter_map(|room| room.avatar_url.clone())
+        .collect();
+    for item in &app.timeline.items {
+        if let client_core::events::TimelineItemContent::Image { url, .. }
+        | client_core::events::TimelineItemContent::Sticker { url, .. } = &item.content
+        {
+            live.insert(url.clone());
+        }
+        live.extend(
+            item.reactions
+                .iter()
+                .map(|r| r.key.clone())
+                .filter(|key| key.starts_with("mxc://")),
+        );
+        live.extend(item.sender_avatar_url.clone());
+        live.extend(item.in_reply_to.as_ref().and_then(|r| r.image_url.clone()));
+    }
+    if let Some(url) = app.zoomed_image.as_ref() {
+        live.insert(url.clone());
+    }
+    live
 }
 
 fn image_urls_in_packs(packs: &[client_core::events::EmojiPack]) -> Vec<String> {
@@ -2048,6 +2254,9 @@ fn select_room(app: &mut App, room_id: String) -> Task<Message> {
     app.timeline.reached_start = false;
     app.timeline.loading_older = false;
     app.timeline.pending_paginate_request = None;
+    // A shrink requested in the previous room resolves (or dies) with that
+    // room's timeline; its Reset must not be mistaken for this room's.
+    app.timeline.pending_shrink = false;
     // Stale edit/redact requests would otherwise match a late CommandFailed
     // from the previous room and surface its error banner in this one.
     app.timeline.pending_edit_request = None;
@@ -2076,6 +2285,10 @@ fn select_room(app: &mut App, room_id: String) -> Task<Message> {
     app.timeline.highlighted_member = None;
     app.timeline.member_menu = None;
     app.zoomed_image = None;
+    // Nulling `zoomed_image` closes the lightbox, so its super-resolved buffer
+    // is now unreachable — and at up to 4096x4096 RGBA that is ~64 MB with no
+    // eviction anywhere to reclaim it later (see `media_cache::State`).
+    clear_upscale_cache(app);
     // An inline video belongs to a message in the room being left — its
     // card is gone from the new timeline, so stop it (the miss-counting
     // fallback would get there too, just slower and with lingering audio).
@@ -2120,6 +2333,7 @@ fn forget_open_room(app: &mut App, room_id: &str) -> Task<Message> {
     app.timeline.first_urls.clear();
     app.timeline.composer = screens::timeline::composer::State::default();
     app.timeline.member_index.clear();
+    app.timeline.pending_shrink = false;
     app.timeline.selected_member = None;
     app.timeline.highlighted_member = None;
     app.timeline.member_menu = None;
@@ -2184,6 +2398,9 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
             app.emoji_packs.clear();
             app.emoji_shortcode_index.clear();
             app.zoomed_image = None;
+            // Same reason as the room-switch path: the lightbox is gone, so
+            // its ~64 MB upscale buffer would otherwise be stranded.
+            clear_upscale_cache(app);
             app.space_explorer = None;
             app.route = crate::state::Route::Login;
             // The timeline reset above dropped any inline-video state; tear
@@ -2267,9 +2484,9 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                 // Items this batch adds or replaces — the grow-only harvests
                 // (media, custom/unicode emoji, stickers, link previews) only
                 // need to look at what changed, not the whole list.
+                use client_core::events::TimelineDiff as D;
                 let mut touched: Vec<client_core::events::TimelineItem> = Vec::new();
                 for diff in &diffs {
-                    use client_core::events::TimelineDiff as D;
                     match diff {
                         D::Append(items) | D::Reset(items) => {
                             touched.extend(items.iter().cloned());
@@ -2282,6 +2499,11 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                         | D::Truncate { .. } => {}
                     }
                 }
+                // A wholesale replacement in this batch is the only shape a
+                // requested shrink can resolve as (`timeline::open` re-seeds
+                // with a `Reset`), so it's what clears `pending_shrink` below.
+                let batch_has_reset =
+                    diffs.iter().any(|d| matches!(d, D::Reset(_) | D::Clear));
 
                 let urls = image_urls_in_timeline(&touched, &app.media);
                 let mut candidate_emojis =
@@ -2329,13 +2551,34 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                         .any(|i| i.event_id.as_deref() == Some(old_first.as_str())),
                     None => false,
                 };
+                // The pending shrink resolves on the reset it caused. Clearing
+                // on *any* reset also re-arms the over-cap trigger when the
+                // worker's reopen raced the event cache's auto-shrink and
+                // re-seeded oversized — the next diff batch just asks again.
+                let was_shrink = app.timeline.pending_shrink && batch_has_reset;
+                if batch_has_reset {
+                    app.timeline.pending_shrink = false;
+                }
                 let reset_task = if reset {
-                    tracing::info!(
-                        len = app.timeline.items.len(),
-                        "timeline window reset by a sync gap — snapping to live edge"
-                    );
+                    if was_shrink {
+                        tracing::info!(
+                            len = app.timeline.items.len(),
+                            "timeline window shrunk — back at the live edge"
+                        );
+                    } else {
+                        tracing::info!(
+                            len = app.timeline.items.len(),
+                            "timeline window reset by a sync gap — snapping to live edge"
+                        );
+                    }
                     app.timeline.scroll_anchor = None;
                     app.timeline.at_bottom = true;
+                    // The re-seeded window hangs off the live edge again, so a
+                    // "start of history reached" learned in the old window no
+                    // longer holds — left set, a room once scrolled to its very
+                    // start could never paginate back again after a gap reset
+                    // or a shrink.
+                    app.timeline.reached_start = false;
                     iced::widget::operation::scroll_to(
                         screens::timeline::timeline_scroll_id(),
                         iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
@@ -2373,6 +2616,7 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                 if app.timeline.at_bottom {
                     mark_open_room_read(app);
                 }
+                maybe_shrink_timeline(app);
                 let sticker_task =
                     if stickers_changed { persist_sticker_collection(app) } else { Task::none() };
                 return Task::batch([preview_task, reset_task, emoji_task, sticker_task]);
@@ -2461,6 +2705,9 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
             } else if app.timeline.pending_paginate_request == Some(request_id) {
                 app.timeline.pending_paginate_request = None;
                 app.timeline.loading_older = false;
+                // A prefetch that was still in flight when the user landed
+                // at the bottom was blocking the over-cap drop — re-check.
+                maybe_shrink_timeline(app);
             } else if app.call.pending.as_ref().is_some_and(|(id, ..)| *id == request_id) {
                 // The optimistic CallStateUpdated already flipped the
                 // banner; this just re-arms the buttons.
@@ -2502,7 +2749,7 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                 // losing it, unless the user typed something new meanwhile.
                 if let Some(carried) = composer.carried.take() {
                     if composer.body.is_empty() {
-                        composer.body = carried.body;
+                        composer.restore_draft(carried.body);
                         composer.mentioned = carried.mentioned;
                     }
                     if composer.replying_to.is_none() {
@@ -2522,6 +2769,7 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                 app.timeline.pending_paginate_request = None;
                 app.timeline.loading_older = false;
                 app.timeline.action_error = Some(error);
+                maybe_shrink_timeline(app);
             } else if app.call.pending.as_ref().is_some_and(|(id, ..)| *id == request_id) {
                 // Keep the room id so the error renders only in the room
                 // whose join/leave actually failed.
@@ -2589,6 +2837,10 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
             app.verification.recovery_error = Some(reason);
         }
         ClientEvent::CustomEmojiPacksUpdated(packs) => {
+            // Room-open resolution counts as a refresh: without this, the
+            // first picker open in a just-opened room would re-fetch state
+            // the client pulled seconds ago.
+            app.emoji_packs_refreshed_at = Some(std::time::Instant::now());
             let urls = image_urls_in_packs(&packs);
             app.emoji_packs = packs;
             app.emoji_shortcode_index = build_shortcode_index(&app.emoji_packs);
@@ -2791,6 +3043,25 @@ fn perform_discover(homeserver: String) -> Task<Message> {
 
 #[cfg(test)]
 mod tests {
+    use super::{restore_backoff, MAX_RESTORE_ATTEMPTS};
+
+    #[test]
+    fn restore_backoff_grows_then_settles() {
+        let secs: Vec<u64> =
+            (1..=MAX_RESTORE_ATTEMPTS).map(|n| restore_backoff(n).as_secs()).collect();
+        assert_eq!(secs, [2, 4, 8, 16, 30, 30]);
+    }
+
+    #[test]
+    fn restore_backoff_never_hammers_or_stalls() {
+        // Every wait is long enough not to spin on a dead network, and short
+        // enough that a returning connection is picked up promptly.
+        for attempt in 1..=100 {
+            let secs = restore_backoff(attempt).as_secs();
+            assert!((2..=30).contains(&secs), "attempt {attempt} waited {secs}s");
+        }
+    }
+
     use client_core::events::{TimelineDiff as D, TimelineItem, TimelineItemContent};
 
     /// A minimal item distinguishable by `event_id`; `body` drives what

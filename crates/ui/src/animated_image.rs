@@ -15,6 +15,8 @@
 //! to keep in sync with the core widget.
 
 use std::hash::Hasher;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use iced::advanced::image::{self, FilterMethod, Handle};
@@ -23,6 +25,15 @@ use iced::advanced::renderer;
 use iced::advanced::widget::tree::{self, Tree};
 use iced::advanced::{Clipboard, Shell, Widget};
 use iced::{mouse, window, ContentFit, Element, Event, Length, Rectangle, Rotation, Size};
+
+/// Ceiling on the total decoded pixels of a single animated image.
+///
+/// Frames are held as fully decoded RGBA and never evicted, so the real cost
+/// is this times four bytes: 64M pixels = ~256 MB worst case for one pathological
+/// GIF, and the ordinary emote (64x64, 20 frames = 82k pixels) is four orders of
+/// magnitude under it. High enough that nothing anyone actually posts is
+/// truncated; low enough that a decompression-bomb GIF cannot exhaust memory.
+const MAX_DECODED_PIXELS: u64 = 64 * 1024 * 1024;
 
 /// A decoded animated GIF: its frames plus a content-derived `id` used to tell
 /// one GIF from another when a widget-tree slot is reused across re-renders.
@@ -58,11 +69,30 @@ impl Frames {
 
         let decoder =
             ::image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).ok()?;
-        let frames = decoder
-            .into_frames()
-            .map(|result| result.map(Frame::from))
-            .collect::<Result<Vec<_>, _>>()
-            .ok()?;
+
+        // Bounded rather than `collect()`ed wholesale: every frame is kept as
+        // fully decoded RGBA (see `Frame::from`), so cost is
+        // width * height * 4 * frame_count with nothing in `media_cache` ever
+        // evicting it. One 100-frame 512x512 GIF is ~105 MB resident, and a
+        // pack of animated emotes is fetched and decoded in bulk. Past the
+        // budget we stop decoding and keep what we have — the animation runs
+        // short rather than the image failing, which is far better than either
+        // dropping it or letting one message cost hundreds of megabytes.
+        let mut frames: Vec<Frame> = Vec::new();
+        let mut pixels: u64 = 0;
+        for result in decoder.into_frames() {
+            let frame = Frame::from(result.ok()?);
+            pixels += u64::from(frame.width) * u64::from(frame.height);
+            frames.push(frame);
+            if pixels >= MAX_DECODED_PIXELS {
+                tracing::debug!(
+                    frames = frames.len(),
+                    pixels,
+                    "animated_image: gif hit the decode budget, truncating the animation"
+                );
+                break;
+            }
+        }
         let first = frames.first().cloned()?;
 
         Some(Frames { id, first, frames })
@@ -78,6 +108,17 @@ impl Frames {
 
     pub fn frame_count(&self) -> usize {
         self.frames.len()
+    }
+
+    /// Resident bytes of the decoded frames, for the cache's byte budget.
+    ///
+    /// `first` is a clone of `frames[0]` and an `image::Handle` shares its
+    /// pixel buffer when cloned, so it is deliberately not counted twice.
+    pub fn decoded_bytes(&self) -> u64 {
+        self.frames
+            .iter()
+            .map(|f| u64::from(f.width) * u64::from(f.height) * 4)
+            .sum()
     }
 
     pub fn first_frame_size(&self) -> (u32, u32) {
@@ -174,6 +215,53 @@ impl<'a> Gif<'a> {
     }
 }
 
+/// Shared animation cadence, ~30 fps.
+///
+/// `Shell::request_redraw_at` keeps the *earliest* instant any widget asks for,
+/// so GIFs left to their own schedules wake the window at the union of all of
+/// them: six emotes with the same 100 ms frame delay but different start times
+/// cost six whole-window redraws per 100 ms instead of one. Rounding every
+/// deadline up onto one grid collapses everything due in the same tick into a
+/// single frame, which is what "in sync" has to mean here — one window, one
+/// redraw, all the emotes advanced together.
+///
+/// The cost is up to 33 ms of timing error per frame. Emote GIFs are almost
+/// always 100 ms per frame (browsers clamp anything under 20 ms to 100 ms), so
+/// that is not perceptible; a GIF asking for more than 30 fps is capped, which
+/// is already true of most displays.
+const ANIMATION_TICK: Duration = Duration::from_millis(33);
+
+/// Fixed origin for the tick grid. Any instant works as long as every GIF
+/// shares it — that shared phase is the whole point.
+static ANIMATION_EPOCH: OnceLock<Instant> = OnceLock::new();
+
+/// Whether the window currently has focus.
+///
+/// Process-wide rather than per-widget: it describes the window, and a GIF
+/// scrolled into view while the app sits in the background has to start paused
+/// too, having never seen the `Unfocused` event that put it there.
+static WINDOW_FOCUSED: AtomicBool = AtomicBool::new(true);
+
+fn set_window_focused(focused: bool) {
+    WINDOW_FOCUSED.store(focused, Ordering::Relaxed);
+}
+
+fn window_focused() -> bool {
+    WINDOW_FOCUSED.load(Ordering::Relaxed)
+}
+
+/// Rounds `target` up to the next point on the shared [`ANIMATION_TICK`] grid,
+/// so GIFs due within the same tick ask for the same instant.
+fn next_tick(target: Instant) -> Instant {
+    let epoch = *ANIMATION_EPOCH.get_or_init(Instant::now);
+    let elapsed = target.saturating_duration_since(epoch).as_millis();
+    let tick = ANIMATION_TICK.as_millis();
+    let ticks = elapsed.div_ceil(tick);
+    // Saturating: a target absurdly far out would otherwise wrap the cast.
+    let offset = u64::try_from(ticks.saturating_mul(tick)).unwrap_or(u64::MAX);
+    epoch + Duration::from_millis(offset)
+}
+
 impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer> for Gif<'_>
 where
     Renderer: image::Renderer<Handle = Handle>,
@@ -263,18 +351,39 @@ where
             };
         }
 
-        if let Event::Window(window::Event::RedrawRequested(now)) = event {
-            let now = *now;
-            let elapsed = now.duration_since(state.current.started);
-
-            if elapsed > state.current.frame.delay {
-                state.index = (state.index + 1) % self.frames.frames.len();
-                state.current = self.frames.frames[state.index].clone().into();
-                shell.request_redraw_at(now + state.current.frame.delay);
-            } else {
-                let remaining = state.current.frame.delay - elapsed;
-                shell.request_redraw_at(now + remaining);
+        match event {
+            Event::Window(window::Event::Unfocused) => set_window_focused(false),
+            Event::Window(window::Event::Focused) => {
+                set_window_focused(true);
+                // Restart this GIF's clock instead of letting it catch up: the
+                // frames nobody saw aren't worth replaying, and without this a
+                // long spell in the background makes every emote lurch forward
+                // on the way back.
+                state.current.started = Instant::now();
+                shell.request_redraw();
             }
+            Event::Window(window::Event::RedrawRequested(now)) => {
+                // Nothing to animate for a window nobody is looking at, and
+                // every frame costs a whole-window redraw plus a texture
+                // upload. Not requesting a redraw here is what actually stops
+                // the work — the window then only wakes for real events.
+                if !window_focused() {
+                    return;
+                }
+
+                let now = *now;
+                let elapsed = now.duration_since(state.current.started);
+
+                if elapsed > state.current.frame.delay {
+                    state.index = (state.index + 1) % self.frames.frames.len();
+                    state.current = self.frames.frames[state.index].clone().into();
+                    shell.request_redraw_at(next_tick(now + state.current.frame.delay));
+                } else {
+                    let remaining = state.current.frame.delay - elapsed;
+                    shell.request_redraw_at(next_tick(now + remaining));
+                }
+            }
+            _ => {}
         }
     }
 
@@ -329,5 +438,96 @@ where
 {
     fn from(gif: Gif<'a>) -> Self {
         Element::new(gif)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pins the epoch so the grid is deterministic across the test module.
+    fn epoch() -> Instant {
+        *ANIMATION_EPOCH.get_or_init(Instant::now)
+    }
+
+    #[test]
+    fn deadlines_land_on_the_shared_grid() {
+        let epoch = epoch();
+        for ms in [0u64, 1, 32, 33, 34, 99, 100, 5_000] {
+            let at = next_tick(epoch + Duration::from_millis(ms));
+            let offset = at.saturating_duration_since(epoch).as_millis();
+            assert_eq!(
+                offset % ANIMATION_TICK.as_millis(),
+                0,
+                "{ms}ms landed off-grid at {offset}ms"
+            );
+            assert!(offset >= u128::from(ms), "{ms}ms was rounded down to {offset}ms");
+        }
+    }
+
+    #[test]
+    fn emotes_due_in_the_same_tick_collapse_to_one_redraw() {
+        // The case that motivated this: several emotes with the same frame
+        // delay but different start phases. Previously each asked for its own
+        // instant and woke the window separately.
+        let epoch = epoch();
+        // Phases strictly inside one tick interval. (A deadline landing exactly
+        // on a grid point belongs to that point, so 0 is its own bucket.)
+        let requests: std::collections::HashSet<_> = [1u64, 5, 11, 19, 27, 33]
+            .iter()
+            .map(|phase| next_tick(epoch + Duration::from_millis(*phase)))
+            .collect();
+        assert_eq!(requests.len(), 1, "six emotes within one tick must share a frame");
+
+        // And the win this is really about: six 100 ms emotes at scattered
+        // phases used to wake the window six times per 100 ms.
+        let per_100ms: std::collections::HashSet<_> = [0u64, 17, 34, 51, 68, 85]
+            .iter()
+            .map(|phase| next_tick(epoch + Duration::from_millis(phase + 100)))
+            .collect();
+        assert!(
+            per_100ms.len() <= 4,
+            "expected scattered emotes to collapse, got {} distinct redraws",
+            per_100ms.len()
+        );
+    }
+
+    #[test]
+    fn emotes_in_different_ticks_still_get_their_own_frames() {
+        // Coalescing must not starve a GIF that is genuinely due later.
+        let epoch = epoch();
+        let early = next_tick(epoch + Duration::from_millis(10));
+        let late = next_tick(epoch + Duration::from_millis(40));
+        assert!(late > early);
+    }
+
+    #[test]
+    fn a_frame_is_never_scheduled_early() {
+        // Rounding down would show a frame before its delay had elapsed,
+        // speeding every GIF up slightly.
+        let epoch = epoch();
+        for ms in 0..200u64 {
+            let target = epoch + Duration::from_millis(ms);
+            assert!(next_tick(target) >= target, "{ms}ms was scheduled early");
+        }
+    }
+
+    #[test]
+    fn the_tick_bounds_how_late_a_frame_can_be() {
+        let epoch = epoch();
+        for ms in 0..200u64 {
+            let target = epoch + Duration::from_millis(ms);
+            let slip = next_tick(target).saturating_duration_since(target);
+            assert!(slip < ANIMATION_TICK, "{ms}ms slipped {slip:?}, past one tick");
+        }
+    }
+
+    #[test]
+    fn focus_gates_animation() {
+        // The flag the redraw path consults before scheduling anything.
+        set_window_focused(false);
+        assert!(!window_focused());
+        set_window_focused(true);
+        assert!(window_focused());
     }
 }

@@ -187,6 +187,7 @@ fn settings_overlay(app: &App) -> Element<'_, Message> {
             &app.spellcheck,
             &app.chat,
             &app.connectors,
+            &app.window_config,
             account,
             app.default_notification_modes,
             &app.verification,

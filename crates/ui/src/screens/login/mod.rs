@@ -33,6 +33,9 @@ pub enum Status {
     Idle,
     Discovering,
     LoggingIn,
+    /// Restoring a saved session, but the homeserver isn't answering yet. Not
+    /// an error: nothing is wrong locally and the retry is already scheduled.
+    Reconnecting(String),
     Error(String),
 }
 
@@ -140,6 +143,7 @@ fn status_text(status: &Status) -> Element<'_, Message> {
         Status::Idle => text("").into(),
         Status::Discovering => text("Checking homeserver...").into(),
         Status::LoggingIn => text("Signing in...").into(),
+        Status::Reconnecting(msg) => text(msg.clone()).style(text::secondary).into(),
         Status::Error(e) => text(e.clone()).style(text::danger).into(),
     }
 }

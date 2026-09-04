@@ -58,14 +58,50 @@ pub fn subscription(app: &App) -> Subscription<Message> {
     } else {
         Subscription::none()
     };
+    // Window-global cursor tracking, for anchoring right-click menus at the
+    // pointer. Every mouse move that lands here becomes a `Message`, and a
+    // message means a full `update()` + `view()` rebuild — so this is the one
+    // always-on listener with a real per-event cost, and it is worth being
+    // fussy about when it runs.
+    //
+    // Focus is the gate: winit delivers `CursorMoved` to an unfocused window
+    // whenever the pointer crosses it, so a ThornyChat window merely *visible*
+    // behind the app someone is actually working in would rebuild its entire
+    // timeline every few milliseconds, to record a position no click is coming
+    // to use. Nothing consumes `cursor_position` except a right-click menu and
+    // autoscroll, both of which require a click on this window — which cannot
+    // happen without focus arriving first.
+    let cursor = if app.window_focused {
+        iced::event::listen_with(cursor_events)
+    } else {
+        Subscription::none()
+    };
     Subscription::batch([
         client_events,
         iced::event::listen_with(window_events),
+        cursor,
         settings_resize,
         autoscroll,
         video_focus,
         connectors,
     ])
+}
+
+/// Cursor tracking, live only while the window has focus (see the gate in
+/// [`subscription`]). Split out of [`window_events`] rather than living
+/// alongside the rest: those arms are cheap and rare, this one fires at the
+/// pointer's polling rate.
+fn cursor_events(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _window: iced::window::Id,
+) -> Option<Message> {
+    match event {
+        iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+            Some(Message::CursorMoved(position))
+        }
+        _ => None,
+    }
 }
 
 /// A press that reaches iced while a video plays landed on the app surface
@@ -112,7 +148,10 @@ fn autoscroll_cancel_events(
 /// timeline's scroll-anchor geometry (and, via the update wrapper's stage
 /// probe, reglue the inline video player), Escape dismisses the image
 /// lightbox, Ctrl+V probes the clipboard for files/images to attach
-/// (`clipboard_paste`), and dropped files stage as attachment chips.
+/// (`clipboard_paste`), dropped files stage as attachment chips, and focus
+/// changes gate the cursor listener above. All of these are rare; the
+/// per-mouse-move arm deliberately lives in [`cursor_events`] instead, so it
+/// can be switched off.
 fn window_events(
     event: iced::Event,
     _status: iced::event::Status,
@@ -125,11 +164,13 @@ fn window_events(
         iced::Event::Window(iced::window::Event::Moved(position)) => {
             Some(Message::WindowMoved(position))
         }
-        // Window-global cursor position, so a right-click menu can open at the
-        // pointer: `mouse_area::on_right_press` carries no coordinates and
-        // `on_move` only reports widget-local ones.
-        iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
-            Some(Message::CursorMoved(position))
+        // Focus changes gate the cursor listener above — and only that, so
+        // these two arms are the whole cost of knowing.
+        iced::Event::Window(iced::window::Event::Focused) => {
+            Some(Message::WindowFocusChanged(true))
+        }
+        iced::Event::Window(iced::window::Event::Unfocused) => {
+            Some(Message::WindowFocusChanged(false))
         }
         iced::Event::Window(iced::window::Event::FileDropped(path)) => {
             Some(Message::FileDropped(path))

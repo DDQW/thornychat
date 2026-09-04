@@ -23,6 +23,23 @@ use iced::{Element, Length};
 // instead of plain `text` — see its doc comment for the tofu story.
 use crate::theme::remote_text;
 
+/// Cap on the open room's item list. A room left open for days accumulates
+/// every live event — the SDK window and this mirror both only ever grow —
+/// and since view() rebuilds a widget per item on every update cycle, a few
+/// thousand items makes the whole app crawl. Past this cap (and only while
+/// quietly tailing the live edge — see the trigger in `update.rs`), the UI
+/// asks the worker to reopen the timeline window: back to the newest ~80
+/// items, with everything older one back-pagination away, exactly like a
+/// freshly opened room.
+///
+/// Sizing: a shrink rests at ~80 items (20-item seed + 60-event initial
+/// backfill), so the cap must sit well above that floor — the headroom
+/// (cap − 80) is how many live messages arrive between shrinks, and a cap
+/// near 100 would rebuild the whole timeline every ~20 messages. 200 keeps
+/// the everyday render list small (the point of the cap) while a busy room
+/// still only shrinks a handful of times a day.
+pub const MAX_LIVE_ITEMS: usize = 200;
+
 
 /// The room header's notification dropdown options. `Default` means "no
 /// per-room override" (follow the account default), which the SDK models as
@@ -112,6 +129,12 @@ pub struct State {
     pub reached_start: bool,
     pub loading_older: bool,
     pub pending_paginate_request: Option<RequestId>,
+    /// A `ShrinkTimeline` has been sent and its `Reset` hasn't landed yet —
+    /// stops the over-cap trigger re-firing on every diff batch in between.
+    /// Cleared when any reset/clear diff arrives (even one that raced the
+    /// event cache's auto-shrink and came back oversized — the trigger then
+    /// simply asks again), and on room switch.
+    pub pending_shrink: bool,
     /// Member panel visibility, inverted so `Default` (false) means shown.
     pub hide_members: bool,
     /// MSC3949 member groups for the open room ("Red team", ...), highest
@@ -953,18 +976,27 @@ pub fn update(
                     return (task, Effect::None);
                 }
 
-                // Nearing the top auto-loads more history — the explicit
-                // "Load older" control stays as a fallback for short
-                // timelines that can't scroll yet. (Restored original
-                // behavior: while the timeline was accidentally
-                // top-anchored, `absolute_offset_reversed` measured
-                // distance from the *bottom*, so this trigger fired on
-                // every approach to the live edge and looked like runaway
-                // history loading. Under the correct anchor it fires only
-                // near the real top, and each prepended batch is invisible
-                // to a bottom-anchored viewport.)
+                // Infinite scrollback: approaching the top prefetches more
+                // history a viewport and a half early, so the boundary is
+                // normally never seen — the explicit "Load older" control
+                // stays as a fallback for short timelines that can't scroll
+                // yet. Each prepended batch is invisible to a bottom-anchored
+                // viewport, and prepends move this position *away* from the
+                // top, so the trigger naturally re-arms rather than looping.
+                //
+                // The half-viewport-from-the-bottom guard keeps prefetch and
+                // the live-growth shrink mutually exclusive: in a room whose
+                // whole content is under ~two viewports tall, *everywhere*
+                // is "near the top", and prefetching straight from the live
+                // edge would grow the list past the cap only for the shrink
+                // to cut it back on arrival at the bottom — a permanent
+                // ping-pong. Requiring real upward commitment first means
+                // prefetch only runs for a reader headed into history.
                 let from_top = viewport.absolute_offset_reversed().y;
-                if from_top <= 60.0 && !state.loading_older && !state.reached_start {
+                let viewport_height = viewport.bounds().height;
+                let near_top = from_top <= viewport_height * 1.5;
+                let committed_up = from_bottom > viewport_height * 0.5;
+                if near_top && committed_up && !state.loading_older && !state.reached_start {
                     state.loading_older = true;
                     return (task, Effect::PaginateBackwards);
                 }
@@ -1372,7 +1404,7 @@ pub fn view<'a>(
             SyncState::Syncing => None,
             SyncState::Connecting => Some("Connecting…"),
             SyncState::Offline => Some("Offline — you'll reconnect automatically"),
-            SyncState::Error(_) => Some("Connection error"),
+            SyncState::Error(_) => Some("Connection error — retrying"),
         }
         .map(|label| text(label).style(text::secondary).size(12).into()),
     );

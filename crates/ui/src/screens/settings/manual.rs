@@ -220,16 +220,17 @@ pub fn view<'a, M: 'a>() -> Element<'a, M> {
         "Composer & attachments",
         vec![
             para(
-                "Type a message and press Enter. Use the emoji button for the \
+                "Type a message and press Enter; Shift+Enter starts a new line \
+                 and the box grows as you go. Use the emoji button for the \
                  emoji picker and the sticker button for stickers — a sticker \
                  sends the moment you click it.",
             ),
             para(
-                "Spell-check is unobtrusive: instead of underlines it shows a \
-                 suggestion bar above the box for the last misspelled word, with \
-                 an \"Add to dictionary\" option. Autocorrect (off by default) \
-                 silently fixes a word when you end it with a space; Backspace \
-                 right after undoes it.",
+                "Spell-check marks misspelled words in red as you type. Click \
+                 into one and a bar above the box offers fixes, plus an \
+                 \"Add to dictionary\" option. Autocorrect (off by default) \
+                 fixes a word the moment you end it with a space; Backspace \
+                 right after gets back what you typed.",
             ),
             para(
                 "Attachments: click the paperclip, paste with Ctrl+V, or drag \

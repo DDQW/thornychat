@@ -42,14 +42,21 @@ pub struct ConnectorsConfig {
 }
 
 impl Default for ConnectorsConfig {
-    /// Nothing shared until opted in; a sensible 15s poll cadence.
+    /// Nothing shared until opted in; a 30s poll cadence.
+    ///
+    /// Thirty rather than fifteen because the GOG/Epic path takes a full
+    /// `CreateToolhelp32Snapshot` of every process on the machine, and this
+    /// timer runs for as long as the app does — on a client meant to stay
+    /// open for days, halving that is worth more than halving the delay on a
+    /// "now playing" line nobody is waiting on. Users who want it snappier
+    /// can still set the value down to [`MIN_POLL_INTERVAL_SECS`].
     fn default() -> Self {
         Self {
             steam_enabled: false,
             gog_enabled: false,
             epic_enabled: false,
             announce_stop: false,
-            poll_interval_secs: 15,
+            poll_interval_secs: 30,
         }
     }
 }

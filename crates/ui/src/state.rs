@@ -48,6 +48,9 @@ pub enum Route {
 pub struct App {
     pub route: Route,
     pub profile: String,
+    /// Consecutive failed session-restore attempts caused by an unreachable
+    /// homeserver. Drives the retry backoff in `update`; reset on success.
+    pub restore_attempts: u32,
 
     /// Present once a session (restored or freshly logged in) exists. Its
     /// mere presence is what activates `subscriptions::client_events`,
@@ -72,6 +75,10 @@ pub struct App {
     pub call: screens::call::State,
     pub media: crate::media_cache::State,
     pub emoji_packs: Vec<client_core::events::EmojiPack>,
+    /// When the pack set above was last (re)resolved — the throttle behind
+    /// `update::refresh_emoji_packs_if_stale`. `None` until the
+    /// first resolution lands.
+    pub emoji_packs_refreshed_at: Option<std::time::Instant>,
 
     /// Rooms with a user-defined notification override; rooms absent here
     /// follow the account default. Kept fresh by client-core's
@@ -131,10 +138,17 @@ pub struct App {
     /// starts the debounce timer exactly once (same idea as
     /// `media_cache::State::flush_scheduled`).
     pub window_save_scheduled: bool,
-    /// Latest window-global cursor position, updated on every mouse move (see
-    /// `subscriptions::window_events`). Snapshotted when a right-click menu
-    /// opens so it can anchor at the pointer.
+    /// Latest window-global cursor position, updated on every mouse move while
+    /// the window has focus (see `subscriptions::cursor_events`). Snapshotted
+    /// when a right-click menu opens so it can anchor at the pointer.
     pub cursor_position: iced::Point,
+    /// Whether the app window currently has focus. Gates the cursor-tracking
+    /// subscription: an unfocused window still receives `CursorMoved` for
+    /// every pointer move that crosses it, and each one would cost a full
+    /// `view()` rebuild for a position no click is coming to use. Same
+    /// reasoning as `animated_image`'s process-wide focus flag, which pauses
+    /// GIF ticks for the same reason.
+    pub window_focused: bool,
     /// Current size of the Settings panel, user-resizable via its
     /// bottom-right grip.
     pub settings_panel_size: iced::Size,
@@ -268,6 +282,7 @@ impl App {
         Self {
             route: Route::Login,
             profile,
+            restore_attempts: 0,
             client: None,
             cmd_tx: None,
             sync_state: SyncState::Connecting,
@@ -281,6 +296,7 @@ impl App {
             call: screens::call::State::default(),
             media: crate::media_cache::State::default(),
             emoji_packs: Vec::new(),
+            emoji_packs_refreshed_at: None,
             notification_modes: std::collections::HashMap::new(),
             default_notification_modes: (
                 client_core::events::NotificationMode::AllMessages,
@@ -312,6 +328,9 @@ impl App {
             pending_window_position: None,
             window_save_scheduled: false,
             cursor_position: iced::Point::ORIGIN,
+            // Assume focused: a freshly opened window has focus, and the
+            // first `Unfocused` corrects it if not.
+            window_focused: true,
             settings_panel_size: DEFAULT_SETTINGS_SIZE,
             settings_resize_drag: None,
             zoomed_image: None,
@@ -335,6 +354,33 @@ impl App {
     }
 }
 
+/// Attempts to restore the saved session after `delay`, reporting the outcome
+/// as [`Message::RestoreResult`].
+///
+/// Separate from `boot` because a transport failure is retried: `try_restore`
+/// leaves the session on disk in that case, so re-running it is both safe and
+/// idempotent.
+pub fn restore_task(profile: String, delay: std::time::Duration) -> iced::Task<Message> {
+    iced::Task::perform(
+        async move {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            let paths = client_core::store::AppPaths::for_profile(&profile).map_err(|e| {
+                crate::message::RestoreFailure { message: e.to_string(), retryable: false }
+            })?;
+            client_core::session::try_restore(&paths)
+                .await
+                .map(|opt| opt.map(|r| OpaqueClient(r.client)))
+                .map_err(|e| crate::message::RestoreFailure {
+                    message: e.to_string(),
+                    retryable: e.is_transient_transport(),
+                })
+        },
+        Message::RestoreResult,
+    )
+}
+
 /// Boots the app: kicks off an async attempt to restore a previously saved
 /// session before the login screen is shown, so a returning user doesn't
 /// see a login form flash before landing in their rooms. `theme` is loaded
@@ -348,20 +394,7 @@ pub fn boot(
     theme: crate::theme_config::ThemeConfig,
     start_minimized: bool,
 ) -> (App, iced::Task<Message>) {
-    let restore_profile = profile.clone();
-    let restore_task = iced::Task::perform(
-        async move {
-            let paths = client_core::store::AppPaths::for_profile(&restore_profile)
-                .map_err(|e| e.to_string())?;
-            client_core::session::try_restore(&paths)
-                .await
-                .map(|opt| opt.map(|r| OpaqueClient(r.client)))
-                .map_err(|e| e.to_string())
-        },
-        Message::RestoreResult,
-    );
-
-    let mut tasks = vec![restore_task];
+    let mut tasks = vec![restore_task(profile.clone(), std::time::Duration::ZERO)];
     if start_minimized {
         tasks.push(iced::window::latest().and_then(|id| iced::window::minimize(id, true)));
     }
