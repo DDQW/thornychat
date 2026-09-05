@@ -132,6 +132,28 @@ pub struct App {
     /// maximize also moves/resizes, but must not clobber the remembered
     /// restore geometry).
     pub window_config: crate::window_config::WindowConfig,
+    /// The window the app is currently showing, if any. `None` only while the
+    /// machine sleeps: the window is closed on suspend so `iced_winit` drops
+    /// the compositor — and with it the wgpu device that would otherwise be
+    /// lost on resume (see `platform::power`).
+    pub main_window: Option<iced::window::Id>,
+    /// Set between the suspend notification and the window actually closing,
+    /// so `WindowClosed` can tell "the machine is going to sleep" from "the
+    /// user quit". Cleared when the window comes back.
+    pub sleeping: bool,
+    /// Everything about the window that does not come from `window_config` —
+    /// today just the icon, decoded once in `main` and reused for every window
+    /// opened afterwards (including the one that replaces it on resume).
+    pub window_icon: Option<iced::window::Icon>,
+    /// `--minimized` (autostart): applied to the first window only, never to
+    /// the one that reopens on resume — waking up should give back the window
+    /// that was there when the machine went to sleep.
+    pub start_minimized: bool,
+    /// How much the app logs — persisted globally, editable from the General
+    /// settings tab. Held here only so the picker can show and change it; the
+    /// value that is actually in force was read at startup by
+    /// `app::logging::init`, before this struct existed.
+    pub log_config: crate::log_config::LogConfig,
     pub pending_window_size: Option<iced::Size>,
     pub pending_window_position: Option<iced::Point>,
     /// Armed between scheduling the geometry save and it firing, so a drag
@@ -269,6 +291,13 @@ fn load_last_room(profile: &str) -> Option<String> {
 }
 
 impl App {
+    /// The settings this app's window opens with: the remembered geometry
+    /// (see [`crate::window_config::WindowConfig::window_settings`]) plus the
+    /// icon decoded at startup.
+    pub fn window_settings(&self) -> iced::window::Settings {
+        self.window_config.window_settings(self.window_icon.clone())
+    }
+
     pub fn new(profile: String, theme: crate::theme_config::ThemeConfig) -> Self {
         let emoji_usage = load_emoji_usage(&profile);
         let sticker_collection = load_sticker_collection(&profile);
@@ -324,6 +353,12 @@ impl App {
             connectors_last: None,
             show_settings: false,
             window_config: crate::window_config::WindowConfig::load_or_default(),
+            log_config: crate::log_config::LogConfig::load_or_default(),
+            // Filled in by `boot`, which is what opens the first window.
+            main_window: None,
+            sleeping: false,
+            window_icon: None,
+            start_minimized: false,
             pending_window_size: None,
             pending_window_position: None,
             window_save_scheduled: false,
@@ -381,23 +416,38 @@ pub fn restore_task(profile: String, delay: std::time::Duration) -> iced::Task<M
     )
 }
 
-/// Boots the app: kicks off an async attempt to restore a previously saved
-/// session before the login screen is shown, so a returning user doesn't
-/// see a login form flash before landing in their rooms. `theme` is loaded
-/// synchronously by the caller (`main.rs`) before this runs, since it also
-/// feeds the `iced::application` builder's static `.default_font()`.
+/// Boots the app: opens the first window, and kicks off an async attempt to
+/// restore a previously saved session before the login screen is shown, so a
+/// returning user doesn't see a login form flash before landing in their
+/// rooms. `theme` is loaded synchronously by the caller (`main.rs`) before
+/// this runs, since it also feeds the builder's static `.default_font()`.
+///
+/// Opening the window here rather than declaring it on the builder is what
+/// `iced::daemon` requires — and the reason the app is a daemon at all is that
+/// a daemon may have *no* window for a while, which is exactly what happens
+/// while the machine sleeps (see `platform::power`).
+///
 /// `start_minimized` comes from the `--minimized` launch flag (autostart);
-/// minimizing is queued independently of the restore task so it doesn't wait
-/// on a slow network round trip before hiding the window.
+/// minimizing is queued off the window's own open task so it doesn't wait on
+/// a slow network round trip before hiding the window.
 pub fn boot(
     profile: String,
     theme: crate::theme_config::ThemeConfig,
     start_minimized: bool,
+    window_icon: Option<iced::window::Icon>,
 ) -> (App, iced::Task<Message>) {
-    let mut tasks = vec![restore_task(profile.clone(), std::time::Duration::ZERO)];
-    if start_minimized {
-        tasks.push(iced::window::latest().and_then(|id| iced::window::minimize(id, true)));
-    }
+    let mut app = App::new(profile.clone(), theme);
+    app.window_icon = window_icon;
+    app.start_minimized = start_minimized;
 
-    (App::new(profile, theme), iced::Task::batch(tasks))
+    let (id, open) = iced::window::open(app.window_settings());
+    app.main_window = Some(id);
+
+    let tasks = vec![
+        restore_task(profile, std::time::Duration::ZERO),
+        open.map(Message::WindowOpened),
+    ];
+
+    (app, iced::Task::batch(tasks))
 }
+

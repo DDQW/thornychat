@@ -167,6 +167,27 @@ pub enum Message {
     /// `state::App::window_focused`).
     WindowFocusChanged(bool),
 
+    // --- window lifecycle (see `state::App::main_window`) ---
+    /// A window finished opening. Carries the id iced assigned it, which is
+    /// what every later window action is addressed to.
+    WindowOpened(iced::window::Id),
+    /// A window this app asked to close is gone. In the suspend path this is
+    /// the moment the GPU device is actually released, so it is also what
+    /// releases the waiting suspend callback.
+    WindowClosed(iced::window::Id),
+    /// The user asked to close the window (the X, Alt+F4). Closing the window
+    /// is how someone quits this app, so this exits — unlike the suspend path,
+    /// which closes the same window and keeps running.
+    WindowCloseRequested,
+    /// The machine is going to sleep, or has just woken up. See
+    /// `platform::power` for why the app cares, and `update` for what it does
+    /// about it.
+    Power(crate::platform::power::PowerEvent),
+    /// Safety net while no window exists: if a resume notification never
+    /// arrives (or arrived while the app was mid-shutdown), this reopens the
+    /// window anyway. Only subscribed when there is nothing on screen.
+    EnsureWindow,
+
     // --- middle-click autoscroll (see `timeline::State::autoscroll`) ---
     /// One frame of the autoscroll glide: scroll the timeline toward the
     /// cursor's offset from the anchor. Fired ~60×/s by a timer subscription

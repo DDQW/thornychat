@@ -2,8 +2,10 @@
 //! persisted as `%APPDATA%\ThornyChat\ThornyChat\config\window.json` next to
 //! the theme/privacy/chat configs (global: a property of this install, not
 //! any one account). Loaded synchronously at startup because the values feed
-//! `iced::window::Settings`, which — like the default font — is a static
-//! builder-time setting, not a reactive closure.
+//! `iced::window::Settings`, which is read when a window is opened rather than
+//! watched afterwards — and this app opens more than one over its life: the
+//! window is closed and reopened across standby (see `platform::power`), each
+//! time from the geometry as it stands then.
 
 use std::path::PathBuf;
 
@@ -142,6 +144,29 @@ impl WindowConfig {
         }
     }
 
+    /// The `iced::window::Settings` a window of this app opens with.
+    ///
+    /// Lives here rather than on `App` so it can be built (and tested) from a
+    /// config alone: the app opens windows more than once now — the one that
+    /// replaces it after standby included — and each open reads the geometry
+    /// as it stands at that moment.
+    ///
+    /// `exit_on_close_request` is off because closing the window is no longer
+    /// the same thing as quitting: `platform::power` closes it deliberately
+    /// before the machine sleeps and the app keeps running. The user's own
+    /// close arrives as `Message::WindowCloseRequested` instead, and that one
+    /// exits.
+    pub fn window_settings(&self, icon: Option<iced::window::Icon>) -> iced::window::Settings {
+        iced::window::Settings {
+            icon,
+            size: self.size(),
+            position: self.position(),
+            maximized: self.maximized,
+            exit_on_close_request: false,
+            ..Default::default()
+        }
+    }
+
     pub fn size(&self) -> iced::Size {
         iced::Size::new(self.width, self.height)
     }
@@ -270,6 +295,30 @@ mod tests {
             Some(value) => std::env::set_var("WGPU_BACKEND", value),
             None => std::env::remove_var("WGPU_BACKEND"),
         }
+    }
+
+    /// Two things about a window's settings are load-bearing rather than
+    /// cosmetic: the geometry has to come from the config as it stands (so the
+    /// window reopened after standby lands where the user left it, not where
+    /// the app started), and `exit_on_close_request` has to stay off (so the
+    /// suspend path can close the window without quitting the app).
+    #[test]
+    fn window_settings_follow_the_current_geometry() {
+        let config = WindowConfig {
+            width: 1234.0,
+            height: 567.0,
+            maximized: true,
+            ..WindowConfig::default()
+        };
+
+        let settings = config.window_settings(None);
+
+        assert_eq!(settings.size, iced::Size::new(1234.0, 567.0));
+        assert!(settings.maximized);
+        assert!(
+            !settings.exit_on_close_request,
+            "iced must not turn a close into an exit — the suspend path closes this window too"
+        );
     }
 
     /// An explicit `false` survives a round trip — the Settings toggle has to

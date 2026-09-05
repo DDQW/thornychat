@@ -76,15 +76,48 @@ pub fn subscription(app: &App) -> Subscription<Message> {
     } else {
         Subscription::none()
     };
+    // While the machine sleeps there is no window at all (see
+    // `platform::power`), and the resume notification is what brings it back.
+    // This timer is the belt to that braces: if the notification never lands,
+    // the app is invisible with no way back, so something has to keep asking.
+    // Only subscribed while there is nothing on screen — a running app pays
+    // nothing for it, and a sleeping process is frozen, so the first tick
+    // happens just after the machine wakes.
+    let ensure_window = if app.main_window.is_none() {
+        iced::time::every(std::time::Duration::from_secs(5)).map(|_| Message::EnsureWindow)
+    } else {
+        Subscription::none()
+    };
     Subscription::batch([
         client_events,
         iced::event::listen_with(window_events),
+        power_events(),
+        iced::window::open_events().map(Message::WindowOpened),
+        iced::window::close_events().map(Message::WindowClosed),
+        // `exit_on_close_request` is off (see `App::window_settings`), so a
+        // user closing the window is a request this app answers itself.
+        iced::window::close_requests().map(|_id| Message::WindowCloseRequested),
+        ensure_window,
         cursor,
         settings_resize,
         autoscroll,
         video_focus,
         connectors,
     ])
+}
+
+/// Suspend/resume notifications from Windows, forwarded from the system's own
+/// callback thread (see `platform::power`). Started once — the receiver is
+/// handed out a single time, and a restart of this subscription would find
+/// nothing left to read, which is why it is not gated on any app state.
+fn power_events() -> Subscription<Message> {
+    Subscription::run(|| {
+        iced::futures::stream::unfold(crate::platform::power::subscribe(), |receiver| async move {
+            let mut receiver = receiver?;
+            let event = receiver.recv().await?;
+            Some((Message::Power(event), Some(receiver)))
+        })
+    })
 }
 
 /// Cursor tracking, live only while the window has focus (see the gate in

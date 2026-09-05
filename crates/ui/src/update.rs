@@ -552,6 +552,108 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 Message::Noop
             })
         }
+        Message::WindowOpened(id) => {
+            app.main_window = Some(id);
+            // Waking up must give back the window that was there before the
+            // machine slept, so the autostart flag applies to the first window
+            // only — it is spent here.
+            let minimize = if std::mem::take(&mut app.start_minimized) {
+                iced::window::minimize(id, true)
+            } else {
+                Task::none()
+            };
+            if std::mem::take(&mut app.sleeping) {
+                tracing::info!("window back after standby — a fresh GPU device came with it");
+            }
+            minimize
+        }
+        Message::WindowClosed(id) => {
+            if app.main_window == Some(id) {
+                app.main_window = None;
+            }
+            if app.sleeping {
+                // The compositor went with the window, so the wgpu device is
+                // released and the machine can sleep. Let the suspend callback
+                // (blocked in `platform::power`) return.
+                tracing::info!("window closed for standby — GPU device released");
+                crate::platform::power::acknowledge_suspend();
+                Task::none()
+            } else {
+                // Nothing closes this window except the suspend path and the
+                // user quitting, and the latter exits before it gets here —
+                // so this is a close nobody asked for (a crash in the window
+                // thread, say). Rather than leave a headless process behind,
+                // put the window back.
+                tracing::warn!("window closed unexpectedly — reopening");
+                open_window(app)
+            }
+        }
+        Message::WindowCloseRequested => {
+            // Closing the window is how someone quits this app. Save the frame
+            // first: the debounced geometry save may still be pending, and
+            // after `exit()` nothing else runs.
+            let config = app.window_config;
+            Task::future(async move { config.save().await }).then(|()| iced::exit())
+        }
+        Message::Power(event) => match event {
+            crate::platform::power::PowerEvent::Suspending => {
+                let Some(id) = app.main_window else {
+                    // Already windowless (a second notification, or a suspend
+                    // during shutdown): nothing to release, so don't make the
+                    // system wait on us.
+                    crate::platform::power::acknowledge_suspend();
+                    return Task::none();
+                };
+                tracing::info!("standby imminent — closing the window to release the GPU device");
+                app.sleeping = true;
+                // The webview is a child of the window about to close, and it
+                // owns a GPU surface of its own; tear it down explicitly
+                // rather than letting the parent's destruction take it.
+                //
+                // Chained, not batched: a batch runs its tasks concurrently,
+                // and `video_player::close` reaches the player through the
+                // *current* window (`iced::window::latest`). If the close won
+                // that race there would be no window to find, and the webview
+                // and its host would leak instead of being torn down.
+                let stop_video = if app.timeline.inline_video.take().is_some() {
+                    close_native_player()
+                } else {
+                    Task::none()
+                };
+                // The geometry save is debounced by a second; a sleep will not
+                // wait for it, so flush what is buffered now.
+                let config = app.window_config;
+                Task::batch([
+                    stop_video.chain(iced::window::close(id)),
+                    Task::future(async move {
+                        config.save().await;
+                        Message::Noop
+                    }),
+                ])
+            }
+            crate::platform::power::PowerEvent::Resumed => {
+                if app.main_window.is_some() {
+                    // The suspend never got far enough to close the window
+                    // (short sleep, or the callback lost its race). Nothing to
+                    // do — this device survived, or the watchdog will deal
+                    // with it if it did not.
+                    app.sleeping = false;
+                    return Task::none();
+                }
+                tracing::info!("resumed from standby — opening a window on a new GPU device");
+                open_window(app)
+            }
+        },
+        Message::EnsureWindow => {
+            if app.main_window.is_some() {
+                Task::none()
+            } else {
+                tracing::warn!(
+                    "no window and no resume notification — reopening on the safety timer"
+                );
+                open_window(app)
+            }
+        }
         Message::CursorMoved(position) => {
             // Cheap: just remember where the pointer is, so a right-click menu
             // can open there (the press event itself carries no coordinates),
@@ -632,6 +734,7 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
                 &mut app.chat,
                 &mut app.connectors,
                 &mut app.window_config,
+                &mut app.log_config,
                 &app.profile,
                 msg,
             );
@@ -1253,6 +1356,24 @@ fn open_inline_player(
 
 /// Drops the native webview (if any) on its owning thread. Safe to fire
 /// even when nothing is open.
+/// Opens a window with the remembered geometry and adopts its id.
+///
+/// Used for the first window after a sleep and by the safety net: both cases
+/// are "there is no window and there should be". The compositor is rebuilt
+/// from scratch as part of this (`iced_winit` dropped it when the last window
+/// closed), which is the entire point — the device that was lost across
+/// standby is not the one this window draws on.
+fn open_window(app: &mut App) -> Task<Message> {
+    if let Some(id) = app.main_window {
+        // Never two: a second window would keep the old compositor alive.
+        tracing::debug!(?id, "window already open — not opening another");
+        return Task::none();
+    }
+    let (id, open) = iced::window::open(app.window_settings());
+    app.main_window = Some(id);
+    open.map(Message::WindowOpened)
+}
+
 fn close_native_player() -> Task<Message> {
     iced::window::latest().then(|maybe_id| match maybe_id {
         Some(id) => iced::window::run(id, |_handle| {

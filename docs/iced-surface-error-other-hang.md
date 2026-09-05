@@ -1,9 +1,24 @@
 # Upstream report: unbounded redraw loop on `SurfaceError::Other` (resume from standby)
 
 Draft of an issue to file against [iced-rs/iced](https://github.com/iced-rs/iced/issues).
-Written up from a reproduction in ThornyChat; nothing in this repo works around
-it yet. See [`crates/app/src/logging.rs`](../crates/app/src/logging.rs) for the
-retention cap added to bound the collateral damage.
+Written up from a reproduction in ThornyChat.
+
+**Status in this repo (2026-09-04): worked around on three levels.** The issue
+below is still accurate about upstream, and still worth filing, but the app no
+longer depends on a fix landing.
+
+| | What | Where |
+|---|---|---|
+| Prevention | The window is closed when Windows announces a suspend, which makes `iced_winit` drop the compositor — so the machine sleeps with no wgpu device of ours to lose, and the window opened on resume builds a new one. This is why the app is an `iced::daemon` rather than an `iced::application`: only a daemon may have no window for a while. | [`crates/ui/src/platform/power.rs`](../crates/ui/src/platform/power.rs), `Message::Power` in [`crates/ui/src/update.rs`](../crates/ui/src/update.rs) |
+| Recovery | If the hang happens anyway, 100 present failures inside a minute trip a restart with a toast, from a thread that owes nothing to the wedged event loop. | [`crates/app/src/render_watchdog.rs`](../crates/app/src/render_watchdog.rs) |
+| Damage control | Per-callsite rate limit and a retention cap, so a flood costs ~390 KB/hour instead of ~1.7 GB/hour; plus a log level (including off) in Settings. | [`crates/app/src/log_limit.rs`](../crates/app/src/log_limit.rs), [`crates/app/src/logging.rs`](../crates/app/src/logging.rs), [`log-volume-2026-09.md`](log-volume-2026-09.md) |
+
+Measured on the prevention path (simulated standby, release build): 17 ms from
+the suspend notification to the window being gone and the device released —
+against a Windows budget of roughly two seconds — and a fresh compositor built
+3.3 s later on resume, with no error or warning logged anywhere in the cycle.
+What that test cannot cover is a real suspend beating the close; that needs a
+genuine standby, and the watchdog is what catches it if it ever does.
 
 ---
 

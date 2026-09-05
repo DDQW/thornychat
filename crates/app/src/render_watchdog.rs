@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 
 use tracing::subscriber::Interest;
 use tracing::{Level, Metadata, Subscriber};
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::{Context, Layer};
 
 /// Window over which present failures are counted.
@@ -113,6 +114,21 @@ impl<S: Subscriber> Layer<S> for RenderWatchdog {
         // Must be consulted per event, not cached — same reasoning as the rate
         // limiter's.
         Interest::sometimes()
+    }
+
+    /// The only events this layer cares about are ERRORs, and saying so is
+    /// what keeps it alive when the user turns logging down or off.
+    ///
+    /// `Layered::pick_level_hint` combines layers with `cmp::max`, and a layer
+    /// with no hint contributes `None` — which loses that maximum to whatever
+    /// the layer underneath says. With no hint here, a subscriber built around
+    /// an `off` filter would set the process-wide max level to `OFF`, every
+    /// callsite would be disabled statically, and the present failures this
+    /// exists to count would never reach `enabled`. `ERROR` is both the honest
+    /// answer and the floor that keeps them coming: quieter than that is not
+    /// representable, and anything more verbose wins the `max` on its own.
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        Some(LevelFilter::ERROR)
     }
 
     fn enabled(&self, meta: &Metadata<'_>, _ctx: Context<'_, S>) -> bool {
@@ -298,6 +314,37 @@ mod tests {
             emitted,
             "the limiter must not be able to hide events from the watchdog"
         );
+    }
+
+    /// The subscriber `logging::init` builds when logging is turned off: the
+    /// watchdog on its own, no filter and no writers. Someone who wants no
+    /// logs has not asked for a window that never recovers from a wedged
+    /// render loop, so the counting has to survive that setting.
+    #[test]
+    fn the_layer_counts_with_logging_turned_off() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let watchdog = RenderWatchdog::new();
+        let state = Arc::clone(&watchdog.state);
+        let subscriber = tracing_subscriber::registry().with(watchdog);
+
+        let emitted = FAILURES_TO_TRIP - 1;
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..emitted {
+                tracing::error!(target: "iced_winit", "Error Other when presenting surface.");
+            }
+        });
+
+        assert_eq!(state.lock().unwrap().count, emitted, "turning logging off must not blind the watchdog");
+    }
+
+    /// Pins the level hint that makes the test above possible — see the
+    /// method's own comment for why `None` here would be a silent failure
+    /// rather than a missing optimisation.
+    #[test]
+    fn the_layer_hints_at_the_level_it_needs() {
+        let hint = Layer::<tracing_subscriber::Registry>::max_level_hint(&RenderWatchdog::new());
+        assert_eq!(hint, Some(LevelFilter::ERROR));
     }
 
     #[test]

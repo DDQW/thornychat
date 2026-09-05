@@ -2,6 +2,13 @@ use std::path::PathBuf;
 
 use crate::error::{CoreError, CoreResult};
 
+/// Filename prefix every log file carries (`thornychat.log.<date>`, daily
+/// rotation). Lives here rather than next to the appender that configures it
+/// because both crates need it: `app::logging` to name new files, and the
+/// Settings screen in `ui` to recognise which files in [`AppPaths::logs_dir`]
+/// are the app's own before deleting any of them.
+pub const LOG_FILE_PREFIX: &str = "thornychat.log";
+
 /// Resolves `%APPDATA%\ThornyChat\ThornyChat\data\<profile>\...` paths.
 /// `profile` allows multiple accounts to keep fully separate SQLite stores;
 /// defaults to "default" for a single-account install.
@@ -98,7 +105,7 @@ impl AppPaths {
 
     /// The log file most recently written to — the one the running process
     /// is currently appending to (daily rotation via `tracing_appender`,
-    /// named `thornychat.log.<date>`). `None` if the log directory doesn't
+    /// named `<LOG_FILE_PREFIX>.<date>`). `None` if the log directory doesn't
     /// exist yet or holds no files.
     pub fn latest_log_file(&self) -> Option<PathBuf> {
         std::fs::read_dir(self.logs_dir())

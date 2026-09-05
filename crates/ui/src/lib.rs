@@ -9,6 +9,7 @@ pub mod connectors;
 pub mod connectors_config;
 pub mod emoji_picker;
 pub mod encryption_config;
+pub mod log_config;
 pub mod media_cache;
 pub mod message;
 pub mod privacy_config;

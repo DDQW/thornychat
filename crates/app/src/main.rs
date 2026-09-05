@@ -94,11 +94,10 @@ fn main() -> iced::Result {
     // at the old synapse.exe; re-register it under the new name if present.
     ui::platform::autostart::migrate_legacy_value();
 
-    // Remembered window geometry: synchronous because it feeds
-    // `window::Settings` below, a builder-time setting. Loaded up here, ahead
-    // of the runtime, because `apply_gpu_preference` writes a process-wide env
-    // var — which is only sound while this is still the only thread, and the
-    // runtime below is what ends that.
+    // Remembered window geometry is loaded again by `ui::boot` (it opens the
+    // window now); this copy exists for `apply_gpu_preference`, which has to
+    // run here — it writes a process-wide env var, which is only sound while
+    // this is still the only thread, and the runtime below is what ends that.
     let window = ui::window_config::WindowConfig::load_or_default();
     window.apply_gpu_preference();
 
@@ -146,27 +145,34 @@ fn main() -> iced::Result {
     // trailing `.run_with(...)`) and the window title to `.title(...)`. The
     // boot fn is `Fn`, not `FnOnce`, so it clones the theme per call rather
     // than moving it.
-    let result = iced::application(
-        move || ui::boot(profile.clone(), theme.clone(), minimized),
+    let result = iced::daemon(
+        move || ui::boot(profile.clone(), theme.clone(), minimized, window_icon.clone()),
         ui::update,
-        ui::view,
+        view,
     )
-    .title("ThornyChat")
+    .title(title)
     .subscription(ui::subscription)
-        .window(iced::window::Settings {
-            icon: window_icon,
-            size: window.size(),
-            position: window.position(),
-            maximized: window.maximized,
-            ..Default::default()
-        })
+        // A daemon rather than an `application` for one reason: an
+        // `application` exits when its last window closes, and this app
+        // deliberately spends the machine's standby with *no* window — that is
+        // what makes `iced_winit` drop the compositor, and with it the wgpu
+        // device that would otherwise come back dead (see
+        // `ui::platform::power` and `docs/iced-surface-error-other-hang.md`).
+        // The window itself is opened by `ui::boot`, since a daemon starts
+        // with none, and its geometry/icon settings moved there with it.
+        //
+        // The other half of that trade: nothing exits this process on its own
+        // any more. `ui::update` answers the user's close request with
+        // `iced::exit()`, and a window that goes away without being asked is
+        // reopened rather than left headless.
+        //
         // Clone the pre-built theme (an Arc bump) rather than regenerating
         // the extended palette every update cycle.
-        .theme(|state: &ui::App| state.built_theme.clone())
+        .theme(|state: &ui::App, _window| state.built_theme.clone())
         // Belt-and-suspenders clamp: ThemeConfig::sanitized already bounds
         // ui_scale on load/import, but never feed a non-finite factor to
         // iced (it would divide the viewport into a degenerate size).
-        .scale_factor(|state: &ui::App| {
+        .scale_factor(|state: &ui::App, _window| {
             let scale = state.theme.ui_scale;
             if scale.is_finite() { scale.clamp(0.8, 1.5) } else { 1.0 }
         })
@@ -201,6 +207,22 @@ fn main() -> iced::Result {
     // put a ceiling on all of them at once.
     arm_shutdown_deadline();
     result
+}
+
+/// The daemon's view, which is the app's one window rendered whatever id it
+/// happens to have.
+///
+/// A named function rather than a closure on purpose: `ViewFn` is implemented
+/// for every lifetime, and a closure written inline infers a single one, which
+/// the compiler then refuses ("implementation of `ViewFn` is not general
+/// enough").
+fn view(app: &ui::App, _window: iced::window::Id) -> iced::Element<'_, ui::Message> {
+    ui::view(app)
+}
+
+/// Same for every window: this app only ever has one, and it is the app.
+fn title(_app: &ui::App, _window: iced::window::Id) -> String {
+    "ThornyChat".to_string()
 }
 
 /// Handles the one-shot toast-identity commands, returning the exit code to

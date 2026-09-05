@@ -84,6 +84,10 @@ windows = { version = "0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Gdi",
     "Win32_System_LibraryLoader",
+    # PowerRegisterSuspendResumeNotification: the app closes its window (and
+    # with it the whole wgpu compositor) before the machine sleeps, so there is
+    # no GPU device left to be lost on resume. See ui::platform::power.
+    "Win32_System_Power",
     # CreateToolhelp32Snapshot / Process32*W for the game-launcher connectors'
     # running-process match (GOG/Epic expose no "running game" key like Steam's).
     "Win32_System_Diagnostics_ToolHelp",

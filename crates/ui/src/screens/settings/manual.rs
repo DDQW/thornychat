@@ -269,7 +269,11 @@ pub fn view<'a, M: 'a>() -> Element<'a, M> {
             bullet(
                 "General — account info, Sign out, Start with Windows (off), Check \
                  spelling (on), Autocorrect (off), Show membership changes (on), \
-                 and Copy log to clipboard.",
+                 the graphics preferences (integrated GPU and Direct3D 12, both \
+                 on, applied at the next launch), and the log diagnostics: how \
+                 much detail to write (Normal, down to Off, which writes \
+                 nothing at all — also a next-launch setting), Copy log to \
+                 clipboard, and Delete log files.",
             ),
             bullet(
                 "Privacy — Send read receipts (off; a private receipt is sent \

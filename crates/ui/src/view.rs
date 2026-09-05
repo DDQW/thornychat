@@ -188,6 +188,7 @@ fn settings_overlay(app: &App) -> Element<'_, Message> {
             &app.chat,
             &app.connectors,
             &app.window_config,
+            &app.log_config,
             account,
             app.default_notification_modes,
             &app.verification,
