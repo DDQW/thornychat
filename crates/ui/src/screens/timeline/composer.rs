@@ -151,6 +151,15 @@ pub struct SpellState {
     /// Memo of the bar's suggestion list, so parking the caret next to a typo
     /// doesn't re-run the speller's expensive `Suggest` on every keystroke.
     flag_memo: Option<(String, Vec<String>)>,
+    /// Words the user has un-corrected with the Backspace that follows an
+    /// autocorrect. Autocorrect leaves these alone for the rest of the draft.
+    ///
+    /// Without this, undoing achieves nothing: the word is still misspelled,
+    /// so finishing it again re-applies the same fix, and the spelling the
+    /// user actually wants can never survive a space. The suggestion bar is
+    /// deliberately *not* gated on this — the word stays flagged and the
+    /// correction stays one click away, it just stops happening by itself.
+    rejected: HashSet<String>,
 }
 
 /// A misspelled word the suggestion bar is offering fixes for.
@@ -416,12 +425,16 @@ pub fn update(
             // Backspace immediately after an autocorrect undoes it (restores
             // the original word) instead of just deleting the space.
             if was_backspace {
-                if let Some((body, caret)) = revert
-                    .and_then(|revert| revert.undo(&state.body, cursor_offset(&state.content)))
-                {
-                    set_body(state, body, Some(caret));
-                    recompute_spell(state, spell);
-                    return (Task::none(), typing);
+                if let Some(revert) = revert {
+                    let undone = revert.undo(&state.body, cursor_offset(&state.content));
+                    if let Some((body, caret)) = undone {
+                        set_body(state, body, Some(caret));
+                        // This Backspace is the user saying no to the fix, so
+                        // stop offering to make it for them.
+                        state.spell.rejected.insert(revert.original);
+                        recompute_spell(state, spell);
+                        return (Task::none(), typing);
+                    }
                 }
             }
 
@@ -850,6 +863,12 @@ fn maybe_autocorrect(state: &mut State) {
     }) else {
         return;
     };
+    // Already rejected once in this draft — leave it alone (see
+    // `SpellState::rejected`). Checked before the speller, so a word the user
+    // has settled doesn't pay for a COM call on every space either.
+    if state.spell.rejected.contains(&original) {
+        return;
+    }
     let Some(correction) = crate::spellcheck::top_correction(&original) else {
         return;
     };
@@ -1525,6 +1544,68 @@ line2".to_string(), Some(8));
             let _ = update(&mut state, Message::Action(Action::Edit(Edit::Insert(c))), &AUTO);
         }
         assert!(state.spell.highlight.misspelled.is_empty());
+    }
+
+    #[test]
+    fn an_undone_correction_is_not_made_again() {
+        const AUTO: SpellcheckConfig =
+            SpellcheckConfig { enabled: true, autocorrect: true };
+        let Some(expected) = crate::spellcheck::top_correction("teh") else {
+            return;
+        };
+
+        let mut state = State::default();
+        let mut key = |state: &mut State, action: Action| {
+            let _ = update(state, Message::Action(action), &AUTO);
+        };
+        for c in "teh ".chars() {
+            key(&mut state, Action::Edit(Edit::Insert(c)));
+        }
+        assert_eq!(state.body, format!("{expected} "));
+
+        // Backspace takes the correction back...
+        key(&mut state, Action::Edit(Edit::Backspace));
+        assert_eq!(state.body, "teh");
+
+        // ...and finishing the word again must leave it alone. Before this,
+        // the space re-applied the same fix and the typed spelling could
+        // never be kept.
+        key(&mut state, Action::Edit(Edit::Insert(' ')));
+        assert_eq!(state.body, "teh ");
+
+        // Still flagged, though — the bar keeps offering what autocorrect has
+        // stopped doing on its own.
+        assert!(state.spell.highlight.misspelled.contains("teh"));
+
+        // And it stays rejected for the rest of the draft, not just once.
+        for c in "teh ".chars() {
+            key(&mut state, Action::Edit(Edit::Insert(c)));
+        }
+        assert_eq!(state.body, "teh teh ");
+    }
+
+    #[test]
+    fn a_rejection_does_not_outlive_the_draft() {
+        const AUTO: SpellcheckConfig =
+            SpellcheckConfig { enabled: true, autocorrect: true };
+        let Some(expected) = crate::spellcheck::top_correction("teh") else {
+            return;
+        };
+
+        let mut state = State::default();
+        for c in "teh ".chars() {
+            let _ = update(&mut state, Message::Action(Action::Edit(Edit::Insert(c))), &AUTO);
+        }
+        let _ = update(&mut state, Message::Action(Action::Edit(Edit::Backspace)), &AUTO);
+        assert_eq!(state.body, "teh");
+
+        // Sending clears the draft, and with it the rejection: the next
+        // message starts from the same defaults as the first.
+        let _ = update(&mut state, Message::SendSucceeded, &AUTO);
+        for c in "teh ".chars() {
+            let _ = update(&mut state, Message::Action(Action::Edit(Edit::Insert(c))), &AUTO);
+        }
+        assert_eq!(state.body, format!("{expected} "));
     }
 
     #[test]
