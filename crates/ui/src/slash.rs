@@ -35,6 +35,10 @@ pub enum Action {
     Kick { user: String, reason: Option<String> },
     Ban { user: String, reason: Option<String> },
     Unban(String),
+    /// Account-wide, unlike Kick/Ban: the homeserver stops delivering this
+    /// user's messages in every room, on every device.
+    Ignore(String),
+    Unignore(String),
     Topic(String),
     Nick(String),
     RoomName(String),
@@ -80,6 +84,8 @@ const USAGE_NICK: &str = "Usage: /nick <display name>";
 const USAGE_KICK: &str = "Usage: /kick <@user:server> [reason]";
 const USAGE_BAN: &str = "Usage: /ban <@user:server> [reason]";
 const USAGE_UNBAN: &str = "Usage: /unban <@user:server>";
+const USAGE_IGNORE: &str = "Usage: /ignore <@user:server>";
+const USAGE_UNIGNORE: &str = "Usage: /unignore <@user:server>";
 
 /// Every slash command the composer recognises, in the same order the
 /// `parse()` match below groups them (text / rooms / people / moderation).
@@ -206,6 +212,20 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "Lift a ban.",
         category: CommandCategory::Moderation,
     },
+    CommandSpec {
+        name: "ignore",
+        aliases: &[],
+        usage: Some(USAGE_IGNORE),
+        description: "Hide someone everywhere. Unlike a kick or ban this is account-wide and needs no privileges: your homeserver stops sending you their messages in every room, on every device you sign in from.",
+        category: CommandCategory::Moderation,
+    },
+    CommandSpec {
+        name: "unignore",
+        aliases: &[],
+        usage: Some(USAGE_UNIGNORE),
+        description: "Stop ignoring someone. The messages they sent while ignored come back the next time the room loads its history.",
+        category: CommandCategory::Moderation,
+    },
 ];
 
 /// Parse one composer submission.
@@ -283,6 +303,14 @@ pub fn parse(input: &str) -> Parsed {
         },
         "unban" => match require_user(args, USAGE_UNBAN) {
             Ok(u) => Parsed::Action(Action::Unban(u)),
+            Err(e) => e,
+        },
+        "ignore" => match require_user(args, USAGE_IGNORE) {
+            Ok(u) => Parsed::Action(Action::Ignore(u)),
+            Err(e) => e,
+        },
+        "unignore" => match require_user(args, USAGE_UNIGNORE) {
+            Ok(u) => Parsed::Action(Action::Unignore(u)),
             Err(e) => e,
         },
 
@@ -432,11 +460,26 @@ mod tests {
     }
 
     #[test]
+    fn ignore_and_unignore_are_account_wide() {
+        assert_eq!(parse("/ignore @u:b.com"), Parsed::Action(Action::Ignore("@u:b.com".into())));
+        assert_eq!(parse("/unignore @u:b.com"), Parsed::Action(Action::Unignore("@u:b.com".into())));
+        // Takes the first token only, like every other user-taking command
+        // (`/invite`, `/dm`, `/unban`). There is no reason argument to keep:
+        // `m.ignored_user_list` records a bare user id and nothing else.
+        assert_eq!(
+            parse("/ignore @u:b.com because"),
+            Parsed::Action(Action::Ignore("@u:b.com".into()))
+        );
+    }
+
+    #[test]
     fn bad_arguments_are_usage_errors() {
         assert!(matches!(parse("/kick"), Parsed::Error(_)));
         assert!(matches!(parse("/kick notauser"), Parsed::Error(_)));
         assert!(matches!(parse("/join notaroom"), Parsed::Error(_)));
         assert!(matches!(parse("/knock notaroom"), Parsed::Error(_)));
+        assert!(matches!(parse("/ignore"), Parsed::Error(_)));
+        assert!(matches!(parse("/unignore notauser"), Parsed::Error(_)));
     }
 
     #[test]

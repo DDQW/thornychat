@@ -10,6 +10,7 @@
 //! takes resolved, structured data (room ids, user ids) — nothing here parses
 //! raw text. The composer's human-typed slash-command language (`/me`,
 //! `/kick`, `/topic`, …) that maps onto `KickUser`/`BanUser`/`UnbanUser`/
+//! `IgnoreUser`/`UnignoreUser`/
 //! `SetRoomTopic`/`SetDisplayName`/`InviteUser`/`JoinRoom`/`LeaveRoom`/
 //! `SetRoomName`/`SendMessage`'s `emote`/`markdown` lives one layer up, in
 //! `ui::slash` — see `ui::slash::COMMANDS` for the canonical, single list of
@@ -209,6 +210,15 @@ pub enum ClientCommand {
     BanUser { room_id: String, user_id: String, reason: Option<String>, request_id: RequestId },
     /// Lift a ban so the user can rejoin.
     UnbanUser { room_id: String, user_id: String, request_id: RequestId },
+    /// Add a user to the account's `m.ignored_user_list`. Account-wide, not
+    /// per-room, which is why there's no `room_id`: the homeserver stops
+    /// delivering their messages in *every* room, and keeps doing so for
+    /// every device on the account.
+    IgnoreUser { user_id: String, request_id: RequestId },
+    /// Drop a user from `m.ignored_user_list` again. Their *past* messages
+    /// come back with the room's next paginate — the server only withheld
+    /// them, it never told anyone to delete them.
+    UnignoreUser { user_id: String, request_id: RequestId },
     /// Set a room's `m.room.topic`.
     SetRoomTopic { room_id: String, topic: String, request_id: RequestId },
     /// Set your own global profile display name (applies across all rooms).

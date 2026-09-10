@@ -90,6 +90,12 @@ pub struct App {
     /// the same client-core watcher, including changes from other devices.
     pub default_notification_modes:
         (client_core::events::NotificationMode, client_core::events::NotificationMode),
+    /// Users on the account's `m.ignored_user_list`. Kept fresh by
+    /// client-core's ignore watcher, so a change made from another device
+    /// shows up here too. Read-only as far as the timeline goes — the
+    /// homeserver already withholds these users' messages; this set exists
+    /// so the member menu can say "Unignore" instead of "Ignore".
+    pub ignored_users: std::collections::HashSet<String>,
     /// Active color/typography/density theme — persisted globally (across
     /// all profiles) and editable from the Appearance settings tab.
     pub theme: crate::theme_config::ThemeConfig,
@@ -331,6 +337,7 @@ impl App {
                 client_core::events::NotificationMode::AllMessages,
                 client_core::events::NotificationMode::AllMessages,
             ),
+            ignored_users: std::collections::HashSet::new(),
             theme,
             built_theme,
             privacy: {

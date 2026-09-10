@@ -12,6 +12,7 @@ pub mod client;
 pub mod commands;
 pub mod error;
 pub mod events;
+pub mod ignore;
 pub mod key_backup;
 pub mod media;
 pub mod push;

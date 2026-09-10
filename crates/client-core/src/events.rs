@@ -127,6 +127,13 @@ pub enum ClientEvent {
     /// Sent by the same watcher as `RoomNotificationModesUpdated`, so it
     /// stays current with changes made from other devices too.
     DefaultNotificationModesUpdated { direct_messages: NotificationMode, group_chats: NotificationMode },
+    /// Full snapshot of the account's `m.ignored_user_list` (Matrix spec
+    /// §"Ignoring Users"). Sent once at startup and again on every change,
+    /// including ones made from another device. The homeserver strips an
+    /// ignored user's messages out of sync itself, so this list is only for
+    /// *showing* the state (menu label, unignore) — the UI never has to
+    /// filter the timeline with it.
+    IgnoredUsersUpdated(Vec<String>),
     SearchResults { request_id: RequestId, results: Vec<SearchResult> },
     /// Results of a user-directory search (see `ClientCommand::SearchUsers`).
     /// `limited` is the server's flag that it truncated the result set — the

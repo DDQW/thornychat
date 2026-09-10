@@ -382,6 +382,7 @@ fn main_shell(app: &App) -> Element<'_, Message> {
         &app.tweet_previews,
         &app.steam_previews,
         app.chat.show_membership_events,
+        &app.ignored_users,
         &app.sync_state,
     )
     .map(Message::Timeline);

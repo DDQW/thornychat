@@ -7,7 +7,7 @@ pub mod composer;
 pub mod reactions;
 pub mod threads;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use client_core::commands::RequestId;
 use client_core::events::{
@@ -346,6 +346,10 @@ pub enum Message {
     MemberMenuNewRoom(String),
     /// Toggle tinting this member's messages in the open timeline.
     MemberMenuHighlight(String),
+    /// Add this member to (or drop them from) the account's ignore list.
+    /// Which way it goes is decided by the caller from `ignored_users`, so
+    /// the menu label and the action can't disagree.
+    MemberMenuIgnore { user_id: String, ignore: bool },
     SearchQueryChanged(String),
     NotificationModeSelected(NotifyChoice),
     LoadOlder,
@@ -413,6 +417,8 @@ pub enum Effect {
     OpenDirectMessage(String),
     /// Create a fresh private room with this user and switch to it.
     CreateRoomWith(String),
+    /// Ignore (`true`) or unignore (`false`) this user account-wide.
+    SetUserIgnored { user_id: String, ignore: bool },
     /// Start playing this video inline, in place of its card.
     PlayVideo { event_id: String, video: crate::video_player::EmbedVideo, title: Option<String> },
     /// Stop the inline video (✕ on the player, or after opening the link
@@ -821,6 +827,16 @@ pub fn update(
         Message::MemberMenuNewRoom(user_id) => {
             state.member_menu = None;
             (iced::Task::none(), Effect::CreateRoomWith(user_id))
+        }
+        Message::MemberMenuIgnore { user_id, ignore } => {
+            state.member_menu = None;
+            // Ignoring wipes the sender out of the timeline the server
+            // rebuilds for us, so a highlight pinned to them would linger
+            // with nothing to tint.
+            if ignore && state.highlighted_member.as_deref() == Some(user_id.as_str()) {
+                state.highlighted_member = None;
+            }
+            (iced::Task::none(), Effect::SetUserIgnored { user_id, ignore })
         }
         Message::MemberMenuHighlight(user_id) => {
             state.member_menu = None;
@@ -1285,6 +1301,7 @@ pub fn view<'a>(
     tweet_previews: &'a HashMap<String, Option<crate::tweets::TweetData>>,
     steam_previews: &'a HashMap<String, Option<crate::steam::SteamAppData>>,
     show_membership_events: bool,
+    ignored_users: &'a HashSet<String>,
     sync_state: &'a SyncState,
 ) -> Element<'a, Message> {
     let Some(open_room_id) = state.room_id.as_deref() else {
@@ -1642,7 +1659,11 @@ pub fn view<'a>(
         // ~3-row menu still fits in the visible height.
         let max_y = (state.last_bounds_height - 110.0).max(0.0);
         let anchor_y = state.member_menu_anchor_y.clamp(0.0, max_y);
-        let menu = member_menu_actions(user_id, state.highlighted_member.as_deref());
+        let menu = member_menu_actions(
+            user_id,
+            state.highlighted_member.as_deref(),
+            ignored_users.contains(user_id),
+        );
         let positioned = column![iced::widget::Space::new().height(Length::Fixed(anchor_y)), menu];
         container(positioned)
             .width(Length::Fill)
@@ -1669,7 +1690,11 @@ pub fn view<'a>(
 /// bordered panel so it stays legible over the timeline. Dismisses by picking
 /// an action, left-clicking any member, or right-clicking the same member
 /// again.
-fn member_menu_actions<'a>(user_id: &str, highlighted_member: Option<&str>) -> Element<'a, Message> {
+fn member_menu_actions<'a>(
+    user_id: &str,
+    highlighted_member: Option<&str>,
+    ignored: bool,
+) -> Element<'a, Message> {
     let action = |label: &'static str, message: Message| {
         button(text(label).size(12))
             .on_press(message)
@@ -1681,11 +1706,14 @@ fn member_menu_actions<'a>(user_id: &str, highlighted_member: Option<&str>) -> E
     let highlight_label =
         if highlighted_member == Some(user_id) { "Clear highlight" } else { "Highlight messages" };
 
+    let ignore_label = if ignored { "Unignore" } else { "Ignore user" };
+
     let owned = user_id.to_string();
     let menu = column![
         action("Direct message", Message::MemberMenuDirectMessage(owned.clone())),
         action("New room with them", Message::MemberMenuNewRoom(owned.clone())),
-        action(highlight_label, Message::MemberMenuHighlight(owned)),
+        action(highlight_label, Message::MemberMenuHighlight(owned.clone())),
+        action(ignore_label, Message::MemberMenuIgnore { user_id: owned, ignore: !ignored }),
     ]
     .spacing(2);
 

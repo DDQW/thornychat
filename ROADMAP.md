@@ -29,9 +29,9 @@ see README "Building").
   chips (typed text becomes the MSC2530 caption), drag-and-drop, edit/redact,
   typing, reply/quote w/ jump-to-quoted + thumbnails, send retry, slash
   commands (`/me`, `/plain`, `/join`, `/knock`, `/leave`|`/part`, `/invite`,
-  `/kick`, `/ban`; `//` escapes) + in-app manual, right-click cut/copy/paste
-  menu, Windows ISpellChecker typo marking in-composer + suggestion bar
-  w/ opt-in autocorrect.
+  `/kick`, `/ban`, `/ignore`|`/unignore`; `//` escapes) + in-app manual,
+  right-click cut/copy/paste menu, Windows ISpellChecker typo marking
+  in-composer + suggestion bar w/ opt-in autocorrect.
 - E2EE: cross-signing bootstrap w/ UIAA fallback, SAS verify, opt-in key
   backup/recovery (Settings → Security), trust shields.
 - Media & rich content: reactions (no-bg pills, hover attribution, full
@@ -47,7 +47,9 @@ see README "Building").
   disk caches capped (512 MB/64 MB, oldest evicted at startup, unit-tested).
 - Settings & platform: per-room notification modes + account-wide DM/group
   defaults (synced both ways); member panel grouped by MSC3949 power tags w/
-  click-to-DM, visibility persisted; theming engine (custom themes,
+  click-to-DM and a right-click menu (DM, new room, highlight, ignore),
+  visibility persisted; account-wide ignore list (`m.ignored_user_list`,
+  watched so other devices' changes land too); theming engine (custom themes,
   dark/light); persisted config files
   (theme/chat/privacy/spellcheck/encryption/connectors/window); window
   size/position/maximized remembered across launches (debounced save,
@@ -98,7 +100,9 @@ Remaining:
   encryption toggle (`settings/room_admin.rs` is a placeholder stub).
 - Member management UI: power-level editor (incl. writing MSC3949 tags),
   per-member profile popover (avatar, id, PL) instead of click=DM only —
-  invite/kick/ban currently have no buttons, only slash commands.
+  invite/kick/ban still have no buttons, only slash commands. (Ignore is
+  the exception: it has a roster right-click entry, since unlike the rest
+  it needs no power level.)
 - Room creation wizard; invite accept/reject with room preview.
 
 ## Phase 7 — Windows platform polish & packaging

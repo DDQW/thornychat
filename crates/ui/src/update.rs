@@ -1123,6 +1123,22 @@ fn apply_timeline_effect(app: &mut App, effect: screens::timeline::Effect) -> Ta
             );
             Task::none()
         }
+        screens::timeline::Effect::SetUserIgnored { user_id, ignore } => {
+            // No optimistic edit of `app.ignored_users`: the authoritative
+            // list comes back through client-core's ignore watcher once the
+            // account-data write round-trips, and a failed write would
+            // otherwise leave the menu lying about the state.
+            let request_id = Uuid::new_v4();
+            send_cmd(
+                app,
+                if ignore {
+                    ClientCommand::IgnoreUser { user_id, request_id }
+                } else {
+                    ClientCommand::UnignoreUser { user_id, request_id }
+                },
+            );
+            Task::none()
+        }
         screens::timeline::Effect::PlayVideo { event_id, video, title } => {
             app.timeline.inline_video = Some(screens::timeline::InlineVideo {
                 event_id,
@@ -1667,6 +1683,8 @@ fn send_message(
                     ClientCommand::BanUser { room_id, user_id: user, reason, request_id }
                 }
                 Action::Unban(user) => ClientCommand::UnbanUser { room_id, user_id: user, request_id },
+                Action::Ignore(user) => ClientCommand::IgnoreUser { user_id: user, request_id },
+                Action::Unignore(user) => ClientCommand::UnignoreUser { user_id: user, request_id },
                 Action::Topic(topic) => ClientCommand::SetRoomTopic { room_id, topic, request_id },
                 Action::Nick(name) => ClientCommand::SetDisplayName { name, request_id },
                 Action::RoomName(name) => ClientCommand::SetRoomName { room_id, name, request_id },
@@ -3091,6 +3109,9 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
         }
         ClientEvent::DefaultNotificationModesUpdated { direct_messages, group_chats } => {
             app.default_notification_modes = (direct_messages, group_chats);
+        }
+        ClientEvent::IgnoredUsersUpdated(users) => {
+            app.ignored_users = users.into_iter().collect();
         }
         ClientEvent::CallStateUpdated(call_state) => {
             app.call.calls.insert(call_state.room_id.clone(), call_state);

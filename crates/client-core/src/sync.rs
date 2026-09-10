@@ -155,6 +155,7 @@ async fn run(
     // `event_tx` is gone (send fails, their loops break).
     let _room_list_handle = room_list::spawn_forwarder(client.clone(), event_tx.clone());
     let _notification_watcher = crate::push::spawn_watcher(client.clone(), event_tx.clone());
+    let _ignore_watcher = crate::ignore::spawn_watcher(client.clone(), event_tx.clone());
     let call_manager = crate::calls::CallManager::spawn(client.clone(), event_tx.clone());
     // Detached for the process lifetime, like the watchers above — but this
     // one doesn't touch `event_tx` at all, so it has no natural shutdown
@@ -1478,6 +1479,40 @@ async fn handle_command(
             let event_tx = event_tx.clone();
             tokio::spawn(async move {
                 match room.unban_user(&parsed_user_id, None).await {
+                    Ok(()) => succeed(&event_tx, request_id),
+                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
+                }
+            });
+        }
+
+        ClientCommand::IgnoreUser { user_id, request_id } => {
+            let Ok(parsed_user_id) = UserId::parse(&user_id) else {
+                fail(event_tx, request_id, "invalid user id");
+                return;
+            };
+            let account = client.account();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                // No local list update on success: the write lands in account
+                // data, comes back through sync, and `ignore::spawn_watcher`
+                // reports it. That keeps one source of truth and makes a
+                // change from another device look identical to this one.
+                match account.ignore_user(&parsed_user_id).await {
+                    Ok(()) => succeed(&event_tx, request_id),
+                    Err(error) => fail(&event_tx, request_id, &error.to_string()),
+                }
+            });
+        }
+
+        ClientCommand::UnignoreUser { user_id, request_id } => {
+            let Ok(parsed_user_id) = UserId::parse(&user_id) else {
+                fail(event_tx, request_id, "invalid user id");
+                return;
+            };
+            let account = client.account();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                match account.unignore_user(&parsed_user_id).await {
                     Ok(()) => succeed(&event_tx, request_id),
                     Err(error) => fail(&event_tx, request_id, &error.to_string()),
                 }
