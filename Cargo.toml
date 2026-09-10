@@ -49,11 +49,11 @@ tokio-stream = "0.1"
 # Windows platform integration
 keyring = { version = "4", features = ["windows-native-keyring-store"] }
 tray-icon = "0.24"
-# 0.61 to match what wry 0.56 / webview2-com 0.38 already compile — sharing
+# 0.62 to match what wry 0.57 / webview2-com 0.39 already compile — sharing
 # one windows-rs version lets the video player's fullscreen code talk to the
 # raw WebView2 COM interfaces with unified types (no cross-version skew), and
-# drops the otherwise-separate 0.58 build.
-windows = { version = "0.61", features = [
+# keeps a second windows-rs out of the build.
+windows = { version = "0.62", features = [
     "UI_Notifications",
     "Data_Xml_Dom",
     "Win32_System_Registry",
@@ -126,12 +126,12 @@ image = { version = "0.25", default-features = false, features = [
 ] }
 # Embedded YouTube playback: hosts the iframe player in a WebView2 child
 # window over the iced surface (Windows ships the WebView2 runtime).
-wry = "0.56"
+wry = "0.57"
 # Raw WebView2 COM interface + typed event-handler helpers — used directly
 # (alongside wry) to honor the player's fullscreen button, which wry itself
 # doesn't surface (see ui::video_player). Same version wry pins, so no extra
 # crate in the build.
-webview2-com = "0.38"
+webview2-com = "0.39"
 raw-window-handle = "0.6"
 pulldown-cmark = "0.13"
 linkify = "0.11"
