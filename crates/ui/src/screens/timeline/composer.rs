@@ -1555,7 +1555,7 @@ line2".to_string(), Some(8));
         };
 
         let mut state = State::default();
-        let mut key = |state: &mut State, action: Action| {
+        let key = |state: &mut State, action: Action| {
             let _ = update(state, Message::Action(action), &AUTO);
         };
         for c in "teh ".chars() {

@@ -51,12 +51,14 @@ const CORPUS: &[(&str, &str)] = &[
     ("yuo","you"),("cna","can"),("wnat","want"),("hte","the"),("nad","and"),("fro","for"),
 ];
 
-/// The two the corpus is known to get wrong, both the same shape: the word
+/// Two of the corpus are known to go wrong, both the same shape: the word
 /// the user meant is *further* away in edit distance than a word they didn't.
 /// "fourty" is one edit from both "fourth" and "forty"; "tounge" is one edit
 /// from "lounge" but two from "tongue". Telling these apart needs word
 /// frequency, which the Windows Spell Checking API doesn't expose — so they
-/// are budgeted for rather than pretended away.
+/// are budgeted for rather than pretended away. The third slot is headroom
+/// for one more of that shape arriving with a speller update; a fourth is a
+/// regression worth looking at.
 const ALLOWED_WRONG: usize = 3;
 
 /// Of the words that get a correction at all, how many must be the right one.
@@ -64,6 +66,14 @@ const MIN_CORRECT: usize = 95;
 
 #[test]
 fn autocorrect_gets_the_common_misspellings_right() {
+    // No speller: every word comes back unflagged and there is nothing to
+    // measure, so the thresholds below would fail for the wrong reason. Same
+    // probe the composer's spell tests skip on.
+    if spellcheck::top_correction("teh").is_none() {
+        println!("no speller available — skipping");
+        return;
+    }
+
     let (mut right, mut wrong, mut missed, mut unflagged) = (0, 0, 0, 0);
     for (typo, want) in CORPUS {
         if !is_checkable(typo) { unflagged += 1; continue; }
@@ -75,4 +85,19 @@ fn autocorrect_gets_the_common_misspellings_right() {
         }
     }
     println!("\n== corrected {right} | wrong {wrong} | flagged-but-no-fix {missed} | not flagged {unflagged} | total {}", CORPUS.len());
+
+    // Held tightest: a silent rewrite to a word the user did not mean is the
+    // worst thing autocorrect can do, so the budget for it barely moves.
+    assert!(
+        wrong <= ALLOWED_WRONG,
+        "autocorrect rewrote {wrong} of the corpus to the wrong word (budget {ALLOWED_WRONG}); see the WRONG lines above"
+    );
+    // Looser, and catches the regression this file exists for: a tie-break
+    // that stops choosing turns corrections into flagged-but-no-fix rather
+    // than into wrong fixes, which only this count notices.
+    assert!(
+        right >= MIN_CORRECT,
+        "autocorrect got {right} of {} right (floor {MIN_CORRECT}); {missed} flagged with no fix, {unflagged} not flagged",
+        CORPUS.len()
+    );
 }
