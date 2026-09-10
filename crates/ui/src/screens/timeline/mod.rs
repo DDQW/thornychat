@@ -2069,7 +2069,7 @@ fn follower_avatars<'a>(
         let member = member_by_id(members, member_index, user_id);
         let (name, avatar_url) = member
             .map(|m| (m.display_name.as_str(), m.avatar_url.as_deref()))
-            .unwrap_or((friendly_user_id(user_id), None));
+            .unwrap_or_else(|| (friendly_user_id(user_id), None));
         avatars = avatars.push(tooltip(
             crate::media_cache::avatar::<composer::Message>(media, avatar_url, name, 16),
             container(remote_text(format!("{name} is following the conversation")).size(11))
