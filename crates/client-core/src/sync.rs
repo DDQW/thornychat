@@ -486,7 +486,7 @@ async fn resubscribe(
         return;
     }
     let refs: Vec<&RoomId> = set.iter().map(std::ops::Deref::deref).collect();
-    sync_service.room_list_service().subscribe_to_rooms(&refs).await;
+    sync_service.room_list_service().set_room_subscriptions(&refs).await;
 }
 
 /// Re-resolve every custom emoji pack in the background and hand the result
@@ -831,7 +831,7 @@ async fn handle_command(
                 let event_tx = event_tx.clone();
                 tokio::spawn(async move {
                     match timeline.send_reply(content.into(), reply_event_id).await {
-                        Ok(()) => succeed(&event_tx, request_id),
+                        Ok(_) => succeed(&event_tx, request_id),
                         Err(error) => fail(&event_tx, request_id, &error.to_string()),
                     }
                 });
@@ -943,6 +943,7 @@ async fn handle_command(
                 caption,
                 mentions,
                 in_reply_to,
+                extra_content: None,
             };
 
             // send_attachment performs the full media upload before returning

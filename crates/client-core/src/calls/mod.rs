@@ -221,9 +221,9 @@ impl CallManager {
             .await
             .insert(room.room_id().to_owned(), JoinedCall { delay_id, heartbeat });
         if let Some(old_delay_id) = displaced.as_ref().and_then(|j| j.delay_id.clone()) {
-            let request = update_delayed_event::unstable::Request::new(
+            let request = update_delayed_event::unstable_v1::Request::new(
                 old_delay_id,
-                update_delayed_event::unstable::UpdateAction::Cancel,
+                update_delayed_event::UpdateAction::Cancel,
             );
             if let Err(error) = self.client.send(request).await {
                 tracing::warn!(
@@ -283,9 +283,9 @@ impl CallManager {
         // pure politeness (if this fails it fires once and re-publishes the
         // same empty membership — harmless).
         if let Some(delay_id) = joined.as_ref().and_then(|j| j.delay_id.clone()) {
-            let request = update_delayed_event::unstable::Request::new(
+            let request = update_delayed_event::unstable_v1::Request::new(
                 delay_id,
-                update_delayed_event::unstable::UpdateAction::Cancel,
+                update_delayed_event::UpdateAction::Cancel,
             );
             if let Err(error) = self.client.send(request).await {
                 tracing::debug!(%error, "couldn't cancel the scheduled delayed leave");
@@ -439,9 +439,9 @@ fn spawn_heartbeat(client: Client, delay_id: String) -> JoinHandle<()> {
         ticker.tick().await; // completes immediately
         loop {
             ticker.tick().await;
-            let request = update_delayed_event::unstable::Request::new(
+            let request = update_delayed_event::unstable_v1::Request::new(
                 delay_id.clone(),
-                update_delayed_event::unstable::UpdateAction::Restart,
+                update_delayed_event::UpdateAction::Restart,
             );
             match client.send(request).await {
                 Ok(_) => {}

@@ -142,9 +142,11 @@ mod tests {
         // We pass a full homeserver URL so this shouldn't normally fire, but
         // if it does it's the network, not our state.
         let error = build(ClientBuildError::AutoDiscovery(
-            matrix_sdk::ruma::api::error::FromHttpResponseError::Deserialization(
-                matrix_sdk::ruma::api::error::DeserializationError::Json(
-                    serde_json::from_str::<serde_json::Value>("{").unwrap_err(),
+            Box::new(
+                matrix_sdk::ruma::api::error::FromHttpResponseError::Deserialization(
+                    matrix_sdk::ruma::api::error::DeserializationError::Json(
+                        serde_json::from_str::<serde_json::Value>("{").unwrap_err(),
+                    ),
                 ),
             ),
         ));

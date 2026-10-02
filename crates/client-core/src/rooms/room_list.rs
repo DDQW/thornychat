@@ -89,11 +89,13 @@ fn display_name(room: &Room) -> Option<String> {
 /// standard Matrix mechanism for naming DMs and unnamed rooms after their
 /// members. `None` when the room has no heroes cached yet.
 fn hero_names(room: &Room) -> Option<String> {
-    let names: Vec<String> = room
+    let info = room.clone_info();
+    let names: Vec<String> = info
         .heroes()
-        .into_iter()
+        .iter()
         .map(|hero| {
             hero.display_name
+                .clone()
                 .unwrap_or_else(|| friendly_user_id(hero.user_id.as_str()).to_string())
         })
         .collect();
@@ -115,7 +117,7 @@ fn avatar_url(room: &Room, is_dm: bool, solo: bool, own_avatar: Option<&str>) ->
         return own_avatar.map(str::to_string);
     }
     if is_dm {
-        return room.heroes().into_iter().find_map(|hero| hero.avatar_url.map(|url| url.to_string()));
+        return room.clone_info().heroes().iter().find_map(|hero| hero.avatar_url.as_ref().map(|url| url.to_string()));
     }
     None
 }
