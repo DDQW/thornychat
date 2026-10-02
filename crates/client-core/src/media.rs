@@ -55,6 +55,30 @@ pub async fn fetch(client: &Client, cache_dir: &Path, mxc_url: &str) -> anyhow::
     Ok(bytes)
 }
 
+/// Fetches `mxc_url` like [`fetch`], but yields the path of its entry in
+/// the on-disk cache instead of the bytes — for media that is played or
+/// streamed rather than decoded (video attachments), where carrying tens of
+/// megabytes through the event channel and into a `Message` would be waste.
+///
+/// The bytes still round-trip through memory on a cache miss (the SDK's
+/// download API has no stream-to-file form), but only once, and only on the
+/// first play.
+pub async fn fetch_file(client: &Client, cache_dir: &Path, mxc_url: &str) -> anyhow::Result<PathBuf> {
+    let cache_path = cache_path_for(cache_dir, mxc_url);
+    if tokio::fs::metadata(&cache_path).await.is_ok_and(|meta| meta.is_file()) {
+        return Ok(cache_path);
+    }
+
+    let bytes = fetch(client, cache_dir, mxc_url).await?;
+    // `fetch` writes the cache entry best-effort (a failed write only costs
+    // it a re-download). Here the file *is* the result, so a missing one
+    // gets one more direct attempt before giving up.
+    if !tokio::fs::metadata(&cache_path).await.is_ok_and(|meta| meta.is_file()) {
+        tokio::fs::write(&cache_path, &bytes).await?;
+    }
+    Ok(cache_path)
+}
+
 fn cache_path_for(cache_dir: &Path, mxc_url: &str) -> PathBuf {
     // mxc://server/media_id -> a flat, filesystem-safe filename.
     let safe_name: String = mxc_url

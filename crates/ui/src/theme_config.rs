@@ -132,54 +132,53 @@ impl Default for ThemeConfig {
 }
 
 impl ThemeConfig {
-    /// "Midnight" — a cool-slate dark theme. The neutrals carry a faint
-    /// blue-gray tint (not pure gray) so surfaces read as deliberately
-    /// layered rather than flat, with evenly-stepped elevation
-    /// (bg → surface → surface_strong). The accent is a brighter, friendlier
-    /// azure than Windows' `#0078D4`, and success/danger are lifted to
-    /// stay legible on a dark ground.
+    /// "Midnight" — a Cinny-matched dark theme. Neutrals are true (non-blue-
+    /// tinted) grays, matching Cinny's own dark-theme `Background`/`Surface`/
+    /// `SurfaceVariant` containers, with evenly-stepped elevation
+    /// (bg → surface → surface_strong). The accent is Cinny's dark-mode
+    /// primary — a soft lavender rather than a saturated blue — and
+    /// success/danger are lifted pastels to stay legible on a dark ground.
     pub fn thornychat_dark() -> Self {
         Self {
             name: "ThornyChat Dark".into(),
             dark: true,
-            background: ThemeColor::new(0x14, 0x16, 0x1C),
-            surface: ThemeColor::new(0x1C, 0x1F, 0x28),
-            surface_strong: ThemeColor::new(0x2A, 0x2E, 0x3A),
-            text: ThemeColor::new(0xE7, 0xEA, 0xF0),
-            muted_text: ThemeColor::new(0x97, 0xA0, 0xAF),
-            accent: ThemeColor::new(0x5B, 0x8C, 0xF5),
-            accent_text: ThemeColor::new(0xFF, 0xFF, 0xFF),
-            success: ThemeColor::new(0x3F, 0xB8, 0x68),
-            danger: ThemeColor::new(0xEF, 0x6B, 0x6B),
-            emote: ThemeColor::new(0xC3, 0x9B, 0xE8),
+            background: ThemeColor::new(0x1A, 0x1A, 0x1A),
+            surface: ThemeColor::new(0x26, 0x26, 0x26),
+            surface_strong: ThemeColor::new(0x33, 0x33, 0x33),
+            text: ThemeColor::new(0xF2, 0xF2, 0xF2),
+            muted_text: ThemeColor::new(0x99, 0x99, 0x99),
+            accent: ThemeColor::new(0xBD, 0xB6, 0xEC),
+            accent_text: ThemeColor::new(0x2C, 0x28, 0x43),
+            success: ThemeColor::new(0x85, 0xE0, 0xBA),
+            danger: ThemeColor::new(0xE6, 0x9D, 0x9D),
+            emote: ThemeColor::new(0xC9, 0xA9, 0xE0),
             font_family: None,
             ui_scale: 1.0,
-            corner_radius: 6.0,
+            corner_radius: 10.0,
         }
     }
 
-    /// "Daylight" — the light counterpart. Backgrounds are soft cool whites
-    /// rather than stark `#FFFFFF`, text is a cool near-black rather than
-    /// pure black (calmer, less hard-edged), and the accent deepens to a
-    /// richer blue so white text stays crisp on accent-filled buttons and
-    /// badges. Same blue family as Midnight for a consistent identity.
+    /// "Daylight" — the light counterpart, matched to Cinny's own light
+    /// theme: near-white surfaces, near-black text, and a deep blue accent
+    /// (Cinny's light-mode primary uses a different hue from its dark-mode
+    /// lavender — that's Cinny's own choice, kept here for fidelity).
     pub fn thornychat_light() -> Self {
         Self {
             name: "ThornyChat Light".into(),
             dark: false,
-            background: ThemeColor::new(0xFB, 0xFB, 0xFD),
-            surface: ThemeColor::new(0xF0, 0xF2, 0xF6),
-            surface_strong: ThemeColor::new(0xE2, 0xE5, 0xEC),
-            text: ThemeColor::new(0x1B, 0x1E, 0x26),
-            muted_text: ThemeColor::new(0x5A, 0x61, 0x70),
-            accent: ThemeColor::new(0x29, 0x5F, 0xD6),
+            background: ThemeColor::new(0xF2, 0xF2, 0xF2),
+            surface: ThemeColor::new(0xFF, 0xFF, 0xFF),
+            surface_strong: ThemeColor::new(0xE5, 0xE5, 0xE5),
+            text: ThemeColor::new(0x00, 0x00, 0x00),
+            muted_text: ThemeColor::new(0x5C, 0x5C, 0x5C),
+            accent: ThemeColor::new(0x18, 0x58, 0xD5),
             accent_text: ThemeColor::new(0xFF, 0xFF, 0xFF),
-            success: ThemeColor::new(0x1F, 0x9D, 0x57),
-            danger: ThemeColor::new(0xD9, 0x3B, 0x3B),
-            emote: ThemeColor::new(0x7A, 0x4F, 0xB0),
+            success: ThemeColor::new(0x00, 0x84, 0x4C),
+            danger: ThemeColor::new(0xC4, 0x0E, 0x0E),
+            emote: ThemeColor::new(0x6B, 0x4F, 0xA0),
             font_family: None,
             ui_scale: 1.0,
-            corner_radius: 6.0,
+            corner_radius: 10.0,
         }
     }
 

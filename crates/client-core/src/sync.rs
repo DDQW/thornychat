@@ -1162,6 +1162,23 @@ async fn handle_command(
             });
         }
 
+        ClientCommand::FetchMediaFile { mxc_url, request_id } => {
+            let client = client.clone();
+            let event_tx = event_tx.clone();
+            let cache_dir = paths.media_cache_dir();
+            tokio::spawn(async move {
+                match crate::media::fetch_file(&client, &cache_dir, &mxc_url).await {
+                    Ok(path) => {
+                        let _ = event_tx.send(ClientEvent::MediaFileReady { request_id, path });
+                    }
+                    Err(error) => {
+                        let _ = event_tx
+                            .send(ClientEvent::MediaFetchFailed { request_id, reason: error.to_string() });
+                    }
+                }
+            });
+        }
+
         ClientCommand::SetRoomNotificationMode { room_id, mode, request_id } => {
             let Ok(parsed_room_id) = RoomId::parse(&room_id) else {
                 fail(event_tx, request_id, "invalid room id");

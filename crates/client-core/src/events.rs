@@ -77,6 +77,12 @@ pub enum ClientEvent {
     /// canonical-space inheritance). Refetched whenever a room is opened.
     CustomEmojiPacksUpdated(Vec<EmojiPack>),
     MediaFetched { request_id: RequestId, bytes: Vec<u8> },
+    /// A `FetchMediaFile` finished: the media is on disk at `path` (its
+    /// entry in the persistent media cache). Videos take this route rather
+    /// than `MediaFetched` — the inline player streams the file from disk
+    /// through the webview's custom protocol, so shipping tens of megabytes
+    /// of bytes through the event channel would be pure waste.
+    MediaFileReady { request_id: RequestId, path: std::path::PathBuf },
     MediaFetchFailed { request_id: RequestId, reason: String },
     /// OpenGraph data for a URL, resolved via the homeserver's
     /// `preview_url` proxy (the URL is never fetched directly from this
@@ -455,6 +461,19 @@ pub enum TimelineItemContent {
     /// `caption` follows MSC2530: when the event carries a `filename` field,
     /// a differing `body` is a caption, not the filename.
     File { url: String, filename: String, caption: Option<String> },
+    /// An `m.video` attachment. Kept apart from `File` so the UI can offer a
+    /// play button (the same inline webview player direct video *links* get)
+    /// instead of only a download affordance. `mimetype` is the sender's
+    /// declared `info.mimetype`, handed to the player so the `<video>` tag is
+    /// served the right content type; `thumbnail_url` is the event's own
+    /// thumbnail (`info.thumbnail_url`), shown as the card's poster frame.
+    Video {
+        url: String,
+        filename: String,
+        caption: Option<String>,
+        mimetype: Option<String>,
+        thumbnail_url: Option<String>,
+    },
     Redacted,
     /// A membership change (join/leave/kick/ban/invite/knock…) rendered as a
     /// pre-composed human sentence (e.g. "alice joined the room"). Kept as

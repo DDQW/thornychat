@@ -121,6 +121,13 @@ pub struct State {
     /// via `visible_bounds` when the picker opens. `None` while the probe is
     /// in flight — the picker renders once it lands (one frame later).
     pub reaction_anchor_y: Option<f32>,
+    /// Where the composer's emoji/sticker picker anchors: the toggle
+    /// button's top edge in chat-area coordinates, probed via
+    /// `visible_bounds` on every composer message while the picker is open
+    /// (composer height, not scrolling, is what moves the button — see
+    /// `Message::Composer`'s handler). `None` while closed or the probe is
+    /// still in flight.
+    pub composer_picker_anchor_y: Option<f32>,
     pub search_open: bool,
     pub search_query: String,
     /// Whether the room notification-mode menu (opened from the header bell)
@@ -241,6 +248,11 @@ pub struct State {
     /// thumbnail. At most one at a time (the native webview is a
     /// singleton, see `crate::video_player`).
     pub inline_video: Option<InlineVideo>,
+    /// Event id of a video *attachment* whose file is downloading after a
+    /// play click. Unlike a link, an `m.video` can't be handed to the
+    /// player as a URL — the bytes have to come down first — so its card
+    /// says so meanwhile. Cleared when playback starts or the fetch fails.
+    pub loading_video: Option<String>,
     /// Active browser-style middle-click autoscroll: the window-space point
     /// where the middle-click landed (the dead-zone origin). While `Some`, a
     /// timer subscription glides the timeline toward wherever the cursor sits
@@ -342,6 +354,11 @@ pub enum Message {
     /// Cursor moved over the roster (roster-local coords) — tracked so the
     /// right-click flyout can anchor at the pointed-at row's height.
     MemberCursorMoved(iced::Point),
+    /// The roster list scrolled while its right-click flyout was open. The
+    /// flyout has no per-row anchor to re-measure against (unlike the
+    /// reaction picker), so the simplest correct behavior is to close it
+    /// rather than let it drift away from the row it was opened on.
+    MemberRosterScrolled,
     MemberMenuDirectMessage(String),
     MemberMenuNewRoom(String),
     /// Toggle tinting this member's messages in the open timeline.
@@ -365,6 +382,10 @@ pub enum Message {
     /// The reaction picker's one-shot anchor probe resolved: where the
     /// clicked row sits on screen, so the picker opens next to it.
     ReactionAnchorProbed { event_id: String, bounds: Option<iced::Rectangle> },
+    /// The composer picker's toggle-button probe resolved (see
+    /// `Message::Composer`'s handler, which re-issues this on every composer
+    /// message while the picker is open).
+    ComposerPickerAnchorProbed(Option<iced::Rectangle>),
     StartReply(client_core::events::ReplyPreview),
     /// A quote block was clicked — scroll to (and highlight) the quoted
     /// message.
@@ -381,6 +402,11 @@ pub enum Message {
     /// place of the card (the root shell owns the native webview
     /// lifecycle).
     PlayVideo { event_id: String, video: crate::video_player::EmbedVideo, title: Option<String> },
+    /// A video attachment's play button was clicked. Its bytes have to be
+    /// downloaded before anything can play (Matrix media needs an
+    /// authenticated fetch, which the webview can't do), so the root shell
+    /// runs that and starts the player when the file lands.
+    PlayAttachment { event_id: String, url: String, filename: String, mimetype: Option<String> },
     /// The inline player's ✕ was clicked — stop playback, back to the card.
     StopVideo,
     /// "Watch on {platform}" on the inline player: open the original link
@@ -421,6 +447,9 @@ pub enum Effect {
     SetUserIgnored { user_id: String, ignore: bool },
     /// Start playing this video inline, in place of its card.
     PlayVideo { event_id: String, video: crate::video_player::EmbedVideo, title: Option<String> },
+    /// Download this video attachment's bytes, then play the file inline in
+    /// place of its card (see `Message::PlayAttachment`).
+    PlayAttachment { event_id: String, url: String, filename: String, mimetype: Option<String> },
     /// Stop the inline video (✕ on the player, or after opening the link
     /// externally) — the root dispatcher tears the native webview down.
     StopVideo,
@@ -460,6 +489,254 @@ fn anchor_container_id(event_id: &str) -> iced::widget::Id {
 fn visible_bounds(id: iced::widget::Id) -> iced::Task<Option<iced::Rectangle>> {
     iced::widget::selector::find(id)
         .map(|t: Option<iced::widget::selector::Target>| t.and_then(|t| t.visible_bounds()))
+}
+
+fn handle_scrolled(
+    state: &mut State,
+    viewport: iced::widget::scrollable::Viewport,
+) -> (iced::Task<Message>, Effect) {
+    // The list is bottom-anchored: `absolute_offset().y` is the
+    // distance scrolled up from the newest message, and the
+    // reversed offset is the distance from the top.
+    //
+    // iced publishes this event both for real scrolls and for
+    // redraws where the *content size* changed under a stationary
+    // viewport (new message, reaction, receipt, preview card, image
+    // — anything that reflows the list). Telling them apart:
+    // reflows leave the from-bottom offset untouched (that's what
+    // the bottom anchor preserves), so a from-bottom change means
+    // real input; a content-height change means a reflow.
+    let content_height = viewport.content_bounds().height;
+    let from_bottom = viewport.absolute_offset().y;
+    let height_delta = content_height - state.last_content_height;
+    let reflowed = height_delta.abs() > 0.5;
+    let user_scrolled = (from_bottom - state.last_from_bottom).abs() > 0.5;
+    let moved_toward_bottom = from_bottom < state.last_from_bottom;
+    // Whether real input happened shortly *before* this event —
+    // evaluated before `last_scroll_input` is refreshed below.
+    let recently_scrolled = state
+        .last_scroll_input
+        .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(1500));
+    state.last_content_height = content_height;
+    state.last_from_bottom = from_bottom;
+    state.last_bounds_height = viewport.bounds().height;
+    state.viewport_top = viewport.bounds().y;
+    state.viewport_center = viewport.bounds().y + viewport.bounds().height * 0.5;
+
+    // A quote-jump deferred by JumpToEvent (search was open, so the
+    // geometry was stale): the fields above are fresh now — scroll.
+    if let Some(event_id) = state.pending_jump.take() {
+        if let Some(index) =
+            state.items.iter().position(|i| i.event_id.as_deref() == Some(&event_id))
+        {
+            let target = relative_offset_for_index(index, state.items.len());
+            return (scroll_task(state, target), Effect::None);
+        }
+    }
+
+    // `at_bottom` is pure geometry and gates read receipts — it
+    // must reflect every event, whatever caused it. (It went stale
+    // once by only updating on user input: a flip during the
+    // room-open burst then latched forever while the user sat at
+    // the bottom, receipts never fired, and the unread divider
+    // became immortal.)
+    let was_at_bottom = state.at_bottom;
+    state.at_bottom = from_bottom <= 24.0;
+    let arrived_at_bottom = !was_at_bottom && state.at_bottom;
+
+    if user_scrolled {
+        state.descending = moved_toward_bottom;
+        state.last_scroll_input = Some(std::time::Instant::now());
+    }
+
+    if user_scrolled || !reflowed {
+        // The offset moved: real input (wheel, scrollbar drag, a
+        // quote jump, the settle of one of our own corrections) —
+        // or an offset *clamp* from the content shrinking in the
+        // same frame. Either way the on-screen world moved: any
+        // probe still in flight measured a world that's gone.
+        state.scroll_generation += 1;
+
+        // Re-measure the anchor from several candidates at once —
+        // the hovered message plus a spread around the estimate —
+        // and let the probe results pick the best (closest to the
+        // viewport center). Batching many candidates is what keeps
+        // an anchor established nearly all the time; a miss means
+        // the next reflow can't be corrected at all.
+        let probe = if from_bottom > 24.0 {
+            let probes: Vec<_> = anchor_candidates(state, &viewport)
+                .into_iter()
+                .map(|event_id| {
+                    probe_task(event_id, ProbePurpose::Refresh, state.scroll_generation)
+                })
+                .collect();
+            if probes.is_empty() {
+                state.scroll_anchor = None;
+                iced::Task::none()
+            } else {
+                iced::Task::batch(probes)
+            }
+        } else {
+            // At the bottom the bottom-anchor is already the
+            // correct (and exact) behavior; drop the anchor.
+            state.scroll_anchor = None;
+            iced::Task::none()
+        };
+
+        // Offset-tracks-content signature: the offset moved in the
+        // same frame as a reflow, with no human input anywhere
+        // near. That is not scrolling — it's the offset being
+        // *derived* from the content size (a percentage-mode
+        // offset, or a clamp), and it drifts forever if left
+        // alone. Re-pin the current position as fixed pixels;
+        // harmless when the offset is already fixed.
+        let task = if user_scrolled && reflowed && !recently_scrolled {
+            tracing::info!(
+                from_bottom,
+                height_delta,
+                "offset moved with content, no recent input — re-pinning as fixed pixels"
+            );
+            iced::Task::batch([
+                probe,
+                iced::widget::operation::scroll_to(
+                    timeline_scroll_id(),
+                    iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: from_bottom },
+                ),
+            ])
+        } else {
+            probe
+        };
+
+        // Pagination still moves only on pure input — an offset
+        // that changed in the same frame as a reflow can be a clamp
+        // from a shrunken (reset) timeline, and a clamp is not the
+        // user asking for older history. Reaching the bottom is
+        // different: however the frame was classified, being at the
+        // newest message is what "caught up" means here.
+        if reflowed {
+            if arrived_at_bottom {
+                return (task, Effect::MaybeMarkRead);
+            }
+            return (task, Effect::None);
+        }
+
+        // Infinite scrollback: approaching the top prefetches more
+        // history a viewport and a half early, so the boundary is
+        // normally never seen — the explicit "Load older" control
+        // stays as a fallback for short timelines that can't scroll
+        // yet. Each prepended batch is invisible to a bottom-anchored
+        // viewport, and prepends move this position *away* from the
+        // top, so the trigger naturally re-arms rather than looping.
+        //
+        // The half-viewport-from-the-bottom guard keeps prefetch and
+        // the live-growth shrink mutually exclusive: in a room whose
+        // whole content is under ~two viewports tall, *everywhere*
+        // is "near the top", and prefetching straight from the live
+        // edge would grow the list past the cap only for the shrink
+        // to cut it back on arrival at the bottom — a permanent
+        // ping-pong. Requiring real upward commitment first means
+        // prefetch only runs for a reader headed into history.
+        let from_top = viewport.absolute_offset_reversed().y;
+        let viewport_height = viewport.bounds().height;
+        let near_top = from_top <= viewport_height * 1.5;
+        let committed_up = from_bottom > viewport_height * 0.5;
+        if near_top && committed_up && !state.loading_older && !state.reached_start {
+            state.loading_older = true;
+            return (task, Effect::PaginateBackwards);
+        }
+        // Only signal when the user actually returns to the newest
+        // message — that's when there may be messages received
+        // while scrolled up that now need marking read.
+        if arrived_at_bottom {
+            return (task, Effect::MaybeMarkRead);
+        }
+        return (task, Effect::None);
+    }
+
+    // Pure reflow under a stationary user.
+
+    // Live-edge glue (within 150px of the bottom): the bottom
+    // anchor keeps the *distance* to the bottom constant, so any
+    // reflow leaves that gap sitting open rather than at 0 — a new
+    // message grows the list entirely below the window (invisible,
+    // nothing sticks), but a *shrink* (e.g. a grouped header
+    // collapsing once more history reveals the sender continuation
+    // above it — logged in the wild as `height_delta=-184.5`) does
+    // the same thing in reverse. Both leave a nonzero gap; snap it
+    // closed either way. Skipped only while the user is actively
+    // scrolling *up*: they're leaving the live edge on purpose.
+    if from_bottom <= 150.0 {
+        let leaving = recently_scrolled && !state.descending;
+        if from_bottom > 0.5 && !leaving {
+            tracing::debug!(from_bottom, height_delta, "live-edge glue → bottom");
+            return (
+                iced::widget::operation::scroll_to(
+                    timeline_scroll_id(),
+                    iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
+                ),
+                Effect::None,
+            );
+        }
+        return (iced::Task::none(), Effect::None);
+    }
+
+    // While the user is descending toward the bottom (or paused
+    // less than a moment ago), corrections stay suspended
+    // entirely: holding the current post steady is right while
+    // *reading*, but during a descent it would shove them back up
+    // by every arriving message's height. Otherwise, measure how
+    // far the anchor message actually moved and undo it — but only
+    // against an anchor measured in the current generation: an
+    // older measurement predates the user's latest input, and
+    // "restoring" it would revert that input.
+    if state.descending && recently_scrolled {
+        return (iced::Task::none(), Effect::None);
+    }
+    if !state.at_bottom && from_bottom > 150.0 {
+        match &state.scroll_anchor {
+            Some(anchor) if anchor.generation == state.scroll_generation => {
+                return (
+                    probe_task(
+                        anchor.event_id.clone(),
+                        ProbePurpose::Correct,
+                        state.scroll_generation,
+                    ),
+                    Effect::None,
+                );
+            }
+            _ => {
+                // No anchor was ever established — logged in the
+                // wild as this reflow shifting the view by
+                // `height_delta` with nothing to undo it, over and
+                // over for an entire session, because establishing
+                // an anchor previously only happened in response
+                // to the user's *own* scroll input. A user who
+                // never touches the scrollbar (just sitting,
+                // reading, watching a fast room) got no coverage
+                // at all. Probe candidates now regardless, purely
+                // from this reflow, so the *next* one has
+                // something fresh to correct against — this
+                // reflow itself still can't be undone (no "before"
+                // measurement exists for it).
+                tracing::debug!(
+                    height_delta,
+                    from_bottom,
+                    "uncorrected timeline reflow — establishing anchor for next time"
+                );
+                state.scroll_generation += 1;
+                let probes: Vec<_> = anchor_candidates(state, &viewport)
+                    .into_iter()
+                    .map(|event_id| {
+                        probe_task(event_id, ProbePurpose::Refresh, state.scroll_generation)
+                    })
+                    .collect();
+                if !probes.is_empty() {
+                    return (iced::Task::batch(probes), Effect::None);
+                }
+            }
+        }
+    }
+    (iced::Task::none(), Effect::None)
 }
 
 /// Display box for an image message: aspect-true from the sender-declared
@@ -676,7 +953,29 @@ pub fn update(
     match message {
         Message::Composer(msg) => {
             let (task, effect) = composer::update(&mut state.composer, msg, spell);
-            (task.map(Message::Composer), Effect::Composer(effect))
+            let mut task = task.map(Message::Composer);
+            // The emoji/sticker picker anchors to its toggle button rather
+            // than a fixed offset (see `composer_picker_anchor_y`) — the
+            // button moves whenever the composer's height changes (reply
+            // preview, staged attachments, multi-line text), and every such
+            // change arrives as a composer message, so re-probing here on
+            // every one keeps the anchor live without needing a scroll hook.
+            if state.composer.show_emoji_picker {
+                task = iced::Task::batch([
+                    task,
+                    visible_bounds(composer::picker_toggle_id())
+                        .map(Message::ComposerPickerAnchorProbed),
+                ]);
+            } else {
+                state.composer_picker_anchor_y = None;
+            }
+            (task, Effect::Composer(effect))
+        }
+        Message::ComposerPickerAnchorProbed(bounds) => {
+            if state.composer.show_emoji_picker {
+                state.composer_picker_anchor_y = bounds.map(|rect| rect.y - state.viewport_top);
+            }
+            (iced::Task::none(), Effect::None)
         }
         Message::StartEdit { event_id, current_body } => {
             state.editing = Some(EditingState { event_id, draft: current_body });
@@ -820,6 +1119,10 @@ pub fn update(
             state.member_cursor = Some(point);
             (iced::Task::none(), Effect::None)
         }
+        Message::MemberRosterScrolled => {
+            state.member_menu = None;
+            (iced::Task::none(), Effect::None)
+        }
         Message::MemberMenuDirectMessage(user_id) => {
             state.member_menu = None;
             (iced::Task::none(), Effect::OpenDirectMessage(user_id))
@@ -867,248 +1170,26 @@ pub fn update(
             (iced::Task::none(), Effect::PaginateBackwards)
         }
         Message::Scrolled(viewport) => {
-            // The list is bottom-anchored: `absolute_offset().y` is the
-            // distance scrolled up from the newest message, and the
-            // reversed offset is the distance from the top.
-            //
-            // iced publishes this event both for real scrolls and for
-            // redraws where the *content size* changed under a stationary
-            // viewport (new message, reaction, receipt, preview card, image
-            // — anything that reflows the list). Telling them apart:
-            // reflows leave the from-bottom offset untouched (that's what
-            // the bottom anchor preserves), so a from-bottom change means
-            // real input; a content-height change means a reflow.
-            let content_height = viewport.content_bounds().height;
-            let from_bottom = viewport.absolute_offset().y;
-            let height_delta = content_height - state.last_content_height;
-            let reflowed = height_delta.abs() > 0.5;
-            let user_scrolled = (from_bottom - state.last_from_bottom).abs() > 0.5;
-            let moved_toward_bottom = from_bottom < state.last_from_bottom;
-            // Whether real input happened shortly *before* this event —
-            // evaluated before `last_scroll_input` is refreshed below.
-            let recently_scrolled = state
-                .last_scroll_input
-                .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(1500));
-            state.last_content_height = content_height;
-            state.last_from_bottom = from_bottom;
-            state.last_bounds_height = viewport.bounds().height;
-            state.viewport_top = viewport.bounds().y;
-            state.viewport_center = viewport.bounds().y + viewport.bounds().height * 0.5;
-
-            // A quote-jump deferred by JumpToEvent (search was open, so the
-            // geometry was stale): the fields above are fresh now — scroll.
-            if let Some(event_id) = state.pending_jump.take() {
-                if let Some(index) =
-                    state.items.iter().position(|i| i.event_id.as_deref() == Some(&event_id))
-                {
-                    let target = relative_offset_for_index(index, state.items.len());
-                    return (scroll_task(state, target), Effect::None);
-                }
-            }
-
-            // `at_bottom` is pure geometry and gates read receipts — it
-            // must reflect every event, whatever caused it. (It went stale
-            // once by only updating on user input: a flip during the
-            // room-open burst then latched forever while the user sat at
-            // the bottom, receipts never fired, and the unread divider
-            // became immortal.)
-            let was_at_bottom = state.at_bottom;
-            state.at_bottom = from_bottom <= 24.0;
-            let arrived_at_bottom = !was_at_bottom && state.at_bottom;
-
-            if user_scrolled {
-                state.descending = moved_toward_bottom;
-                state.last_scroll_input = Some(std::time::Instant::now());
-            }
-
-            if user_scrolled || !reflowed {
-                // The offset moved: real input (wheel, scrollbar drag, a
-                // quote jump, the settle of one of our own corrections) —
-                // or an offset *clamp* from the content shrinking in the
-                // same frame. Either way the on-screen world moved: any
-                // probe still in flight measured a world that's gone.
-                state.scroll_generation += 1;
-
-                // Re-measure the anchor from several candidates at once —
-                // the hovered message plus a spread around the estimate —
-                // and let the probe results pick the best (closest to the
-                // viewport center). Batching many candidates is what keeps
-                // an anchor established nearly all the time; a miss means
-                // the next reflow can't be corrected at all.
-                let probe = if from_bottom > 24.0 {
-                    let probes: Vec<_> = anchor_candidates(state, &viewport)
-                        .into_iter()
-                        .map(|event_id| {
-                            probe_task(event_id, ProbePurpose::Refresh, state.scroll_generation)
-                        })
-                        .collect();
-                    if probes.is_empty() {
-                        state.scroll_anchor = None;
-                        iced::Task::none()
-                    } else {
-                        iced::Task::batch(probes)
-                    }
-                } else {
-                    // At the bottom the bottom-anchor is already the
-                    // correct (and exact) behavior; drop the anchor.
-                    state.scroll_anchor = None;
-                    iced::Task::none()
-                };
-
-                // Offset-tracks-content signature: the offset moved in the
-                // same frame as a reflow, with no human input anywhere
-                // near. That is not scrolling — it's the offset being
-                // *derived* from the content size (a percentage-mode
-                // offset, or a clamp), and it drifts forever if left
-                // alone. Re-pin the current position as fixed pixels;
-                // harmless when the offset is already fixed.
-                let task = if user_scrolled && reflowed && !recently_scrolled {
-                    tracing::info!(
-                        from_bottom,
-                        height_delta,
-                        "offset moved with content, no recent input — re-pinning as fixed pixels"
-                    );
-                    iced::Task::batch([
-                        probe,
-                        iced::widget::operation::scroll_to(
-                            timeline_scroll_id(),
-                            iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: from_bottom },
-                        ),
-                    ])
-                } else {
-                    probe
-                };
-
-                // Pagination still moves only on pure input — an offset
-                // that changed in the same frame as a reflow can be a clamp
-                // from a shrunken (reset) timeline, and a clamp is not the
-                // user asking for older history. Reaching the bottom is
-                // different: however the frame was classified, being at the
-                // newest message is what "caught up" means here.
-                if reflowed {
-                    if arrived_at_bottom {
-                        return (task, Effect::MaybeMarkRead);
-                    }
-                    return (task, Effect::None);
-                }
-
-                // Infinite scrollback: approaching the top prefetches more
-                // history a viewport and a half early, so the boundary is
-                // normally never seen — the explicit "Load older" control
-                // stays as a fallback for short timelines that can't scroll
-                // yet. Each prepended batch is invisible to a bottom-anchored
-                // viewport, and prepends move this position *away* from the
-                // top, so the trigger naturally re-arms rather than looping.
-                //
-                // The half-viewport-from-the-bottom guard keeps prefetch and
-                // the live-growth shrink mutually exclusive: in a room whose
-                // whole content is under ~two viewports tall, *everywhere*
-                // is "near the top", and prefetching straight from the live
-                // edge would grow the list past the cap only for the shrink
-                // to cut it back on arrival at the bottom — a permanent
-                // ping-pong. Requiring real upward commitment first means
-                // prefetch only runs for a reader headed into history.
-                let from_top = viewport.absolute_offset_reversed().y;
-                let viewport_height = viewport.bounds().height;
-                let near_top = from_top <= viewport_height * 1.5;
-                let committed_up = from_bottom > viewport_height * 0.5;
-                if near_top && committed_up && !state.loading_older && !state.reached_start {
-                    state.loading_older = true;
-                    return (task, Effect::PaginateBackwards);
-                }
-                // Only signal when the user actually returns to the newest
-                // message — that's when there may be messages received
-                // while scrolled up that now need marking read.
-                if arrived_at_bottom {
-                    return (task, Effect::MaybeMarkRead);
-                }
-                return (task, Effect::None);
-            }
-
-            // Pure reflow under a stationary user.
-
-            // Live-edge glue (within 150px of the bottom): the bottom
-            // anchor keeps the *distance* to the bottom constant, so any
-            // reflow leaves that gap sitting open rather than at 0 — a new
-            // message grows the list entirely below the window (invisible,
-            // nothing sticks), but a *shrink* (e.g. a grouped header
-            // collapsing once more history reveals the sender continuation
-            // above it — logged in the wild as `height_delta=-184.5`) does
-            // the same thing in reverse. Both leave a nonzero gap; snap it
-            // closed either way. Skipped only while the user is actively
-            // scrolling *up*: they're leaving the live edge on purpose.
-            if from_bottom <= 150.0 {
-                let leaving = recently_scrolled && !state.descending;
-                if from_bottom > 0.5 && !leaving {
-                    tracing::debug!(from_bottom, height_delta, "live-edge glue → bottom");
-                    return (
-                        iced::widget::operation::scroll_to(
-                            timeline_scroll_id(),
-                            iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
-                        ),
-                        Effect::None,
-                    );
-                }
-                return (iced::Task::none(), Effect::None);
-            }
-
-            // While the user is descending toward the bottom (or paused
-            // less than a moment ago), corrections stay suspended
-            // entirely: holding the current post steady is right while
-            // *reading*, but during a descent it would shove them back up
-            // by every arriving message's height. Otherwise, measure how
-            // far the anchor message actually moved and undo it — but only
-            // against an anchor measured in the current generation: an
-            // older measurement predates the user's latest input, and
-            // "restoring" it would revert that input.
-            if state.descending && recently_scrolled {
-                return (iced::Task::none(), Effect::None);
-            }
-            if !state.at_bottom && from_bottom > 150.0 {
-                match &state.scroll_anchor {
-                    Some(anchor) if anchor.generation == state.scroll_generation => {
-                        return (
-                            probe_task(
-                                anchor.event_id.clone(),
-                                ProbePurpose::Correct,
-                                state.scroll_generation,
-                            ),
-                            Effect::None,
-                        );
-                    }
-                    _ => {
-                        // No anchor was ever established — logged in the
-                        // wild as this reflow shifting the view by
-                        // `height_delta` with nothing to undo it, over and
-                        // over for an entire session, because establishing
-                        // an anchor previously only happened in response
-                        // to the user's *own* scroll input. A user who
-                        // never touches the scrollbar (just sitting,
-                        // reading, watching a fast room) got no coverage
-                        // at all. Probe candidates now regardless, purely
-                        // from this reflow, so the *next* one has
-                        // something fresh to correct against — this
-                        // reflow itself still can't be undone (no "before"
-                        // measurement exists for it).
-                        tracing::debug!(
-                            height_delta,
-                            from_bottom,
-                            "uncorrected timeline reflow — establishing anchor for next time"
-                        );
-                        state.scroll_generation += 1;
-                        let probes: Vec<_> = anchor_candidates(state, &viewport)
-                            .into_iter()
-                            .map(|event_id| {
-                                probe_task(event_id, ProbePurpose::Refresh, state.scroll_generation)
-                            })
-                            .collect();
-                        if !probes.is_empty() {
-                            return (iced::Task::batch(probes), Effect::None);
-                        }
-                    }
-                }
-            }
-            (iced::Task::none(), Effect::None)
+            let (task, effect) = handle_scrolled(state, viewport);
+            // The reaction picker anchors to its message row (see
+            // `ToggleReactionPicker`/`ReactionAnchorProbed` below) but never
+            // re-measures on its own — without this, scrolling the timeline
+            // while it's open leaves it pinned at its original screen
+            // position instead of following the row. Re-probing here reuses
+            // the exact same probe `ToggleReactionPicker` issues at open
+            // time; `ReactionAnchorProbed`'s existing staleness guard
+            // already covers a probe landing after the picker has closed.
+            let task = if let Some(event_id) = state.reacting_to.clone() {
+                iced::Task::batch([
+                    task,
+                    visible_bounds(anchor_container_id(&event_id)).map(move |bounds| {
+                        Message::ReactionAnchorProbed { event_id: event_id.clone(), bounds }
+                    }),
+                ])
+            } else {
+                task
+            };
+            (task, effect)
         }
         Message::AnchorProbed { event_id, purpose, generation, bounds } => {
             if generation != state.scroll_generation {
@@ -1271,9 +1352,20 @@ pub fn update(
             (iced::Task::none(), Effect::None)
         }
         Message::PlayVideo { event_id, video, title } => {
+            // A link card starting now wins over an attachment still
+            // downloading: whichever file lands later must not barge in
+            // over the player the user is actually watching.
+            state.loading_video = None;
             (iced::Task::none(), Effect::PlayVideo { event_id, video, title })
         }
-        Message::StopVideo => (iced::Task::none(), Effect::StopVideo),
+        Message::PlayAttachment { event_id, url, filename, mimetype } => {
+            state.loading_video = Some(event_id.clone());
+            (iced::Task::none(), Effect::PlayAttachment { event_id, url, filename, mimetype })
+        }
+        Message::StopVideo => {
+            state.loading_video = None;
+            (iced::Task::none(), Effect::StopVideo)
+        }
         Message::OpenVideoExternally(url) => {
             let _ = open::that(url);
             (iced::Task::none(), Effect::StopVideo)
@@ -1389,6 +1481,7 @@ pub fn view<'a>(
             tweet_previews,
             steam_previews,
             state.inline_video.as_ref(),
+            state.loading_video.as_deref(),
         );
         // Rows with an event id get an addressable wrapper so scroll-anchor
         // probes (`container::visible_bounds`) can measure where a specific
@@ -1530,34 +1623,43 @@ pub fn view<'a>(
         // the motion on a timer, and ends it on the next click/wheel/key.
         .on_middle_press(Message::AutoscrollToggle);
 
-    // Composer emoji/sticker picker: a layer floating over the bottom-right
-    // of the chat, right above the input-row buttons that toggle it — NOT a
-    // row in the composer column, which resized the scrollable and shoved
-    // the whole conversation up whenever it opened. `opaque` so clicks
-    // inside it land on the picker and not the messages underneath;
-    // everywhere else the chat stays live.
-    let composer_picker = crate::theme::slot(state.composer.show_emoji_picker.then(|| {
-        let panel = container(
-            composer::picker_panel(&state.composer, emoji_usage, media, packs, stickers)
-                .map(Message::Composer),
-        )
-        .padding(6)
-        .style(crate::theme::floating_panel);
-        let positioned = container(iced::widget::opaque(panel))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(iced::Right)
-            .align_y(iced::Bottom)
-            .padding(iced::Padding { top: 0.0, right: 14.0, bottom: 6.0, left: 0.0 });
-        // Backdrop dismiss, same shape as the reaction overlay below: a click
-        // anywhere off the (opaque) panel closes the picker; clicks on the
-        // panel are absorbed by its `opaque` wrapper and never reach here, so
-        // picking several emoji in a row keeps it open.
-        iced::widget::opaque(
-            iced::widget::mouse_area(positioned)
-                .on_press(Message::Composer(composer::Message::ClosePicker)),
-        )
-    }));
+    // Composer emoji/sticker picker: a layer floating just above the toggle
+    // buttons that opened it (`composer_picker_anchor_y`, probed live — see
+    // `Message::Composer`'s handler) — NOT a row in the composer column,
+    // which resized the scrollable and shoved the whole conversation up
+    // whenever it opened. `opaque` so clicks inside it land on the picker
+    // and not the messages underneath; everywhere else the chat stays live.
+    let composer_picker = crate::theme::slot(
+        state.composer.show_emoji_picker.then(|| state.composer_picker_anchor_y).flatten().map(
+            |anchor_y| {
+                let panel = container(
+                    composer::picker_panel(&state.composer, emoji_usage, media, packs, stickers)
+                        .map(Message::Composer),
+                )
+                .padding(6)
+                .style(crate::theme::floating_panel);
+                // Tabs row + the picker's fixed 320px scroll box + padding/
+                // border — a measured constant, like `reaction_overlay`'s
+                // own `panel_h` below.
+                let panel_h = 372.0_f32;
+                let top = (anchor_y - 6.0 - panel_h).max(0.0);
+                let positioned = container(iced::widget::opaque(panel))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(iced::Right)
+                    .padding(iced::Padding { top, right: 14.0, bottom: 0.0, left: 0.0 });
+                // Backdrop dismiss, same shape as the reaction overlay below:
+                // a click anywhere off the (opaque) panel closes the picker;
+                // clicks on the panel are absorbed by its `opaque` wrapper
+                // and never reach here, so picking several emoji in a row
+                // keeps it open.
+                iced::widget::opaque(
+                    iced::widget::mouse_area(positioned)
+                        .on_press(Message::Composer(composer::Message::ClosePicker)),
+                )
+            },
+        ),
+    );
 
     // Reaction picker: anchored to the message whose React button opened it
     // (`reaction_anchor_y`, probed at click time) — below the row when there
@@ -1858,7 +1960,11 @@ fn member_panel<'a>(
             .direction(iced::widget::scrollable::Direction::Vertical(
                 iced::widget::scrollable::Scrollbar::new().width(6).scroller_width(6),
             ))
-            .style(crate::theme::thin_scrollbar),
+            .style(crate::theme::thin_scrollbar)
+            // The right-click flyout's anchor is frozen at click time and
+            // has no per-row id to re-measure against on scroll (see
+            // `MemberRosterScrolled`) — closing it is simpler and correct.
+            .on_scroll(|_viewport| Message::MemberRosterScrolled),
     )
     .width(Length::Fixed(200.0))
     .height(Length::Fill)
@@ -1904,7 +2010,8 @@ fn item_matches(item: &TimelineItem, query_lower: &str) -> bool {
         TimelineItemContent::Text(body) | TimelineItemContent::Emote(body) => Some(body.as_str()),
         TimelineItemContent::Image { caption, .. } => caption.as_deref(),
         TimelineItemContent::Sticker { body, .. } => Some(body.as_str()),
-        TimelineItemContent::File { filename, .. } => Some(filename.as_str()),
+        TimelineItemContent::File { filename, .. }
+        | TimelineItemContent::Video { filename, .. } => Some(filename.as_str()),
         TimelineItemContent::MembershipChange(desc) => Some(desc.as_str()),
         TimelineItemContent::Redacted
         | TimelineItemContent::DateDivider(_)
@@ -2002,7 +2109,7 @@ fn header<'a>(
             .padding([4, 8]),
     );
 
-    container(bar).padding([8, 12]).style(crate::theme::panel).into()
+    container(bar).padding([10, 14]).style(crate::theme::panel).into()
 }
 
 /// O(1) roster lookup via the index map maintained next to
@@ -2105,6 +2212,7 @@ fn render_item<'a>(
     tweet_previews: &'a HashMap<String, Option<crate::tweets::TweetData>>,
     steam_previews: &'a HashMap<String, Option<crate::steam::SteamAppData>>,
     inline_video: Option<&'a InlineVideo>,
+    loading_video: Option<&'a str>,
 ) -> Element<'a, Message> {
     if let TimelineItemContent::DateDivider(date) = &item.content {
         // The SDK places date dividers at *local* day boundaries, but the
@@ -2140,11 +2248,12 @@ fn render_item<'a>(
     let sender = item.sender_display_name.as_deref().unwrap_or_else(|| friendly_user_id(&item.sender));
     let is_own = own_user_id.is_some_and(|id| id == item.sender);
     // Grouped follow-up messages keep the avatar column's width so bodies
-    // stay aligned, without repeating the picture.
+    // stay aligned, without repeating the picture. 36px matches Cinny's own
+    // timeline sender avatar (`Avatar size="300"` in its `Message.tsx`).
     let avatar: Element<'a, Message> = if show_header {
-        crate::media_cache::avatar(media, item.sender_avatar_url.as_deref(), sender, 42)
+        crate::media_cache::avatar(media, item.sender_avatar_url.as_deref(), sender, 36)
     } else {
-        iced::widget::Space::new().width(42.0).into()
+        iced::widget::Space::new().width(36.0).into()
     };
 
     let body_line: Element<'a, Message> = match &item.content {
@@ -2224,6 +2333,27 @@ fn render_item<'a>(
         // grouping loop counts a redacted item as this sender's, so a bare
         // stub would leave the sender's next message header-less under the
         // previous author.
+        TimelineItemContent::Video { url, filename, caption, mimetype, thumbnail_url } => {
+            let card = attachment_video_card(
+                item.event_id.as_deref(),
+                url,
+                filename,
+                mimetype.as_deref(),
+                thumbnail_url.as_deref(),
+                media,
+                inline_video.filter(|iv| {
+                    Some(iv.event_id.as_str()) == item.event_id.as_deref()
+                        && iv.video.platform == crate::video_player::Platform::Attachment
+                }),
+                // Both `None` (an echo that hasn't got an event id yet, with
+                // nothing downloading) must not read as a match.
+                loading_video.is_some() && loading_video == item.event_id.as_deref(),
+            );
+            match caption {
+                Some(c) => column![card, remote_text(c.clone()).size(12)].spacing(2).into(),
+                None => card,
+            }
+        }
         TimelineItemContent::Redacted => {
             text("(message removed)").size(14).style(text::secondary).into()
         }
@@ -2430,8 +2560,8 @@ fn render_item<'a>(
             });
             let pill = button(row![visual, count].spacing(4).align_y(iced::Center))
                 .on_press(Message::ReactWithEmoji { event_id: event_id.clone(), key: reaction.key.clone() })
-                .style(crate::theme::ghost_button)
-                .padding([2, 4]);
+                .style(crate::theme::reaction_pill(reaction.reacted_by_me))
+                .padding([2, 6]);
             pills = pills.push(tooltip(
                 pill,
                 container(remote_text(reaction_senders_label(&reaction.senders, members, member_index)).size(12))
@@ -2465,7 +2595,11 @@ fn render_item<'a>(
 
     // Cinny-style floating action bar: only while hovered, overlaid at the
     // message's top-right so nothing shifts, outline glyphs not colored
-    // emoji.
+    // emoji. Cinny itself doesn't tint the row's background on plain hover
+    // either (checked its `Message.tsx`: the row only gets a background —
+    // `selected={!!menuAnchor || !!emojiBoardAnchor}` — while its own
+    // reaction/context menu is open, not on hover) — so this stays a pure
+    // reveal, no row tint.
     let is_hovered = hovered == Some(event_id.as_str());
     let bar_active = is_hovered
         && editing.as_ref().map(|e| e.event_id.as_str()) != Some(event_id.as_str())
@@ -2746,6 +2880,86 @@ fn video_card_frame<'a>(
     .into()
 }
 
+/// The translucent round play button both video cards center on their
+/// stage.
+fn video_play_badge<'a>() -> Element<'a, Message> {
+    container(
+        text(crate::theme::icon::PLAY)
+            .font(crate::theme::ICON_FONT)
+            .size(22)
+            .color(iced::Color::WHITE),
+    )
+    .padding([10, 14])
+    .style(|_theme: &iced::Theme| iced::widget::container::Style {
+        background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.65).into()),
+        border: iced::border::rounded(999),
+        ..iced::widget::container::Style::default()
+    })
+    .into()
+}
+
+/// Card for an `m.video` attachment: the event's own thumbnail (when it
+/// carries one) under a play badge, in the same frame and 448×252 stage a
+/// video *link* gets — a video someone uploaded and a video someone linked
+/// should look and behave the same in the timeline.
+///
+/// Clicking downloads the file first: Matrix media needs an authenticated
+/// request, which the player's webview has no way to make, so there is no
+/// URL to hand it (see `video_player::Platform::Attachment`). The card says
+/// so while that runs, since a long video can take a moment.
+#[allow(clippy::too_many_arguments)]
+fn attachment_video_card<'a>(
+    event_id: Option<&str>,
+    url: &str,
+    filename: &str,
+    mimetype: Option<&str>,
+    thumbnail_url: Option<&'a str>,
+    media: &'a crate::media_cache::State,
+    playing: Option<&'a InlineVideo>,
+    loading: bool,
+) -> Element<'a, Message> {
+    if let Some(inline) = playing {
+        return inline_player_card(inline);
+    }
+
+    let overlay: Element<'a, Message> = if loading {
+        text("Downloading video…").size(12).color(iced::Color::WHITE).into()
+    } else {
+        video_play_badge()
+    };
+    let stage_inner: Element<'a, Message> = match thumbnail_url.and_then(|mxc| {
+        crate::media_cache::mxc_visual(
+            media,
+            mxc,
+            crate::video_player::STAGE_WIDTH as u16,
+            Some(crate::video_player::STAGE_HEIGHT as u16),
+        )
+    }) {
+        Some(thumb) => iced::widget::stack![thumb, iced::widget::center(overlay)].into(),
+        None => iced::widget::center(overlay).into(),
+    };
+    let stage = container(stage_inner)
+        .center_x(Length::Fixed(crate::video_player::STAGE_WIDTH))
+        .center_y(Length::Fixed(crate::video_player::STAGE_HEIGHT))
+        .clip(true)
+        .style(video_stage_style);
+
+    let header = video_card_header(filename.to_string(), Vec::new());
+    let card =
+        video_card_frame(crate::video_player::Platform::Attachment, header, stage.into());
+
+    // No event id (a local echo still uploading) or a download already in
+    // flight: the card is inert rather than re-firing the fetch.
+    let play = event_id.filter(|_| !loading).map(|id| Message::PlayAttachment {
+        event_id: id.to_string(),
+        url: url.to_string(),
+        filename: filename.to_string(),
+        mimetype: mimetype.map(str::to_owned),
+    });
+
+    button(card).on_press_maybe(play).style(crate::theme::ghost_button).padding(0).into()
+}
+
 /// Video-platform link card: OG title over a play badge on the platform's
 /// thumbnail, with a platform-tinted accent strip. Clicking starts the
 /// player *inline*, swapping this for [`inline_player_card`] — which shares
@@ -2769,18 +2983,7 @@ fn embed_video_card<'a>(
     let title = preview.and_then(|p| p.title.clone()).or_else(|| video.file_name());
     let platform = video.platform;
 
-    let play_badge = container(
-        text(crate::theme::icon::PLAY)
-            .font(crate::theme::ICON_FONT)
-            .size(22)
-            .color(iced::Color::WHITE),
-    )
-    .padding([10, 14])
-    .style(|_theme: &iced::Theme| iced::widget::container::Style {
-        background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.65).into()),
-        border: iced::border::rounded(999),
-        ..iced::widget::container::Style::default()
-    });
+    let play_badge = video_play_badge();
 
     // Thumbnail contain-fit into the same 448×252 box the webview fills (the
     // OG image is letterboxed onto the black stage, matching the player).
@@ -2844,10 +3047,17 @@ fn inline_player_card(inline: &InlineVideo) -> Element<'_, Message> {
     );
 
     let stage_content: Element<'_, Message> = if let Some(reason) = &inline.error {
+        // An attachment has no web page to fall back to — its "externally"
+        // is the system's own video player, opening the downloaded file.
+        let fallback = if platform == crate::video_player::Platform::Attachment {
+            "Open in video player"
+        } else {
+            "Watch in browser"
+        };
         column![
             text("The embedded player couldn't start.").size(13).color(iced::Color::WHITE),
             text(reason.clone()).size(11).color(iced::Color::from_rgb8(0xB0, 0xB0, 0xB0)),
-            button(text("Watch in browser").size(12))
+            button(text(fallback).size(12))
                 .on_press(Message::OpenVideoExternally(inline.video.watch_url()))
                 .style(crate::theme::overlay_button)
                 .padding([4, 8]),
@@ -3403,6 +3613,7 @@ fn ui_snippet(content: &TimelineItemContent) -> String {
         },
         TimelineItemContent::Sticker { .. } => "[sticker]".to_string(),
         TimelineItemContent::File { filename, .. } => format!("[file: {filename}]"),
+        TimelineItemContent::Video { filename, .. } => format!("[video: {filename}]"),
         TimelineItemContent::Redacted => "(message removed)".to_string(),
         TimelineItemContent::MembershipChange(desc) => desc.clone(),
         TimelineItemContent::DateDivider(_) | TimelineItemContent::NewMessagesDivider => {

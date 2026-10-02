@@ -148,6 +148,11 @@ pub enum Platform {
     /// as the platforms above; only `embed_url`/`player_url` differ in how
     /// they turn it into something playable.
     File,
+    /// A video *attachment* (`m.video`) — not something the webview could
+    /// load by URL at all, since Matrix media needs an authenticated
+    /// download. The bytes land in the media cache first and are then
+    /// streamed off disk through the wrapper protocol (see [`LocalVideo`]).
+    Attachment,
 }
 
 impl Platform {
@@ -158,7 +163,7 @@ impl Platform {
             Platform::Dailymotion => "Dailymotion",
             Platform::Rumble => "Rumble",
             Platform::Kick => "Kick",
-            Platform::File => "Video",
+            Platform::File | Platform::Attachment => "Video",
         }
     }
 
@@ -172,9 +177,24 @@ impl Platform {
             Platform::Rumble => iced::Color::from_rgb8(0x85, 0xC7, 0x42),
             Platform::Kick => iced::Color::from_rgb8(0x53, 0xFC, 0x18),
             // No brand to match — a neutral gray.
-            Platform::File => iced::Color::from_rgb8(0x8A, 0x8A, 0x8A),
+            Platform::File | Platform::Attachment => iced::Color::from_rgb8(0x8A, 0x8A, 0x8A),
         }
     }
+}
+
+/// The downloaded file behind a `Platform::Attachment` video, plus the
+/// content type to serve it as. The wrapper protocol streams it straight
+/// off disk, range requests and all, so seeking works and no copy of the
+/// video is ever held in memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalVideo {
+    pub path: std::path::PathBuf,
+    /// The sender's declared `info.mimetype` when the event carried one,
+    /// else a guess from the filename. Chromium picks its decoder from
+    /// this, and it can't sniff one from the media cache's own filename —
+    /// cache entries are named after the mxc URL, extension and all
+    /// stripped.
+    pub mime: String,
 }
 
 /// A video reference parsed out of a message-body URL, plus enough to build
@@ -182,8 +202,8 @@ impl Platform {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbedVideo {
     pub platform: Platform,
-    /// Unused (empty) for `Platform::File` — the source URL alone is
-    /// playable, there's no separate video id to track.
+    /// Unused (empty) for `Platform::File`/`Attachment` — the source alone
+    /// is playable, there's no separate video id to track.
     pub id: String,
     pub start_seconds: u32,
     /// Vimeo's unlisted-video privacy hash (`?h=...`); unused elsewhere.
@@ -191,11 +211,29 @@ pub struct EmbedVideo {
     /// The exact URL as it appeared in the message body — used verbatim as
     /// the "watch externally" link. Reconstructing a canonical watch URL
     /// per platform would risk drifting from whatever the platform actually
-    /// wants; the original link is always correct by construction.
+    /// wants; the original link is always correct by construction. A
+    /// `Platform::Attachment` has no such URL: it holds the local path
+    /// instead, which is exactly what "open externally" wants there (the
+    /// system's own video player).
     pub source_url: String,
+    /// `Platform::Attachment` only; `None` for everything that plays from a
+    /// URL.
+    pub local: Option<LocalVideo>,
 }
 
 impl EmbedVideo {
+    /// A downloaded `m.video` attachment, played from disk.
+    pub fn attachment(path: std::path::PathBuf, mime: String) -> Self {
+        Self {
+            platform: Platform::Attachment,
+            id: String::new(),
+            start_seconds: 0,
+            vimeo_hash: None,
+            source_url: path.to_string_lossy().into_owned(),
+            local: Some(LocalVideo { path, mime }),
+        }
+    }
+
     /// The iframe-player URL loaded into the webview.
     pub fn embed_url(&self) -> String {
         match self.platform {
@@ -207,7 +245,15 @@ impl EmbedVideo {
             // `#t=` is a URL fragment, not a query param, and must come
             // last.
             Platform::Vimeo => {
-                let mut url = format!("https://player.vimeo.com/video/{}?autoplay=1", self.id);
+                // `title=0&byline=0&portrait=0` drop the title/author/avatar
+                // overlay chrome; `dnt=1` opts out of Vimeo's tracking
+                // cookies. No official per-icon toggle exists for the
+                // share/"copy link" button short of `controls=0`, which
+                // would remove playback controls entirely — not worth it.
+                let mut url = format!(
+                    "https://player.vimeo.com/video/{}?autoplay=1&title=0&byline=0&portrait=0&dnt=1",
+                    self.id
+                );
                 if let Some(hash) = &self.vimeo_hash {
                     url.push_str(&format!("&h={hash}"));
                 }
@@ -221,8 +267,14 @@ impl EmbedVideo {
             // partner Player ID, unlike the newer "Player Embed Script"
             // product their current docs otherwise push.
             Platform::Dailymotion => {
-                let mut url =
-                    format!("https://geo.dailymotion.com/player.html?video={}&autoplay=1", self.id);
+                // `sharing-enable=false` drops the share/"copy link" button;
+                // `endscreen-enable=false` and `queue-enable=false` drop the
+                // "up next" suggestion grid; `ui-logo=false` is a bonus
+                // branding removal. All confirmed Dailymotion player params.
+                let mut url = format!(
+                    "https://geo.dailymotion.com/player.html?video={}&autoplay=1&sharing-enable=false&endscreen-enable=false&queue-enable=false&ui-logo=false",
+                    self.id
+                );
                 if self.start_seconds > 0 {
                     url.push_str(&format!("&start={}", self.start_seconds));
                 }
@@ -241,6 +293,9 @@ impl EmbedVideo {
             // through the wrapper instead, for consistent styling) but it's
             // kept correct/total here regardless.
             Platform::File => self.source_url.clone(),
+            // Streamed from the wrapper protocol, never from an address of
+            // its own — `player_url` is the only meaningful one here.
+            Platform::Attachment => self.player_url(),
         }
     }
 
@@ -278,6 +333,15 @@ impl EmbedVideo {
             Platform::File => {
                 format!("{WRAPPER_SCHEME}://localhost/video?src={}", percent_encode(&self.source_url))
             }
+            // The same wrapper, except the `<video>` inside it points back
+            // at this protocol's own `/attachment/stream` instead of a
+            // remote URL. The `v=` token is a cache-buster: every player
+            // navigates to the same two paths, and one video must never be
+            // able to answer for the next one out of some response cache
+            // along the way.
+            Platform::Attachment => {
+                format!("{WRAPPER_SCHEME}://localhost/attachment?v={}", self.attachment_token())
+            }
             // The other platforms don't referer-gate their embeds; keep
             // the direct navigation that has always worked for them.
             _ => self.embed_url(),
@@ -291,13 +355,34 @@ impl EmbedVideo {
     pub fn file_name(&self) -> Option<String> {
         (self.platform == Platform::File).then(|| path_file_name(&self.source_url)).flatten().map(str::to_string)
     }
+
+    /// Per-file cache-buster for the attachment wrapper's URLs: an FNV-1a
+    /// hash of the path, which is unique per mxc URL since the media cache
+    /// names its entries after them.
+    fn attachment_token(&self) -> String {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in self.source_url.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{hash:016x}")
+    }
 }
 
 /// The YouTube iframe src — youtube-nocookie.com is YouTube's own
 /// reduced-tracking embed host. autoplay works because the webview is
 /// created with the no-user-gesture autoplay browser flag (see `open`).
+/// `rel=0` restricts end-screen suggestions to the same channel (YouTube
+/// removed the option to disable them entirely in 2018 — this is the
+/// ceiling); `modestbranding=1` and `iv_load_policy=3` trim branding and
+/// annotations; `disablekb=1` defers to the app's own shortcuts;
+/// `playsinline=1` keeps playback inline. Deliberately no `fs=0` — that
+/// would disable the fullscreen button the wrapper page/`subscribe_fullscreen`
+/// machinery exists to support.
 fn youtube_embed_src(id: &str, start_seconds: u32) -> String {
-    let mut url = format!("https://www.youtube-nocookie.com/embed/{id}?autoplay=1&rel=0");
+    let mut url = format!(
+        "https://www.youtube-nocookie.com/embed/{id}?autoplay=1&rel=0&modestbranding=1&iv_load_policy=3&disablekb=1&playsinline=1"
+    );
     if start_seconds > 0 {
         url.push_str(&format!("&start={start_seconds}"));
     }
@@ -310,14 +395,35 @@ fn youtube_embed_src(id: &str, start_seconds: u32) -> String {
 /// origin, which is the whole point (see [`EmbedVideo::player_url`]).
 const WRAPPER_SCHEME: &str = "thornyplayer";
 
+/// Reports the wrapper document's own fullscreen state to the host over the
+/// `window.ipc` bridge wry injects. Exiting fullscreen always ripples a
+/// `fullscreenchange` event up to this top-level document — even though the
+/// element that actually went fullscreen is the nested YouTube iframe (or,
+/// for a direct file, the `<video>` tag) — because the iframe element itself
+/// becomes *this* document's fullscreen element per spec. That makes it a
+/// reliable second signal alongside WebView2's own
+/// `ContainsFullScreenElementChanged` (see `subscribe_fullscreen`), which in
+/// practice fires on entering fullscreen but not always on exit — leaving
+/// the platform's own "exit fullscreen" button looking dead.
+const FULLSCREEN_WATCHER_SCRIPT: &str = r#"<script>document.addEventListener('fullscreenchange',()=>{window.ipc.postMessage(document.fullscreenElement?'fs:1':'fs:0');});</script>"#;
+
 /// Dispatches the wrapper-page custom protocol by path: `/player` is
 /// YouTube's referer-satisfying wrapper, `/video` is the plain `<video>`
-/// wrapper for direct file links.
+/// wrapper for direct file links, and `/attachment[/stream]` is that same
+/// wrapper plus the bytes for a downloaded `m.video` attachment.
+///
+/// `local` is the attachment this player was opened for, captured when the
+/// webview was built (see [`open`]) — the stream path serves that one file
+/// and nothing else, so no page, iframe or embed loaded here can name a
+/// path of its own to read.
 fn wrapper_response(
     request: wry::http::Request<Vec<u8>>,
+    local: Option<&LocalVideo>,
 ) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
     match request.uri().path() {
         "/video" => file_wrapper_page(request),
+        "/attachment" => attachment_wrapper_page(request, local),
+        "/attachment/stream" => attachment_stream(&request, local),
         _ => youtube_wrapper_page(request),
     }
 }
@@ -352,8 +458,10 @@ fn youtube_wrapper_page(
 <style>html,body{{margin:0;height:100%;background:#000;overflow:hidden}}iframe{{display:block;width:100%;height:100%;border:0}}</style>
 </head><body>
 <iframe src="{src}" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" allowfullscreen referrerpolicy="origin"></iframe>
+{watcher}
 </body></html>"#,
         src = youtube_embed_src(&id, start),
+        watcher = FULLSCREEN_WATCHER_SCRIPT,
     );
     html_response(200, html)
 }
@@ -385,10 +493,162 @@ fn file_wrapper_page(
 <style>html,body{{margin:0;height:100%;background:#000;overflow:hidden}}video{{display:block;width:100%;height:100%;object-fit:contain}}</style>
 </head><body>
 <video src="{src}" autoplay controls></video>
+{watcher}
 </body></html>"#,
         src = html_escape(&src),
+        watcher = FULLSCREEN_WATCHER_SCRIPT,
     );
     html_response(200, html)
+}
+
+/// Serves the wrapper page for a downloaded attachment: the same black
+/// full-bleed `<video>` document as [`file_wrapper_page`], pointed at
+/// `/attachment/stream` on this very protocol (same origin, so no CORS
+/// dance) instead of at a remote URL. The `v=` cache-buster is carried
+/// over from the page's own URL so the stream is unique per file too.
+fn attachment_wrapper_page(
+    request: wry::http::Request<Vec<u8>>,
+    local: Option<&LocalVideo>,
+) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
+    if local.is_none() {
+        return html_response(404, "no attachment is playing".into());
+    }
+    let token = query_param(request.uri().query().unwrap_or(""), "v")
+        .filter(|token| valid_id(token, 32))
+        .unwrap_or_default();
+
+    let html = format!(
+        r#"<!doctype html>
+<html><head><meta charset="utf-8">
+<style>html,body{{margin:0;height:100%;background:#000;overflow:hidden}}video{{display:block;width:100%;height:100%;object-fit:contain}}</style>
+</head><body>
+<video src="/attachment/stream?v={token}" autoplay controls></video>
+{watcher}
+</body></html>"#,
+        watcher = FULLSCREEN_WATCHER_SCRIPT,
+    );
+    html_response(200, html)
+}
+
+/// How much of the file one range response may carry. Chromium asks for
+/// "everything from here on" (`bytes=0-`) and is perfectly happy with a
+/// shorter answer, so this caps the handler's peak allocation instead of
+/// materializing a whole feature-length video per request.
+const STREAM_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Streams the playing attachment off disk, honoring `Range` so the
+/// player's scrub bar works (a 200-only response leaves Chromium unable to
+/// seek). Errors return a bare status — the only thing the user can see of
+/// them is a player that doesn't start, which the timeline's playing card
+/// already has an "open externally" fallback for.
+fn attachment_stream(
+    request: &wry::http::Request<Vec<u8>>,
+    local: Option<&LocalVideo>,
+) -> wry::http::Response<std::borrow::Cow<'static, [u8]>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let status_only = |status: u16| {
+        wry::http::Response::builder()
+            .status(status)
+            .body(std::borrow::Cow::Owned(Vec::new()))
+            .expect("static response parts are valid")
+    };
+
+    let Some(local) = local else { return status_only(404) };
+    let (Ok(mut file), Ok(metadata)) =
+        (std::fs::File::open(&local.path), std::fs::metadata(&local.path))
+    else {
+        return status_only(404);
+    };
+    let len = metadata.len();
+
+    let requested = request
+        .headers()
+        .get(wry::http::header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| parse_byte_range(value, len));
+    // A `Range` header we couldn't make sense of is answered per RFC 9110
+    // rather than silently served whole — a player that asked for a slice
+    // must not be handed the file and left to think it got one.
+    let range = match requested {
+        Some(None) => {
+            return wry::http::Response::builder()
+                .status(416)
+                .header(wry::http::header::CONTENT_RANGE, format!("bytes */{len}"))
+                .body(std::borrow::Cow::Owned(Vec::new()))
+                .expect("static response parts are valid");
+        }
+        Some(Some(range)) => Some(range),
+        None => None,
+    };
+
+    let (start, end) = range.unwrap_or((0, len.saturating_sub(1)));
+    let end = end.min(start.saturating_add(STREAM_CHUNK_BYTES - 1));
+    let count = end.saturating_sub(start) + 1;
+
+    let mut body = vec![0u8; count as usize];
+    if file.seek(SeekFrom::Start(start)).is_err() || file.read_exact(&mut body).is_err() {
+        return status_only(500);
+    }
+
+    let mut response = wry::http::Response::builder()
+        .header(wry::http::header::CONTENT_TYPE, local.mime.clone())
+        .header(wry::http::header::ACCEPT_RANGES, "bytes")
+        .header(wry::http::header::CONTENT_LENGTH, count.to_string())
+        // The file lives in the media cache already; a second copy in the
+        // webview's HTTP cache would double every video's disk cost.
+        .header(wry::http::header::CACHE_CONTROL, "no-store");
+    // Partial whenever a range was asked for, and also when the cap above
+    // shortened a full-file response — claiming 200 for part of a file
+    // would truncate playback.
+    if range.is_some() || count < len {
+        response = response
+            .status(206)
+            .header(wry::http::header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}"));
+    }
+    response.body(std::borrow::Cow::Owned(body)).expect("static response parts are valid")
+}
+
+/// Parses a `Range: bytes=…` header against a known length into an
+/// inclusive `(start, end)`. `None` means unsatisfiable or malformed (a 416
+/// for the caller). Only the first range of a multi-range request is
+/// honored — Chromium's media stack never sends one, and answering the
+/// first slice is still a valid response.
+fn parse_byte_range(header: &str, len: u64) -> Option<(u64, u64)> {
+    let spec = header.trim().strip_prefix("bytes=")?.split(',').next()?.trim();
+    let (first, last) = spec.split_once('-')?;
+    let (start, end) = match (first.trim(), last.trim()) {
+        // `bytes=-500`: the *last* 500 bytes, not "up to byte 500".
+        ("", suffix) => {
+            let suffix: u64 = suffix.parse().ok()?;
+            if suffix == 0 {
+                return None;
+            }
+            (len.saturating_sub(suffix), len.checked_sub(1)?)
+        }
+        (first, "") => (first.parse().ok()?, len.checked_sub(1)?),
+        (first, last) => {
+            (first.parse().ok()?, last.parse::<u64>().ok()?.min(len.checked_sub(1)?))
+        }
+    };
+    (start <= end).then_some((start, end))
+}
+
+/// Content type for a video attachment whose event declared none —
+/// guessed from the filename, defaulting to mp4 (overwhelmingly the most
+/// common thing anyone sends). Only what Chromium can actually decode
+/// matters here; a container it can't play fails the same either way.
+pub fn mime_for_video(filename: &str) -> String {
+    let extension = filename.rsplit('.').next().unwrap_or_default().to_ascii_lowercase();
+    match extension.as_str() {
+        "webm" => "video/webm",
+        "ogv" | "ogg" => "video/ogg",
+        "mov" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        "m4v" => "video/x-m4v",
+        _ => "video/mp4",
+    }
+    .to_string()
 }
 
 /// Tries each platform's parser in turn.
@@ -529,7 +789,14 @@ fn parse_timestamp(value: &str) -> Option<u32> {
 }
 
 fn embed_video(platform: Platform, id: String, start_seconds: u32, url: &str) -> EmbedVideo {
-    EmbedVideo { platform, id, start_seconds, vimeo_hash: None, source_url: url.to_string() }
+    EmbedVideo {
+        platform,
+        id,
+        start_seconds,
+        vimeo_hash: None,
+        source_url: url.to_string(),
+        local: None,
+    }
 }
 
 /// Recognizes the common YouTube URL shapes: `watch?v=`, `youtu.be/`,
@@ -586,6 +853,7 @@ fn vimeo_video_in(url: &str) -> Option<EmbedVideo> {
         start_seconds: 0,
         vimeo_hash,
         source_url: url.to_string(),
+        local: None,
     })
 }
 
@@ -876,8 +1144,11 @@ pub fn open(
         // from this protocol — see `player_url` for the whole story.
         // Registered unconditionally (it's inert for the platforms that
         // navigate straight to their embed URL).
-        .with_custom_protocol(WRAPPER_SCHEME.to_string(), |_webview_id, request| {
-            wrapper_response(request)
+        .with_custom_protocol(WRAPPER_SCHEME.to_string(), {
+            // Moved in, so the handler can only ever reach the file this
+            // player was opened for (see `wrapper_response`).
+            let local = video.local.clone();
+            move |_webview_id, request| wrapper_response(request, local.as_ref())
         })
         // The YouTube logo / "Watch on YouTube" (and any target=_blank link
         // inside the player) ask to open a new window. WebView2 denies that
@@ -887,6 +1158,15 @@ pub fn open(
         .with_new_window_req_handler(|url, _features| {
             let _ = open::that(url);
             wry::NewWindowResponse::Deny
+        })
+        // See `FULLSCREEN_WATCHER_SCRIPT` — the wrapper page's own
+        // `fullscreenchange` listener, which catches exits the native
+        // `ContainsFullScreenElementChanged` event (`subscribe_fullscreen`)
+        // sometimes misses.
+        .with_ipc_handler(|request| match request.body().as_str() {
+            "fs:1" => set_fullscreen(true),
+            "fs:0" => set_fullscreen(false),
+            _ => {}
         })
         .with_url(video.player_url());
 
@@ -1081,6 +1361,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn range_header_shapes() {
+        // Inclusive ends, exactly as the header spells them.
+        assert_eq!(parse_byte_range("bytes=0-99", 1000), Some((0, 99)));
+        // Open end: everything left of the file.
+        assert_eq!(parse_byte_range("bytes=500-", 1000), Some((500, 999)));
+        // Suffix form is the LAST n bytes, not "up to byte n".
+        assert_eq!(parse_byte_range("bytes=-200", 1000), Some((800, 999)));
+        // A suffix longer than the file is the whole file, not an error.
+        assert_eq!(parse_byte_range("bytes=-4000", 1000), Some((0, 999)));
+        // An end past the last byte clamps rather than failing.
+        assert_eq!(parse_byte_range("bytes=900-5000", 1000), Some((900, 999)));
+        // Multi-range: the first range answers for the request.
+        assert_eq!(parse_byte_range("bytes=0-9, 20-29", 1000), Some((0, 9)));
+        // Unsatisfiable or malformed — the caller turns these into a 416.
+        assert_eq!(parse_byte_range("bytes=1000-1100", 1000), None);
+        assert_eq!(parse_byte_range("bytes=50-10", 1000), None);
+        assert_eq!(parse_byte_range("bytes=-0", 1000), None);
+        assert_eq!(parse_byte_range("bytes=abc-", 1000), None);
+        assert_eq!(parse_byte_range("items=0-9", 1000), None);
+        // An empty file can satisfy nothing.
+        assert_eq!(parse_byte_range("bytes=0-", 0), None);
+    }
+
+    #[test]
+    fn attachment_plays_from_the_wrapper_protocol() {
+        let video =
+            EmbedVideo::attachment(std::path::PathBuf::from("C:/cache/matrix.org_abc"), "video/mp4".into());
+        let player_url = video.player_url();
+        assert!(
+            player_url.starts_with(&format!("{WRAPPER_SCHEME}://localhost/attachment?v=")),
+            "{player_url}"
+        );
+        // Two different files must not share a player URL (see the
+        // cache-buster in `player_url`).
+        let other =
+            EmbedVideo::attachment(std::path::PathBuf::from("C:/cache/matrix.org_xyz"), "video/mp4".into());
+        assert_ne!(player_url, other.player_url());
+        // "Open externally" hands the local file to the system player.
+        assert_eq!(video.watch_url(), "C:/cache/matrix.org_abc");
+    }
+
+    #[test]
+    fn video_mime_falls_back_to_mp4() {
+        assert_eq!(mime_for_video("clip.webm"), "video/webm");
+        assert_eq!(mime_for_video("CLIP.MOV"), "video/quicktime");
+        assert_eq!(mime_for_video("no-extension"), "video/mp4");
+    }
+
+    #[test]
     fn recognizes_youtube_shapes() {
         for (url, id, start) in [
             ("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ", 0),
@@ -1202,6 +1531,82 @@ mod tests {
         assert_eq!(percent_decode(&encoded).as_deref(), Some(original));
     }
 
+    /// A temp file holding `bytes`, removed on drop — the stand-in for a
+    /// media-cache entry in the streaming tests below.
+    struct TempVideo(std::path::PathBuf);
+
+    impl TempVideo {
+        fn new(tag: &str, bytes: &[u8]) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("thornychat-stream-{tag}-{}", std::process::id()));
+            std::fs::write(&path, bytes).unwrap();
+            Self(path)
+        }
+
+        fn local(&self) -> LocalVideo {
+            LocalVideo { path: self.0.clone(), mime: "video/mp4".into() }
+        }
+    }
+
+    impl Drop for TempVideo {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn stream_request(range: Option<&str>) -> wry::http::Request<Vec<u8>> {
+        let builder = wry::http::Request::builder()
+            .uri(format!("{WRAPPER_SCHEME}://localhost/attachment/stream?v=0123456789abcdef"));
+        let builder = match range {
+            Some(range) => builder.header(wry::http::header::RANGE, range),
+            None => builder,
+        };
+        builder.body(Vec::new()).unwrap()
+    }
+
+    /// The whole plumbing a playing attachment depends on: the wrapper page
+    /// points at the stream path, and the stream path answers with the
+    /// file's bytes — whole, or exactly the slice the player asked for.
+    #[test]
+    fn attachment_stream_serves_the_file_and_its_ranges() {
+        let bytes: Vec<u8> = (0..=255u8).collect();
+        let video = TempVideo::new("ranges", &bytes);
+        let local = video.local();
+
+        let page = wrapper_response(
+            wry::http::Request::builder()
+                .uri(format!("{WRAPPER_SCHEME}://localhost/attachment?v=0123456789abcdef"))
+                .body(Vec::new())
+                .unwrap(),
+            Some(&local),
+        );
+        let html = String::from_utf8(page.body().to_vec()).unwrap();
+        assert!(html.contains(r#"<video src="/attachment/stream?v=0123456789abcdef""#), "{html}");
+
+        // No Range: the whole file, and an advertisement that ranges work.
+        let whole = wrapper_response(stream_request(None), Some(&local));
+        assert_eq!(whole.status(), 200);
+        assert_eq!(whole.body().as_ref(), bytes.as_slice());
+        assert_eq!(whole.headers()[wry::http::header::ACCEPT_RANGES], "bytes");
+        assert_eq!(whole.headers()[wry::http::header::CONTENT_TYPE], "video/mp4");
+        assert_eq!(whole.headers()[wry::http::header::CONTENT_LENGTH], "256");
+
+        // A seek: exactly the requested slice, labelled with where it sits.
+        let slice = wrapper_response(stream_request(Some("bytes=200-209")), Some(&local));
+        assert_eq!(slice.status(), 206);
+        assert_eq!(slice.body().as_ref(), &bytes[200..=209]);
+        assert_eq!(slice.headers()[wry::http::header::CONTENT_RANGE], "bytes 200-209/256");
+
+        // Past the end: 416, not a body the player would take for content.
+        let bad = wrapper_response(stream_request(Some("bytes=900-")), Some(&local));
+        assert_eq!(bad.status(), 416);
+        assert!(bad.body().is_empty());
+
+        // Nothing playing — the handler has no file to hand out at all.
+        let orphan = wrapper_response(stream_request(None), None);
+        assert_eq!(orphan.status(), 404);
+    }
+
     /// Builds a fake custom-protocol request for `file_wrapper_page`, as if
     /// `EmbedVideo::player_url` had encoded `src` for it.
     fn file_wrapper_request(src: &str) -> wry::http::Request<Vec<u8>> {
@@ -1227,7 +1632,7 @@ mod tests {
         let malicious = r#"https://example.com/"><script>alert(1)</script>.mp4"#;
         let response = file_wrapper_page(file_wrapper_request(malicious));
         let body = String::from_utf8(response.body().to_vec()).unwrap();
-        assert!(!body.contains("<script>"));
+        assert!(!body.contains("<script>alert(1)</script>"));
         assert!(body.contains("&lt;script&gt;"));
     }
 }

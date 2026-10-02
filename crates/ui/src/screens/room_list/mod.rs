@@ -45,7 +45,7 @@ pub fn view<'a>(
     calls: &'a crate::screens::call::State,
     media: &'a crate::media_cache::State,
 ) -> Element<'a, Message> {
-    let mut list = column![].spacing(2).padding(8);
+    let mut list = column![].spacing(4).padding(12);
 
     // Space groups first: the space is a container, so it sits *above* the
     // rooms it contains, never next to them. The first space to list a room

@@ -100,6 +100,11 @@ pub enum ClientCommand {
     /// position still advances server-side without telling anyone else.
     MarkRoomRead { room_id: String, public_receipt: bool },
     FetchMedia { mxc_url: String, request_id: RequestId },
+    /// Like `FetchMedia`, but answers with the media cache's *path*
+    /// (`MediaFileReady`) instead of the bytes — what the inline video player
+    /// needs, since it streams the file off disk rather than holding it in
+    /// memory.
+    FetchMediaFile { mxc_url: String, request_id: RequestId },
 
     /// Re-resolve every MSC2545 custom emoji pack this account can use, with
     /// `room_id` as the "currently open room" for the room/space-scoped

@@ -44,6 +44,11 @@ pub struct State {
     /// of the display caches; the value is the filename to suggest there
     /// (`None` = derive a generic image name from the bytes).
     pub download_requests: HashMap<RequestId, Option<String>>,
+    /// In-flight `FetchMediaFile` requests raised by clicking play on a
+    /// video attachment. Those answer with a path rather than bytes, and
+    /// what comes back has to be matched up with the card that asked for it
+    /// — hence the event id and title parked here.
+    pub video_requests: HashMap<RequestId, PendingVideo>,
     /// Super-resolved versions of open lightbox images, keyed by mxc URL. The
     /// widget draws this in preference to `images` once it exists, so a
     /// zoomed-in picture gets sharper. These buffers are large (see
@@ -91,6 +96,17 @@ pub struct State {
     /// Armed between scheduling a flush and it firing, so a burst starts the
     /// coalescing timer exactly once.
     pub flush_scheduled: bool,
+}
+
+/// A video attachment being downloaded so it can be played inline.
+pub struct PendingVideo {
+    /// Message whose card was clicked — the player replaces that card.
+    pub event_id: String,
+    /// The attachment's filename, shown in the player's header row.
+    pub title: String,
+    /// Content type to serve the file as, from the event or guessed from
+    /// the filename (see `video_player::mime_for_video`).
+    pub mime: String,
 }
 
 /// One decoded item parked in [`State::staged`] until the next flush promotes
@@ -281,8 +297,26 @@ pub fn avatar<'a, M: 'a>(
     name: &str,
     size: u16,
 ) -> Element<'a, M> {
-    if let Some(visual) = avatar_url.and_then(|url| mxc_visual(media, url, size, Some(size))) {
-        return visual;
+    // Raster avatars get a real squircle mask via `image::Image::border_radius`
+    // (a plain `mxc_visual` square would otherwise mismatch the initials
+    // fallback below, which uses the same `corner_radius()`). Cinny's own
+    // `Avatar` component defaults to a modest rounded-square radius
+    // everywhere — room list, spaces, timeline senders — never a full circle,
+    // so this matches rather than rounds all the way to a pill. GIF/SVG
+    // avatars fall through to `mxc_visual` unmasked — iced has no rounded-clip
+    // primitive for those widgets, and animated/vector avatars are rare
+    // enough that a square is an acceptable edge case here.
+    if let Some(url) = avatar_url {
+        if let Some(handle) = media.images.get(url) {
+            return image(handle.clone())
+                .width(size as f32)
+                .height(size as f32)
+                .border_radius(crate::theme::corner_radius())
+                .into();
+        }
+        if let Some(visual) = mxc_visual(media, url, size, Some(size)) {
+            return visual;
+        }
     }
     let initial = name
         .chars()
@@ -294,7 +328,7 @@ pub fn avatar<'a, M: 'a>(
         .height(Length::Fixed(size as f32))
         .center_x(Length::Fixed(size as f32))
         .center_y(Length::Fixed(size as f32))
-        .style(crate::theme::pill_badge)
+        .style(crate::theme::avatar_fallback)
         .into()
 }
 

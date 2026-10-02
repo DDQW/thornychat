@@ -592,8 +592,20 @@ fn update_inner(app: &mut App, message: Message) -> Task<Message> {
             // Closing the window is how someone quits this app. Save the frame
             // first: the debounced geometry save may still be pending, and
             // after `exit()` nothing else runs.
+            //
+            // Tear down the native player explicitly, same as the standby
+            // path (`PowerEvent::Suspending`) and every other place that
+            // drops `inline_video` — `iced::exit()` skips the rest of the
+            // Rust drop glue, so a live WebView2 controller would otherwise
+            // never get its Close() call and its helper processes (GPU,
+            // renderer, crashpad) would leak past the app's own exit.
+            let stop_video = if app.timeline.inline_video.take().is_some() {
+                close_native_player()
+            } else {
+                Task::none()
+            };
             let config = app.window_config;
-            Task::future(async move { config.save().await }).then(|()| iced::exit())
+            stop_video.chain(Task::future(async move { config.save().await }).then(|()| iced::exit()))
         }
         Message::Power(event) => match event {
             crate::platform::power::PowerEvent::Suspending => {
@@ -1140,29 +1152,26 @@ fn apply_timeline_effect(app: &mut App, effect: screens::timeline::Effect) -> Ta
             Task::none()
         }
         screens::timeline::Effect::PlayVideo { event_id, video, title } => {
-            app.timeline.inline_video = Some(screens::timeline::InlineVideo {
-                event_id,
-                video,
-                title,
-                error: None,
-                scale: None,
-                live: false,
-                synced: None,
-                misses: 0,
-            });
-            // The webview is created once both the scale factor (fetched
-            // here) and the stage's first bounds probe (fired by the update
-            // wrapper for this very message) have landed. Tear down any
-            // previous player first — one video at a time.
-            Task::batch([
-                close_native_player(),
-                iced::window::latest().then(|maybe_id| match maybe_id {
-                    Some(id) => {
-                        iced::window::scale_factor(id).map(Message::InlineVideoScale)
-                    }
-                    None => Task::none(),
-                }),
-            ])
+            start_inline_video(app, event_id, video, title)
+        }
+        screens::timeline::Effect::PlayAttachment { event_id, url, filename, mimetype } => {
+            // Matrix media needs an authenticated download, which the
+            // player's webview can't do — so the bytes come down here
+            // first and playback starts on `MediaFileReady`. The card
+            // shows the wait (`State::loading_video`, set by the timeline
+            // when it raised this effect).
+            let request_id = Uuid::new_v4();
+            app.media.video_requests.insert(
+                request_id,
+                crate::media_cache::PendingVideo {
+                    event_id,
+                    mime: mimetype
+                        .unwrap_or_else(|| crate::video_player::mime_for_video(&filename)),
+                    title: filename,
+                },
+            );
+            send_cmd(app, ClientCommand::FetchMediaFile { mxc_url: url, request_id });
+            Task::none()
         }
         screens::timeline::Effect::StopVideo => {
             app.timeline.inline_video = None;
@@ -1340,6 +1349,38 @@ fn inline_video_bounds(
             ])
         }
     }
+}
+
+/// Puts a video on this message's card and gets the native player moving.
+/// Shared by the two ways playback starts: a link card's play button
+/// (immediate) and a video attachment's (once its file has downloaded).
+fn start_inline_video(
+    app: &mut App,
+    event_id: String,
+    video: crate::video_player::EmbedVideo,
+    title: Option<String>,
+) -> Task<Message> {
+    app.timeline.inline_video = Some(screens::timeline::InlineVideo {
+        event_id,
+        video,
+        title,
+        error: None,
+        scale: None,
+        live: false,
+        synced: None,
+        misses: 0,
+    });
+    // The webview is created once both the scale factor (fetched here) and
+    // the stage's first bounds probe (fired by the update wrapper for this
+    // very message) have landed. Tear down any previous player first — one
+    // video at a time.
+    Task::batch([
+        close_native_player(),
+        iced::window::latest().then(|maybe_id| match maybe_id {
+            Some(id) => iced::window::scale_factor(id).map(Message::InlineVideoScale),
+            None => Task::none(),
+        }),
+    ])
 }
 
 /// Builds the native webview over the probed stage geometry, on the
@@ -1915,6 +1956,11 @@ fn image_urls_in_timeline(
             let content_url = match &item.content {
                 client_core::events::TimelineItemContent::Image { url, .. }
                 | client_core::events::TimelineItemContent::Sticker { url, .. } => Some(url.as_str()),
+                // The video itself is only downloaded on a play click (it
+                // can be huge); this is its poster frame.
+                client_core::events::TimelineItemContent::Video { thumbnail_url, .. } => {
+                    thumbnail_url.as_deref()
+                }
                 _ => None,
             };
             let reaction_urls =
@@ -2431,6 +2477,8 @@ fn select_room(app: &mut App, room_id: String) -> Task<Message> {
     // An inline video belongs to a message in the room being left — its
     // card is gone from the new timeline, so stop it (the miss-counting
     // fallback would get there too, just slower and with lingering audio).
+    // Same for a download still in flight for a card being left behind.
+    app.timeline.loading_video = None;
     let close_video = if app.timeline.inline_video.take().is_some() {
         close_native_player()
     } else {
@@ -2480,6 +2528,7 @@ fn forget_open_room(app: &mut App, room_id: &str) -> Task<Message> {
     send_cmd(app, ClientCommand::CloseRoom { room_id: room_id.to_string() });
     // Don't let the next launch reopen a room the user just left.
     let clear = clear_last_room(&app.profile);
+    app.timeline.loading_video = None;
     if app.timeline.inline_video.take().is_some() {
         return Task::batch([clear, close_native_player()]);
     }
@@ -3066,7 +3115,30 @@ fn dispatch_client_event(app: &mut App, event: ClientEvent) -> Task<Message> {
                 }
             }
         }
+        ClientEvent::MediaFileReady { request_id, path } => {
+            let Some(pending) = app.media.video_requests.remove(&request_id) else {
+                return Task::none();
+            };
+            // Only still wanted if that card is the one waiting: the user
+            // may have left the room or clicked another video while this
+            // download ran.
+            if app.timeline.loading_video.as_deref() != Some(pending.event_id.as_str()) {
+                return Task::none();
+            }
+            app.timeline.loading_video = None;
+            let video = crate::video_player::EmbedVideo::attachment(path, pending.mime);
+            return start_inline_video(app, pending.event_id, video, Some(pending.title));
+        }
         ClientEvent::MediaFetchFailed { request_id, reason } => {
+            // A video that never arrived: drop the spinner so the card goes
+            // back to being clickable (a retry is one more click).
+            if let Some(pending) = app.media.video_requests.remove(&request_id) {
+                tracing::warn!(reason, "video attachment download failed");
+                if app.timeline.loading_video.as_deref() == Some(pending.event_id.as_str()) {
+                    app.timeline.loading_video = None;
+                }
+                return Task::none();
+            }
             // A download re-fetch that failed: just drop the tracking entry so
             // it doesn't leak; nothing to blacklist (the display copy, if any,
             // is unaffected).

@@ -49,6 +49,11 @@ pub struct State {
     /// view rebuild while an '@word' ends the draft, and lowercasing the
     /// whole roster per frame allocated thousands of Strings in big rooms.
     pub member_candidates_lower: Vec<String>,
+    /// Which row of the mention dropdown Up/Down has highlighted, for Enter/Tab
+    /// to accept. Reset to 0 on every edit — the candidate list is rebuilt from
+    /// scratch off the new query, so a stale index would highlight (or accept)
+    /// the wrong row.
+    pub mention_selected: usize,
     /// Mentions the user has confirmed by clicking an autocomplete
     /// candidate; attached as `m.mentions` on send, then cleared.
     pub mentioned: Vec<(String, String)>,
@@ -313,6 +318,10 @@ pub enum Message {
     /// `m.sticker` (the picker stays open so several can go out in a row).
     StickerPicked { url: String, body: String, width: Option<u32>, height: Option<u32> },
     MentionCandidateClicked(String, String),
+    /// Up/Down while the mention dropdown is showing — moves the keyboard
+    /// highlight (see [`State::mention_selected`]) without touching the draft.
+    MentionSelectNext,
+    MentionSelectPrev,
     PickAttachment,
     /// A file's bytes arrived (dialog pick or clipboard paste) — staged as
     /// a chip above the input, NOT sent; Enter/Send dispatches it.
@@ -416,6 +425,14 @@ pub fn update(
             let revert = state.spell.pending_revert.take();
             state.content.perform(action);
             state.body = state.content.text();
+            if is_edit {
+                // The candidate list is about to be rebuilt off whatever the
+                // new trailing `@word` is — a highlight left over from the
+                // previous query would point at an unrelated row (or past the
+                // end of a now-shorter list).
+                state.mention_selected = 0;
+                prune_stale_mentions(state);
+            }
             let typing = if is_edit {
                 Effect::Typing(!state.body.trim().is_empty())
             } else {
@@ -596,6 +613,21 @@ pub fn update(
             // would pop "Did you mean: Smith", and clicking it would corrupt
             // the mention text). Any later edit recomputes via `Action`.
             state.spell.flagged = None;
+            state.mention_selected = 0;
+            (Task::none(), Effect::None)
+        }
+        Message::MentionSelectNext => {
+            let count = mention_matches(state).len();
+            if count > 0 {
+                state.mention_selected = (state.mention_selected + 1) % count;
+            }
+            (Task::none(), Effect::None)
+        }
+        Message::MentionSelectPrev => {
+            let count = mention_matches(state).len();
+            if count > 0 {
+                state.mention_selected = (state.mention_selected + count - 1) % count;
+            }
             (Task::none(), Effect::None)
         }
         Message::PickAttachment => (Task::none(), Effect::PickAttachment),
@@ -737,6 +769,33 @@ fn active_mention_query(body: &str) -> Option<&str> {
     last_word.strip_prefix('@')
 }
 
+/// The autocomplete candidates for the `@partial` word currently at the end
+/// of the draft — same filter/cap `view` renders, shared so keyboard
+/// navigation and accept (Up/Down/Enter/Tab, see [`compose_key_binding`])
+/// operate on exactly the list the user sees.
+fn mention_matches(state: &State) -> Vec<&RoomMember> {
+    let Some(query) = active_mention_query(&state.body) else {
+        return Vec::new();
+    };
+    let query_lower = query.to_lowercase();
+    state
+        .member_candidates
+        .iter()
+        .zip(state.member_candidates_lower.iter())
+        .filter(|(_, lower)| lower.starts_with(&query_lower))
+        .map(|(member, _)| member)
+        .take(6)
+        .collect()
+}
+
+/// Drops any confirmed mention whose `@DisplayName` text is no longer present
+/// in the draft — e.g. backspaced away or overwritten. `mentioned_user_ids`
+/// on send is read straight from `State::mentioned`, not re-derived from the
+/// body, so without this a deleted mention would still silently ping them.
+fn prune_stale_mentions(state: &mut State) {
+    state.mentioned.retain(|(_, display_name)| state.body.contains(&format!("@{display_name}")));
+}
+
 /// The caret as an absolute byte offset into `State::body`.
 ///
 /// `Content` reports the caret as a line/column pair, but everything the
@@ -796,6 +855,7 @@ fn set_body(state: &mut State, body: String, caret: Option<usize>) {
     let caret = caret.unwrap_or(state.body.len());
     let position = position_at(&state.content, caret);
     state.content.move_to(position);
+    prune_stale_mentions(state);
 }
 
 /// Inserts `text` at the caret, leaving the caret just after it.
@@ -921,11 +981,52 @@ fn send_on_enter(press: KeyPress) -> Option<Binding<Message>> {
     Binding::from_key_press(press)
 }
 
+/// Wraps [`send_on_enter`] with the mention dropdown's keyboard controls,
+/// active only while it's showing: Up/Down move the highlight, Enter/Tab
+/// accept the highlighted candidate instead of sending or inserting a tab.
+/// Without this the dropdown could only ever be driven by a mouse click, and
+/// Enter — the key every other chat client's mention picker accepts on —
+/// would just send the raw `@partial` text with no mention attached.
+fn compose_key_binding(state: &State) -> impl Fn(KeyPress) -> Option<Binding<Message>> + '_ {
+    move |press: KeyPress| {
+        let matches = mention_matches(state);
+        if !matches.is_empty() {
+            use iced::keyboard::key::Named;
+            match press.key {
+                iced::keyboard::Key::Named(Named::ArrowDown) => {
+                    return Some(Binding::Custom(Message::MentionSelectNext));
+                }
+                iced::keyboard::Key::Named(Named::ArrowUp) => {
+                    return Some(Binding::Custom(Message::MentionSelectPrev));
+                }
+                iced::keyboard::Key::Named(Named::Enter | Named::Tab) if !press.modifiers.shift() => {
+                    let pick = &matches[state.mention_selected.min(matches.len() - 1)];
+                    return Some(Binding::Custom(Message::MentionCandidateClicked(
+                        pick.user_id.clone(),
+                        pick.display_name.clone(),
+                    )));
+                }
+                _ => {}
+            }
+        }
+        send_on_enter(press)
+    }
+}
+
 /// Stable widget id for the composer's text input — lets the root dispatcher
 /// refocus it after staging a pasted/picked attachment, so "paste → type a
 /// caption → Enter" flows without an extra click.
 pub fn input_id() -> iced::widget::Id {
     iced::widget::Id::from("composer-input")
+}
+
+/// Stable widget id for the emoji/sticker toggle-button pair — lets the
+/// timeline root probe where they actually sit, so the picker panel can
+/// anchor to them instead of a fixed offset that drifts whenever the
+/// composer's height changes (reply preview, staged attachments, a
+/// multi-line message).
+pub fn picker_toggle_id() -> iced::widget::Id {
+    iced::widget::Id::from("composer-picker-toggle")
 }
 
 /// "412 B" / "3.2 KB" / "8.1 MB" — size tag on a staged-attachment chip.
@@ -979,34 +1080,33 @@ pub fn view<'a>(
         container(banner).padding([4, 8]).style(crate::theme::panel).into()
     }));
 
-    let mention_slot = crate::theme::slot(active_mention_query(&state.body).and_then(|query| {
-        let query_lower = query.to_lowercase();
-        let matches: Vec<&RoomMember> = state
-            .member_candidates
-            .iter()
-            .zip(state.member_candidates_lower.iter())
-            .filter(|(_, lower)| lower.starts_with(&query_lower))
-            .map(|(member, _)| member)
-            .take(6)
-            .collect();
-
-        if matches.is_empty() {
-            return None;
-        }
-        let mut list = column![].spacing(2);
-        for member in matches {
-            list = list.push(
-                button(crate::theme::remote_text(member.display_name.clone()).size(13))
-                    .on_press(Message::MentionCandidateClicked(
-                        member.user_id.clone(),
-                        member.display_name.clone(),
-                    ))
-                    .width(Length::Fill)
-                    .style(button::text),
-            );
-        }
-        Some(container(list).padding(4).into())
-    }));
+    let mention_slot = crate::theme::slot({
+        let matches = mention_matches(state);
+        (!matches.is_empty()).then(|| {
+            // Clamped rather than trusting `mention_selected` outright: it's
+            // only reset to 0 on an edit (see `Message::Action`), so a stale
+            // value can't outlive a shrunk list, but defend anyway.
+            let selected = state.mention_selected.min(matches.len() - 1);
+            let mut list = column![].spacing(2);
+            for (index, member) in matches.into_iter().enumerate() {
+                let style = if index == selected {
+                    crate::theme::selected_ghost_button
+                } else {
+                    button::text
+                };
+                list = list.push(
+                    button(crate::theme::remote_text(member.display_name.clone()).size(13))
+                        .on_press(Message::MentionCandidateClicked(
+                            member.user_id.clone(),
+                            member.display_name.clone(),
+                        ))
+                        .width(Length::Fill)
+                        .style(style),
+                );
+            }
+            container(list).padding(4).into()
+        })
+    });
 
     // Spell-check suggestions for the word just finished. A slot like the
     // rest, so it never reshapes the tree under the input (which would drop
@@ -1112,7 +1212,7 @@ pub fn view<'a>(
             .min_height(input_height(1.0))
             .max_height(input_height(MAX_INPUT_LINES))
             .wrapping(text::Wrapping::Word)
-            .key_binding(send_on_enter)
+            .key_binding(compose_key_binding(state))
             // Always attached — it changes the widget's type, so it can't be
             // added conditionally. Spell check being off just means the set of
             // words to mark is empty (see `SpellState::recompute`).
@@ -1124,26 +1224,38 @@ pub fn view<'a>(
     .on_right_press(Message::OpenContextMenu)
     .into();
 
-    let input_row = row![
-        button(crate::theme::icon_text(crate::theme::icon::ATTACH, 15))
-            .on_press(Message::PickAttachment)
-            .style(crate::theme::ghost_button)
-            .padding(6),
-        input,
-        button(crate::theme::icon_text(crate::theme::icon::REACT, 15))
-            .on_press(Message::ToggleEmojiPicker)
-            .style(crate::theme::ghost_button)
-            .padding(6),
-        button(crate::theme::icon_text(crate::theme::icon::STICKER, 15))
-            .on_press(Message::ToggleStickerPicker)
-            .style(crate::theme::ghost_button)
-            .padding(6),
-        button(crate::theme::icon_text(crate::theme::icon::SEND, 15))
-            .on_press(Message::Send)
-            .padding([6, 12]),
-    ]
-    .spacing(4)
-    .align_y(iced::Center);
+    let input_row = container(
+        row![
+            button(crate::theme::icon_text(crate::theme::icon::ATTACH, 15))
+                .on_press(Message::PickAttachment)
+                .style(crate::theme::ghost_button)
+                .padding(6),
+            input,
+            container(
+                row![
+                    button(crate::theme::icon_text(crate::theme::icon::REACT, 15))
+                        .on_press(Message::ToggleEmojiPicker)
+                        .style(crate::theme::ghost_button)
+                        .padding(6),
+                    button(crate::theme::icon_text(crate::theme::icon::STICKER, 15))
+                        .on_press(Message::ToggleStickerPicker)
+                        .style(crate::theme::ghost_button)
+                        .padding(6),
+                ]
+                .spacing(4),
+            )
+            .id(picker_toggle_id()),
+            button(crate::theme::icon_text(crate::theme::icon::SEND, 15))
+                .on_press(Message::Send)
+                .padding([6, 12]),
+        ]
+        .spacing(4)
+        .align_y(iced::Center),
+    )
+    // One rounded, filled pill for the whole input bar (Cinny-style)
+    // instead of icons floating loose against the window background.
+    .padding(4)
+    .style(crate::theme::composer_bar);
 
     // A thin status line under the input: "X is typing…" on the left, the
     // read-receipt follower avatars ("who's caught up") on the right — the
@@ -1617,5 +1729,157 @@ line2".to_string(), Some(8));
         let _ = update(&mut state, Message::Action(Action::Edit(Edit::Insert(' '))), &ON);
         // Checking is on, so the word is marked — but never rewritten.
         assert_eq!(state.body, "teh ");
+    }
+
+    fn member(user_id: &str, display_name: &str) -> RoomMember {
+        RoomMember {
+            user_id: user_id.to_string(),
+            display_name: display_name.to_string(),
+            avatar_url: None,
+            power_level: 0,
+        }
+    }
+
+    /// A draft-less `State` with `member_candidates`/`member_candidates_lower`
+    /// seeded from `(user_id, display_name)` pairs — everything the mention
+    /// filter needs, built the way the real roster update populates them.
+    fn state_with_members(members: &[(&str, &str)]) -> State {
+        State {
+            member_candidates: members.iter().map(|(id, name)| member(id, name)).collect(),
+            member_candidates_lower: members.iter().map(|(_, name)| name.to_lowercase()).collect(),
+            ..State::default()
+        }
+    }
+
+    /// Types `text` character by character through `update`, the same path
+    /// real keystrokes take (so `body`/`mentioned`/`mention_selected` all get
+    /// the side effects a live edit would).
+    fn type_text(state: &mut State, text: &str) {
+        for c in text.chars() {
+            let _ = update(state, Message::Action(Action::Edit(Edit::Insert(c))), &OFF);
+        }
+    }
+
+    fn key_press(key: iced::keyboard::key::Named, shift: bool) -> KeyPress {
+        let modifiers = if shift {
+            iced::keyboard::Modifiers::SHIFT
+        } else {
+            iced::keyboard::Modifiers::empty()
+        };
+        KeyPress {
+            key: iced::keyboard::Key::Named(key),
+            modified_key: iced::keyboard::Key::Named(key),
+            physical_key: iced::keyboard::key::Physical::Unidentified(
+                iced::keyboard::key::NativeCode::Unidentified,
+            ),
+            modifiers,
+            text: None,
+            status: text_editor::Status::Focused { is_hovered: false },
+        }
+    }
+
+    #[test]
+    fn deleting_a_mention_s_text_drops_it_from_the_pending_list() {
+        // A mention confirmed by clicking a candidate used to stick around in
+        // `State::mentioned` for the rest of the draft, even after its text
+        // was deleted — so it would still silently ping on send.
+        let mut state = state_with_members(&[("@alice:example.org", "Alice")]);
+        type_text(&mut state, "hi @al");
+        let _ = update(
+            &mut state,
+            Message::MentionCandidateClicked("@alice:example.org".to_string(), "Alice".to_string()),
+            &OFF,
+        );
+        assert_eq!(state.body, "hi @Alice ");
+        assert_eq!(state.mentioned, vec![("@alice:example.org".to_string(), "Alice".to_string())]);
+
+        for _ in 0..state.body.len() {
+            let _ = update(&mut state, Message::Action(Action::Edit(Edit::Backspace)), &OFF);
+        }
+        assert!(state.body.is_empty());
+        assert!(state.mentioned.is_empty(), "a deleted mention must not still ping on send");
+    }
+
+    #[test]
+    fn editing_unrelated_text_leaves_a_confirmed_mention_alone() {
+        let mut state = state_with_members(&[("@alice:example.org", "Alice")]);
+        type_text(&mut state, "@al");
+        let _ = update(
+            &mut state,
+            Message::MentionCandidateClicked("@alice:example.org".to_string(), "Alice".to_string()),
+            &OFF,
+        );
+        type_text(&mut state, "hi");
+        assert_eq!(state.body, "@Alice hi");
+        assert_eq!(state.mentioned, vec![("@alice:example.org".to_string(), "Alice".to_string())]);
+    }
+
+    #[test]
+    fn arrow_keys_cycle_and_wrap_the_mention_highlight() {
+        let mut state =
+            state_with_members(&[("@alice:example.org", "Alice"), ("@albert:example.org", "Albert")]);
+        type_text(&mut state, "@al");
+        assert_eq!(state.mention_selected, 0);
+
+        let _ = update(&mut state, Message::MentionSelectNext, &OFF);
+        assert_eq!(state.mention_selected, 1);
+        // Wraps back to the top instead of running off the end of the list.
+        let _ = update(&mut state, Message::MentionSelectNext, &OFF);
+        assert_eq!(state.mention_selected, 0);
+        let _ = update(&mut state, Message::MentionSelectPrev, &OFF);
+        assert_eq!(state.mention_selected, 1);
+    }
+
+    #[test]
+    fn typing_past_a_query_resets_the_highlight() {
+        let mut state =
+            state_with_members(&[("@alice:example.org", "Alice"), ("@albert:example.org", "Albert")]);
+        type_text(&mut state, "@al");
+        let _ = update(&mut state, Message::MentionSelectNext, &OFF);
+        assert_eq!(state.mention_selected, 1);
+
+        // Narrowing the query rebuilds the candidate list — a highlight left
+        // over from the wider list must not silently point at row 1 of a
+        // possibly shorter one.
+        type_text(&mut state, "b");
+        assert_eq!(state.mention_selected, 0);
+    }
+
+    #[test]
+    fn enter_accepts_the_highlighted_mention_instead_of_sending() {
+        // This is the crux of the keyboard-mention bug: with the dropdown
+        // open, Enter used to be hard-bound to Send — completing a mention
+        // was mouse-only, and hitting Enter fired the raw "@partial" text
+        // with no mention attached at all.
+        let mut state =
+            state_with_members(&[("@alice:example.org", "Alice"), ("@albert:example.org", "Albert")]);
+        type_text(&mut state, "@al");
+        let _ = update(&mut state, Message::MentionSelectNext, &OFF); // highlight "Albert"
+
+        let binding = compose_key_binding(&state)(key_press(iced::keyboard::key::Named::Enter, false));
+        match binding {
+            Some(Binding::Custom(Message::MentionCandidateClicked(id, name))) => {
+                assert_eq!(id, "@albert:example.org");
+                assert_eq!(name, "Albert");
+            }
+            other => panic!("expected Enter to accept the highlighted mention, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arrow_down_is_captured_by_the_dropdown_not_the_editor() {
+        let mut state = state_with_members(&[("@alice:example.org", "Alice")]);
+        type_text(&mut state, "@al");
+
+        let binding =
+            compose_key_binding(&state)(key_press(iced::keyboard::key::Named::ArrowDown, false));
+        assert!(matches!(binding, Some(Binding::Custom(Message::MentionSelectNext))));
+    }
+
+    #[test]
+    fn enter_still_sends_when_no_mention_dropdown_is_showing() {
+        let state = State::default();
+        let binding = compose_key_binding(&state)(key_press(iced::keyboard::key::Named::Enter, false));
+        assert!(matches!(binding, Some(Binding::Custom(Message::Send))));
     }
 }

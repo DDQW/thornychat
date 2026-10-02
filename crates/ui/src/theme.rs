@@ -99,7 +99,7 @@ pub fn sync_corner_radius(radius: f32) {
     CORNER_RADIUS_BITS.store(radius.to_bits(), Ordering::Relaxed);
 }
 
-fn corner_radius() -> f32 {
+pub(crate) fn corner_radius() -> f32 {
     f32::from_bits(CORNER_RADIUS_BITS.load(Ordering::Relaxed))
 }
 
@@ -165,6 +165,33 @@ pub fn overlay_button(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// A reaction chip under a message: bordered rather than borderless, and at
+/// a tighter radius than the rest of the app's controls — Cinny's own
+/// `Reaction.css.ts` gives these a real 1px `ContainerLine` border, its
+/// smaller `R300` radius (half of `R400`, the avatar/panel radius), and an
+/// accent-colored border once the viewer has reacted with that emoji too.
+pub fn reaction_pill(reacted_by_me: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let palette = theme.extended_palette();
+        let border_color = if reacted_by_me {
+            palette.primary.base.color
+        } else {
+            palette.background.strong.color
+        };
+        let base = button::Style {
+            text_color: palette.background.base.text,
+            border: iced::Border { color: border_color, width: 1.0, radius: (corner_radius() * 0.5).into() },
+            ..button::Style::default()
+        };
+        match status {
+            button::Status::Hovered | button::Status::Pressed => {
+                button::Style { background: Some(palette.background.weak.color.into()), ..base }
+            }
+            _ => base,
+        }
+    }
+}
+
 /// Like [`ghost_button`] but accent-tinted at rest — for the selected item
 /// in a list (e.g. the open room's row).
 pub fn selected_ghost_button(theme: &Theme, _status: button::Status) -> button::Style {
@@ -177,7 +204,8 @@ pub fn selected_ghost_button(theme: &Theme, _status: button::Status) -> button::
     }
 }
 
-/// Fully-rounded accent badge (unread counts).
+/// Fully-rounded accent badge (unread counts, "Space" tag) — Cinny's `Badge`
+/// component is always `radii="Pill"` regardless of what it labels.
 pub fn pill_badge(theme: &Theme) -> container::Style {
     let palette = theme.extended_palette();
     container::Style {
@@ -188,18 +216,57 @@ pub fn pill_badge(theme: &Theme) -> container::Style {
     }
 }
 
-/// Slightly-recessed panel background (sidebar, header bar, pickers).
+/// The initials fallback shown in place of an avatar image — a modest
+/// squircle, not a circle: Cinny's own `Avatar` component defaults to
+/// `radii="400"` (its 8px token) everywhere it's used (room list, spaces,
+/// timeline sender avatars), never `Round`. Shares `corner_radius()` with
+/// every other rounded surface in the app.
+pub fn avatar_fallback(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(palette.primary.strong.color.into()),
+        text_color: Some(palette.primary.strong.text),
+        border: border::rounded(corner_radius()),
+        ..container::Style::default()
+    }
+}
+
+/// The composer's input bar: filled with the deeper `surface_strong` tone —
+/// Cinny's own editor box (`Editor.css.ts`) fills with its `SurfaceVariant`
+/// tier, ThornyChat's third/deepest elevation step, not the shallower one
+/// `panel()` uses — and left borderless, since Cinny's technical 1px inset
+/// border sits so close in tone to its own fill that it's barely visible in
+/// practice; the fill-vs-page contrast alone reads as a pill.
+pub fn composer_bar(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(palette.background.strong.color.into()),
+        border: border::rounded(corner_radius()),
+        ..container::Style::default()
+    }
+}
+
+/// Slightly-recessed panel background (sidebar, header bar, pickers) —
+/// rounded and thinly bordered, Cinny-style, rather than a bare flat
+/// rectangle. Shares `corner_radius()` with the button styles above so the
+/// Appearance radius slider affects every surface, not just buttons.
 pub fn panel(theme: &Theme) -> container::Style {
     let palette = theme.extended_palette();
     container::Style {
         background: Some(palette.background.weak.color.into()),
+        border: iced::Border {
+            color: palette.background.strong.color.scale_alpha(0.5),
+            width: 1.0,
+            radius: corner_radius().into(),
+        },
         ..container::Style::default()
     }
 }
 
 /// Solid bordered card for layers that float over the timeline (reaction
-/// picker, composer emoji picker) — unlike `panel` it needs a border, since
-/// it sits on top of other content instead of in the layout flow.
+/// picker, composer emoji picker) — unlike `panel` it needs a fully opaque
+/// border, since it sits on top of other content instead of in the layout
+/// flow.
 pub fn floating_panel(theme: &Theme) -> container::Style {
     let palette = theme.extended_palette();
     container::Style {
@@ -207,7 +274,7 @@ pub fn floating_panel(theme: &Theme) -> container::Style {
         border: iced::Border {
             color: palette.background.strong.color,
             width: 1.0,
-            radius: 10.into(),
+            radius: corner_radius().into(),
         },
         ..container::Style::default()
     }

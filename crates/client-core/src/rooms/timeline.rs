@@ -464,6 +464,7 @@ fn summarize_content(content: &SdkTimelineItemContent, sender: &str) -> String {
         TimelineItemContent::Image { caption: None, .. } => "[image]".to_string(),
         TimelineItemContent::Sticker { .. } => "[sticker]".to_string(),
         TimelineItemContent::File { filename, .. } => format!("[file: {filename}]"),
+        TimelineItemContent::Video { filename, .. } => format!("[video: {filename}]"),
         TimelineItemContent::Redacted => "(message removed)".to_string(),
         TimelineItemContent::MembershipChange(desc) => desc,
         TimelineItemContent::DateDivider(_) | TimelineItemContent::NewMessagesDivider => {
@@ -664,6 +665,31 @@ fn convert_message(message: &matrix_sdk_ui::timeline::Message) -> TimelineItemCo
             }
             MediaSource::Encrypted(_) => {
                 TimelineItemContent::Text(format!("[encrypted file: {}]", message.body()))
+            }
+        },
+        // Videos are their own variant rather than a `File`, so the UI can
+        // put a play button on them (the inline webview player, same as a
+        // direct video *link* gets) instead of just a download row.
+        MessageType::Video(video) => match &video.source {
+            MediaSource::Plain(uri) => {
+                let info = video.info.as_deref();
+                TimelineItemContent::Video {
+                    url: uri.to_string(),
+                    // `filename()`, not `body()` — see the `File` arm.
+                    filename: video.filename().to_string(),
+                    caption: video.caption().map(str::to_owned),
+                    mimetype: info.and_then(|info| info.mimetype.clone()),
+                    // Only a plain thumbnail is usable; an encrypted one
+                    // can't ride the `url: String` boundary (see below), and
+                    // a card with no poster frame is a fine fallback.
+                    thumbnail_url: info.and_then(|info| match info.thumbnail_source.as_ref() {
+                        Some(MediaSource::Plain(uri)) => Some(uri.to_string()),
+                        _ => None,
+                    }),
+                }
+            }
+            MediaSource::Encrypted(_) => {
+                TimelineItemContent::Text(format!("[encrypted video: {}]", message.body()))
             }
         },
         // `/me` actions: the body carries only the action text; the UI
