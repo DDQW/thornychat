@@ -1,6 +1,15 @@
-//! The release build script, run as `cargo xtask`. Builds the three release
-//! binaries, each in its own target/ subdirectory so they don't overwrite
-//! each other:
+//! The build script, run as `cargo xtask`.
+//!
+//! ThornyChat is a Tauri app: the Rust shell embeds a built copy of the Svelte
+//! frontend (`frontend/dist`), so every release build starts by building that.
+//!
+//!   cargo xtask                 build the frontend, then the three release variants
+//!   cargo xtask installer       build the frontend, then the NSIS installer (generic CPU)
+//!   cargo xtask frontend        build only the frontend
+//!   cargo xtask bindings        regenerate the TypeScript types from client-core
+//!
+//! The three variants each get their own target/ subdirectory so they don't
+//! overwrite each other:
 //!
 //!   target/x86_64-pc-windows-msvc/release/thornychat.exe   (generic)
 //!   target/znver4/x86_64-pc-windows-msvc/release/thornychat.exe
@@ -16,21 +25,12 @@
 //!
 //! Never ship a znverN (or target-cpu=native) binary to unknown hardware - a
 //! CPU without those instructions dies with an illegal-instruction fault. The
-//! generic build is the one that's safe everywhere.
+//! generic build is the one that's safe everywhere. The CPU level only matters
+//! to matrix-sdk's crypto; the webview does the rest.
 //!
-//! This is the standard release-build approach for ThornyChat - prefer
-//! `cargo xtask` over a bare `cargo build --release` (which produces only the
-//! generic variant).
-//!
-//! It also carries the local dev installer for Win11 toast notifications,
-//! which need an AUMID registration this repo can't get from a bare exe (see
-//! `ui::platform::app_identity`):
-//!
-//!   cargo xtask install-dev [--debug]   register this machine for toasts
-//!   cargo xtask uninstall-dev           undo that
-//!   cargo xtask toast-test [--debug]    fire one toast to prove it works
-//!
-//! Those three only ever *run* an already-built exe - none of them build.
+//! A bare `cargo build --release` is NOT a substitute: without the
+//! `custom-protocol` feature the exe loads the dev server instead of its
+//! embedded frontend. These commands pass it for you.
 
 use std::env;
 use std::fs::OpenOptions;
@@ -46,55 +46,79 @@ fn main() {
 
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        // Bare `cargo xtask` stays the three-variant release build.
-        None => build_all(&root),
-        Some("install-dev") => identity(&root, "--install-dev", &args[1..]),
-        Some("uninstall-dev") => identity(&root, "--uninstall-dev", &args[1..]),
-        Some("toast-test") => identity(&root, "--toast-test", &args[1..]),
+        None => {
+            build_frontend(&root);
+            build_all(&root);
+        }
+        Some("installer") => {
+            build_frontend(&root);
+            installer(&root);
+        }
+        Some("frontend") => build_frontend(&root),
+        Some("bindings") => bindings(&root),
         Some(other) => {
             eprintln!("error: unknown command `{other}`");
             eprintln!();
             eprintln!("usage:");
-            eprintln!("  cargo xtask                        build the three release variants");
-            eprintln!("  cargo xtask install-dev [--debug]  register this build for Win11 toasts");
-            eprintln!("  cargo xtask uninstall-dev          remove that registration");
-            eprintln!("  cargo xtask toast-test [--debug]   fire a test toast");
+            eprintln!("  cargo xtask             build the frontend and the three release variants");
+            eprintln!("  cargo xtask installer   build the frontend and the NSIS installer");
+            eprintln!("  cargo xtask frontend    build only the frontend");
+            eprintln!("  cargo xtask bindings    regenerate frontend/src/lib/bindings from client-core");
             exit(2);
         }
     }
 }
 
-/// Runs one of the app's toast-identity commands against an already-built exe
-/// (see `ui::platform::app_identity`). Deliberately doesn't build anything: it
-/// registers the binary you have, and says so plainly when there isn't one,
-/// rather than kicking off a multi-minute release build as a side effect.
-///
-/// `--debug` targets `target/<triple>/debug/thornychat.exe` instead, for when
-/// the binary you actually run is a `cargo run` build. The registration points
-/// at whichever exe it was run from, so installing from one and then running
-/// the other means re-running install-dev.
-fn identity(root: &Path, flag: &str, rest: &[String]) {
-    let profile = if rest.iter().any(|a| a == "--debug") { "debug" } else { "release" };
-    let exe = root.join("target").join("x86_64-pc-windows-msvc").join(profile).join("thornychat.exe");
-    if !exe.exists() {
-        eprintln!("error: {} not found.", exe.display());
-        eprintln!(
-            "       build it first ({}), then re-run this command.",
-            if profile == "debug" { "cargo build" } else { "cargo xtask" }
-        );
-        exit(1);
-    }
+/// `npm` is a `.cmd` shim on Windows, which `Command` won't find by bare name.
+fn npm() -> Command {
+    Command::new(if cfg!(windows) { "npm.cmd" } else { "npm" })
+}
 
-    // Inheriting stdio is what makes the child's output visible: the release
-    // exe is GUI-subsystem and never gets a console of its own, but it writes
-    // to the handles this console process passes down.
-    let status = Command::new(&exe).arg(flag).status().unwrap_or_else(|e| {
-        eprintln!("error: failed to run {}: {e}", exe.display());
+fn run(label: &str, cmd: &mut Command) {
+    let status = cmd.status().unwrap_or_else(|e| {
+        eprintln!("error: failed to run {label}: {e}");
         exit(1);
     });
     if !status.success() {
-        exit(status.code().unwrap_or(1));
+        eprintln!("error: {label} failed");
+        exit(1);
     }
+}
+
+fn build_frontend(root: &Path) {
+    println!("=== Building the frontend ===");
+    let frontend = root.join("frontend");
+    // A fresh checkout has no node_modules; `ci` installs exactly what the
+    // lockfile says.
+    if !frontend.join("node_modules").exists() {
+        run("npm ci", npm().args(["ci"]).current_dir(&frontend));
+    }
+    run("npm run build", npm().args(["run", "build"]).current_dir(&frontend));
+}
+
+/// Regenerates the TypeScript types the frontend imports. They are written by
+/// ts-rs tests (see `.cargo/config.toml` for the output directory); after a new
+/// type appears, add it to `frontend/src/lib/bindings/index.ts` by hand.
+fn bindings(root: &Path) {
+    println!("=== Regenerating TypeScript bindings ===");
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    run(
+        "cargo test (ts export)",
+        Command::new(cargo).args(["test", "-p", "client-core", "--features", "ts"]).current_dir(root),
+    );
+}
+
+fn installer(root: &Path) {
+    println!("=== Building the installer (generic) ===");
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    run(
+        "cargo tauri build",
+        Command::new(cargo)
+            .args(["tauri", "build", "--bundles", "nsis"])
+            .current_dir(root.join("crates/desktop"))
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_TARGET_DIR"),
+    );
 }
 
 fn build_all(root: &Path) {
@@ -119,8 +143,7 @@ fn build_all(root: &Path) {
         }
     }
 
-    // Generic first: no target-cpu flag, default target dir - identical to
-    // what a plain `cargo build --release` produces.
+    // Generic first: no target-cpu flag, default target dir.
     build("generic (baseline x86-64)", root, None);
     for v in VARIANTS {
         build(v, root, Some(v));
@@ -138,22 +161,14 @@ fn build(label: &str, root: &Path, target_cpu: Option<&str>) {
     println!("=== Building {label} ===");
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut cmd = Command::new(cargo);
-    cmd.args(["build", "--release"])
+    cmd.args(["build", "--release", "-p", "thornychat", "--features", "custom-protocol"])
         .current_dir(root)
         // Scrub inherited env so a RUSTFLAGS/CARGO_TARGET_DIR from the parent
         // shell can't leak into the generic build.
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_TARGET_DIR");
     if let Some(cpu) = target_cpu {
-        cmd.env("RUSTFLAGS", format!("-C target-cpu={cpu}"))
-            .env("CARGO_TARGET_DIR", format!("target/{cpu}"));
+        cmd.env("RUSTFLAGS", format!("-C target-cpu={cpu}")).env("CARGO_TARGET_DIR", format!("target/{cpu}"));
     }
-    let status = cmd.status().unwrap_or_else(|e| {
-        eprintln!("error: failed to spawn cargo: {e}");
-        exit(1);
-    });
-    if !status.success() {
-        eprintln!("error: {label} build failed");
-        exit(1);
-    }
+    run(&format!("{label} build"), &mut cmd);
 }

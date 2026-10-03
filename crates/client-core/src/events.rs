@@ -28,7 +28,9 @@ pub fn friendly_user_id(user_id: &str) -> &str {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(tag = "type", content = "data")]
 pub enum ClientEvent {
     // --- Phase 0: session / sync lifecycle ---
     SyncStateChanged(SyncState),
@@ -175,7 +177,9 @@ pub enum ClientEvent {
     CommandSucceeded { request_id: RequestId },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(tag = "type", content = "data")]
 pub enum SyncState {
     Connecting,
     Syncing,
@@ -183,7 +187,8 @@ pub enum SyncState {
     Error(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct RoomMember {
     pub user_id: String,
     pub display_name: String,
@@ -193,7 +198,8 @@ pub struct RoomMember {
     pub power_level: i64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct RoomSummary {
     pub room_id: String,
     pub name: String,
@@ -210,7 +216,8 @@ pub struct RoomSummary {
 /// One room (or subspace) listed under a space by the space-hierarchy API.
 /// Unlike `RoomSummary` this can describe rooms the account hasn't joined —
 /// that's the point of the space explorer.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SpaceChildSummary {
     pub room_id: String,
     /// `None` when the room publishes no name — display falls back to the
@@ -234,7 +241,8 @@ pub struct SpaceChildSummary {
 
 /// How a space child can be entered, reduced to the cases the explorer UI
 /// distinguishes (the spec's `SpaceRoomJoinRule` is wider).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum SpaceJoinRule {
     /// Anyone can join.
     Public,
@@ -247,7 +255,8 @@ pub enum SpaceJoinRule {
     InviteOnly,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct TimelineItem {
     pub event_id: Option<String>,
     pub sender: String,
@@ -255,6 +264,11 @@ pub struct TimelineItem {
     pub sender_avatar_url: Option<String>,
     pub timestamp_ms: u64,
     pub content: TimelineItemContent,
+    /// The message's `formatted_body` (HTML) after sanitizing per the Matrix
+    /// spec's allowed element/attribute list, for text, emote and notice
+    /// messages that carry one. `None` means render `content`'s plain body.
+    /// The frontend sanitizes again before inserting it into the DOM.
+    pub formatted_body: Option<String>,
     /// Trust indicator for encrypted messages, mirroring `matrix-sdk-ui`'s
     /// `ShieldState` (lax mode — matches what Element shows by default).
     /// `None` means no shield should be shown (unencrypted, local echo, or
@@ -282,7 +296,8 @@ pub struct TimelineItem {
 }
 
 /// See [`TimelineItem::send_failed`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SendFailure {
     /// Recoverable errors (e.g. a timeout) can be retried by simply
     /// re-enabling the room's send queue; unrecoverable ones ("wedged")
@@ -297,7 +312,9 @@ pub struct SendFailure {
 /// are in the UI list's space — the worker has already dropped the SDK's
 /// content-less `TimelineStart` marker and renumbered accordingly). Applied in
 /// order by the UI; see [`ClientEvent::TimelineDiffs`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(tag = "type", content = "data")]
 pub enum TimelineDiff {
     /// Append items at the back.
     Append(Vec<TimelineItem>),
@@ -327,7 +344,8 @@ pub enum TimelineDiff {
 /// `/media/preview_url` endpoint. `image_mxc` is an `mxc://` URI (the
 /// homeserver re-hosts the remote image), fetchable through the normal
 /// media path.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct UrlPreview {
     pub url: String,
     pub title: Option<String>,
@@ -340,7 +358,8 @@ pub struct UrlPreview {
     pub image_height: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ReplyPreview {
     pub event_id: String,
     /// Display name (or user id) of the quoted message's sender; empty when
@@ -355,7 +374,8 @@ pub struct ReplyPreview {
 /// One MSC3949 power-level tag: a named (optionally colored) member group
 /// anchored at a power level. Members belong to the tag at their level,
 /// falling back to the nearest lower defined tag.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct PowerLevelTag {
     pub level: i64,
     pub name: String,
@@ -363,7 +383,8 @@ pub struct PowerLevelTag {
     pub color: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct ReactionGroup {
     /// The raw annotation key: a unicode emoji, or a custom-emoji shortcode
     /// like `:hq_wave:` if that's what the sender's client sent.
@@ -374,13 +395,15 @@ pub struct ReactionGroup {
     pub senders: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct EmojiPack {
     pub name: String,
     pub emojis: Vec<CustomEmoji>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct CustomEmoji {
     pub shortcode: String,
     pub mxc_url: String,
@@ -398,7 +421,8 @@ pub struct CustomEmoji {
 
 /// Signaling-level state of a room's MatrixRTC call (MSC3401 room-scope
 /// `m.call` memberships).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct CallState {
     pub room_id: String,
     /// Everyone with an unexpired call membership, oldest first. A user
@@ -409,13 +433,15 @@ pub struct CallState {
     pub joined: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct CallParticipant {
     pub user_id: String,
     pub device_id: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum NotificationMode {
     AllMessages,
     MentionsAndKeywordsOnly,
@@ -426,19 +452,24 @@ pub enum NotificationMode {
 /// targets. The SDK models this as a 4-way matrix (encrypted x one-to-one),
 /// but the UI only exposes these two buckets — setting either one writes
 /// both the encrypted and unencrypted variant together.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum NotificationScope {
     DirectMessages,
     GroupChats,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(tag = "type", content = "data")]
 pub enum TrustShield {
     Red(String),
     Grey(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(tag = "type", content = "data")]
 pub enum TimelineItemContent {
     Text(String),
     /// An IRC-style action message (`m.emote`, sent via `/me`). Holds only the
@@ -487,7 +518,9 @@ pub enum TimelineItemContent {
     NewMessagesDivider,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(tag = "type", content = "data")]
 pub enum SasState {
     /// Someone else started verifying with us; show an Accept/Decline
     /// prompt naming who.
@@ -505,7 +538,8 @@ pub enum SasState {
     Cancelled { reason: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum RecoveryEnableStage {
     Starting,
     CreatingBackup,
@@ -513,7 +547,8 @@ pub enum RecoveryEnableStage {
     BackingUp,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct NotificationEvent {
     pub room_id: String,
     pub sender: String,
@@ -521,7 +556,8 @@ pub struct NotificationEvent {
     pub body: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct SearchResult {
     pub room_id: String,
     pub event_id: String,
@@ -531,9 +567,109 @@ pub struct SearchResult {
 
 /// One hit from a user-directory search — enough to render a pick-a-person
 /// row and start a DM with them (even someone you share no room with yet).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct UserSearchResult {
     pub user_id: String,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
+}
+
+/// The JSON shape of these types is a contract with the frontend: its
+/// TypeScript types are generated from them (`cargo xtask bindings`), and
+/// `frontend/src/lib/events.ts` switches on `type`. These pin the parts that
+/// are easy to change by accident.
+#[cfg(test)]
+mod wire_format {
+    use super::*;
+    use serde_json::json;
+
+    fn item() -> TimelineItem {
+        TimelineItem {
+            event_id: Some("$e".into()),
+            sender: "@a:b".into(),
+            sender_display_name: None,
+            sender_avatar_url: None,
+            timestamp_ms: 1_700_000_000_000,
+            content: TimelineItemContent::Text("hi".into()),
+            formatted_body: Some("<b>hi</b>".into()),
+            shield: Some(TrustShield::Grey("code".into())),
+            reactions: vec![ReactionGroup {
+                key: "👍".into(),
+                count: 2,
+                reacted_by_me: true,
+                senders: vec!["@a:b".into()],
+            }],
+            thread_root: None,
+            thread_reply_count: None,
+            read_by: vec![],
+            in_reply_to: None,
+            edited: false,
+            send_failed: None,
+        }
+    }
+
+    #[test]
+    fn events_are_adjacently_tagged() {
+        assert_eq!(serde_json::to_value(ClientEvent::LoggedOut).unwrap(), json!({ "type": "LoggedOut" }));
+        assert_eq!(
+            serde_json::to_value(ClientEvent::TypingUpdated { room_id: "!r:s".into(), user_ids: vec!["@a:b".into()] }).unwrap(),
+            json!({ "type": "TypingUpdated", "data": { "room_id": "!r:s", "user_ids": ["@a:b"] } })
+        );
+        assert_eq!(
+            serde_json::to_value(ClientEvent::SyncStateChanged(SyncState::Error("boom".into()))).unwrap(),
+            json!({ "type": "SyncStateChanged", "data": { "type": "Error", "data": "boom" } })
+        );
+    }
+
+    #[test]
+    fn unit_enums_are_plain_strings() {
+        assert_eq!(serde_json::to_value(NotificationMode::MentionsAndKeywordsOnly).unwrap(), json!("MentionsAndKeywordsOnly"));
+        assert_eq!(serde_json::to_value(SpaceJoinRule::Knock).unwrap(), json!("Knock"));
+        assert_eq!(serde_json::to_value(RecoveryEnableStage::CreatingBackup).unwrap(), json!("CreatingBackup"));
+    }
+
+    #[test]
+    fn pairs_serialize_as_arrays() {
+        let event = ClientEvent::RoomNotificationModesUpdated(vec![("!r:s".into(), NotificationMode::Mute)]);
+        assert_eq!(serde_json::to_value(event).unwrap(), json!({ "type": "RoomNotificationModesUpdated", "data": [["!r:s", "Mute"]] }));
+        let sas = ClientEvent::VerificationStateChanged(SasState::EmojisReady(vec![("🐶".into(), "Dog".into())]));
+        assert_eq!(
+            serde_json::to_value(sas).unwrap(),
+            json!({ "type": "VerificationStateChanged", "data": { "type": "EmojisReady", "data": [["🐶", "Dog"]] } })
+        );
+    }
+
+    #[test]
+    fn timeline_diffs_carry_whole_items() {
+        let diff = TimelineDiff::Insert { index: 3, item: item() };
+        let value = serde_json::to_value(ClientEvent::TimelineDiffs { room_id: "!r:s".into(), diffs: vec![diff, TimelineDiff::PopBack] }).unwrap();
+        assert_eq!(value["type"], "TimelineDiffs");
+        let diffs = &value["data"]["diffs"];
+        assert_eq!(diffs[0]["type"], "Insert");
+        assert_eq!(diffs[0]["data"]["index"], 3);
+        assert_eq!(diffs[1], json!({ "type": "PopBack" }));
+
+        let shown = &diffs[0]["data"]["item"];
+        // Every field the page reads is present under its Rust name, including the
+        // ones that are null, and 64-bit numbers stay JSON numbers.
+        assert_eq!(shown["timestamp_ms"], 1_700_000_000_000_u64);
+        assert_eq!(shown["formatted_body"], "<b>hi</b>");
+        assert_eq!(shown["content"], json!({ "type": "Text", "data": "hi" }));
+        assert_eq!(shown["shield"], json!({ "type": "Grey", "data": "code" }));
+        assert_eq!(shown["reactions"][0]["count"], 2);
+        for field in ["sender_display_name", "sender_avatar_url", "thread_root", "thread_reply_count", "in_reply_to", "send_failed"] {
+            assert!(shown.get(field).is_some_and(serde_json::Value::is_null), "{field} should be present and null");
+        }
+    }
+
+    #[test]
+    fn media_content_variants_keep_their_dimensions() {
+        let image = TimelineItemContent::Image { url: "mxc://a/b".into(), caption: None, width: Some(640), height: None };
+        assert_eq!(
+            serde_json::to_value(image).unwrap(),
+            json!({ "type": "Image", "data": { "url": "mxc://a/b", "caption": null, "width": 640, "height": null } })
+        );
+        assert_eq!(serde_json::to_value(TimelineItemContent::NewMessagesDivider).unwrap(), json!({ "type": "NewMessagesDivider" }));
+    }
 }

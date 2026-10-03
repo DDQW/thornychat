@@ -1,20 +1,53 @@
-# ThornyChat (Matrix client, Rust + iced) — Remaining Work
+# ThornyChat (Matrix client, Rust + Tauri) — Remaining Work
 
-Windows-first Matrix client at `C:\Users\Office\thornychat`. Workspace: `client-core`
-(matrix-sdk 0.18 wrapper, no iced), `ui` (iced 0.14 views, no matrix-sdk types),
-`app` (binary), `xtask` (release builds). Tested against a real account on a
-private Synapse homeserver (SSO login). Release builds: `cargo xtask` → generic +
-znver4 + znver5 `thornychat.exe` variants, each in its own `target/`
-subdirectory (a bare `cargo build --release` yields only the generic one —
-see README "Building").
+Windows-first Matrix client. Workspace: `client-core` (matrix-sdk 0.19 wrapper,
+no UI), `desktop` (the Tauri 2 shell: bridge, media protocol, settings,
+connectors), `frontend` (Svelte 5 + TypeScript UI) and `xtask` (release
+builds). Tested against a real account on a private Synapse homeserver (SSO
+login). Release builds: `cargo xtask` → frontend build, then generic + znver4 +
+znver5 `thornychat.exe` variants, each in its own `target/` subdirectory (see
+README "Building").
+
+## Migration from iced (2026-10)
+
+The UI moved from iced to Tauri + Svelte (plan and rationale:
+`docs/tauri-migration.md`; the last iced build is the `iced-final` tag). Everything
+under "Done" below was ported, with these differences and open items.
+
+**Verified for real** (the built exe, driven over the DevTools protocol): startup
+and the login screen, settings carried over from the existing config files, the IPC
+commands, the `tcmedia` media routes and their refusals, the CSP, navigation
+blocking, homeserver discovery against a live server.
+
+**Not yet verified, because it needs a signed-in account** — treat these as the
+first things to try on a real session: sync and the room list, the timeline against
+real events (the UI was exercised against a mock worker), Matrix media over
+`tcmedia`, attachment upload, SSO, key backup / verification, and the YouTube
+embed (the page is served from `https://tauri.localhost` specifically to satisfy
+its referer check; not exercised against YouTube itself).
+
+**Behaviour that changed**
+- Spelling: the Windows-speller suggestion bar and opt-in autocorrect are gone.
+  WebView2 underlines typos itself and offers suggestions on right-click; whether
+  it picks up the Windows dictionaries on this machine is unchecked. The stored
+  `autocorrect` flag is kept but nothing reads it.
+- The lightbox no longer Lanczos-upscales past ~300% (the browser's own scaling).
+- Window geometry now comes from `tauri-plugin-window-state`; the old
+  `window.json` (incl. its GPU preferences, which no longer apply) is ignored.
+- `cargo xtask install-dev` / `toast-test` are gone: the NSIS installer
+  (`cargo xtask installer`) writes the Start Menu shortcut Windows needs.
+- The font family and UI scale apply live now, not on next launch.
+
+**Dropped as unnecessary** (they only existed to work around iced/wgpu): the render
+watchdog, the standby window-close dance, the synthetic-input shim, the GIF decoder,
+the WebView2 child-window video player, the Win32 clipboard probe.
 
 ## Done (core client)
 
 - Auth & session: password + browser-SSO login w/ server discovery; session
   restore via Windows Credential Manager; logout w/ confirm (Settings →
-  General); sliding-sync worker bridged to iced, timeline updates streamed
-  as incremental diffs (unit-tested) w/ media placeholders coalesced to keep
-  startup reflow down.
+  General); sliding-sync worker bridged to the page over a Tauri channel,
+  timeline updates streamed as incremental diffs (unit-tested on both sides).
 - Rooms: room list (DM/room sections, filter, unread badges, computed display
   names, avatars); spaces sidebar section w/ joined rooms nested under their
   parent space; space-explorer overlay (hierarchy API, drill-down w/ back
@@ -107,44 +140,40 @@ Remaining:
 
 ## Phase 7 — Windows platform polish & packaging
 
-Done: autostart (HKCU Run + `--minimized`, toggled from Settings); icon +
-version resource embedded via `app.rc`/`embed-resource`; window
-size/position/maximized remembered across launches. (System accent color
-via `UISettings` was considered and dropped — the theming engine's custom
-accents cover it.) Toast identity settled (`platform/app_identity.rs`):
-AUMID `Woelki.ThornyChat` + toast-activator CLSID, registered on a dev
-machine by `cargo xtask install-dev` (Start Menu shortcut + two HKCU keys,
-no MSIX/signing), verifiable with `cargo xtask toast-test`; basic
-title/body toasts go out through `platform::notifications::show`.
+Done: autostart (HKCU Run + `--minimized`, toggled from Settings); app icon and
+version resource (Tauri's bundler); window size/position/maximized remembered
+across launches; tray icon (click to raise the window, Show/Quit menu; closing the
+window still quits); single instance per profile (a second launch of the default
+profile raises the first; other profiles run side by side); a per-user NSIS
+installer (`cargo xtask installer`) whose Start Menu shortcut carries the app
+identity `Woelki.ThornyChat` that Windows uses to attribute toasts. Exit now gives
+the sync worker two seconds to leave any call it is in before the process goes.
 
 Remaining:
 - Push-rule evaluation → `ClientEvent::Notification` (client-core `push.rs`
-  still only reads/writes notification *settings*; the Notification event
-  is never emitted) — nothing calls `notifications::show` until this lands.
-- Toast actions (buttons, inline reply): needs an
-  `INotificationActivationCallback` COM server on the already-registered
-  activator CLSID. Until it exists the app answers a toast click's
-  `-ToastActivated` launch by exiting.
-- Tray icon w/ unread badge, minimize-to-tray, single-instance enforcement
-  (`platform/tray.rs` is a stub).
-- MSIX packaging (primary) + NSIS/WiX installer fallback. Whichever ships
-  must write the same AUMID and activator CLSID as `install-dev`, or every
-  pinned taskbar entry and per-app notification setting starts over.
+  still only reads/writes notification *settings*; the Notification event is never
+  emitted). The shell already turns one into a toast when the window isn't
+  focused, so nothing else is needed on this side once it lands.
+- Toast actions (buttons, inline reply) and click-to-open-room: not wired; a
+  toast click just brings the app forward.
+- Tray unread badge.
+- Updater: no decision yet (`tauri-plugin-updater` needs signing keys).
+- Code signing: the installer is unsigned, so SmartScreen will warn.
 
 ## Backlog / known gaps (roughly by value)
 
 - Threads: only reply-count badges; no thread panel view.
 - Encrypted-room media: images/files/stickers degrade to text placeholder
   (`MediaSource::Encrypted` unsupported in the media cache path).
-- HTML `formatted_body` not rendered (plain body only): no mention pills,
-  colored text, spoilers, code blocks from other clients.
 - Polls render as placeholders.
 - Server-side `/search` (local filter + user-directory DM search only).
-- Animated WebP/APNG emotes render as stills (`animated_image` is GIF-only).
-- Timeline virtualization (diffs stream now, but every row still renders;
-  watch big rooms + many GIFs).
-- Round avatar clipping (iced can't clip images; would need CPU pre-rounding).
-- Jump-to-quote scroll is index-estimated, not pixel-exact.
+- Timeline virtualization: the live list is capped at 200 items (the window is
+  reopened when it grows past that) but every loaded row is a real DOM node.
+  If big rooms with many animated images get heavy, try `virtua` (the plan's
+  first candidate) before anything bespoke.
+- Push-rule notifications also need the Tauri-side toast to be checked on a
+  real install: `tauri-plugin-notification` attributes toasts through the
+  installer's shortcut.
 - Connectors: "now playing" media source (Windows media-transport API) to
   sit beside game detection.
 - Repo hygiene: CI runs check/clippy/test, but the planned wiremock-based
@@ -163,19 +192,19 @@ Remaining:
 - Custom state events (emoji packs, power tags) must be fetched via
   `client.send(get_state_events_for_key)` — sliding sync's required_state
   never includes them; same pattern for any future MSC state.
-- Server-authored strings must render through `theme::remote_text` (Advanced
-  shaping + bundled Noto CJK fallback) — iced's default Basic shaping never
-  falls back, so plain `text()` on remote content shows tofu for CJK.
-- iced gotchas learned: widget state is positional (use `theme::slot` for
-  conditional elements near inputs), no `Length::Fill` inside vertical
-  scrollables, overlays via always-present `stack!`, container::visible_bounds
-  for viewport probing, `anchor_bottom()` for chat scroll semantics;
-  `Task::perform`'s mapper is `FnOnce` since iced 0.14.
-- Native child windows (WebView2/wry, see `ui/src/video_player.rs`): the
-  webview is not `Send` and needs the thread that pumps the parent HWND's
-  messages — do ALL create/set_bounds/close inside
-  `iced::window::run_with_handle` closures (they run on the winit event-loop
-  thread) against a thread_local. A child HWND always composites above the
-  wgpu surface, so overlays must be screen-fixed (lightbox), not scrolling
-  inline; `video_rect()` is the single geometry source for both the iced
-  frame and the native bounds.
+- UI work without a homeserver: `npm --prefix frontend run dev` and open
+  http://localhost:1420 — outside Tauri the page runs against `frontend/src/lib/mock.ts`.
+  A real-app check that needs no account: build with
+  `cargo build -p thornychat --features custom-protocol`, start the exe with a
+  throwaway profile name and `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333`,
+  then drive it over the DevTools protocol.
+- Server-authored strings are untrusted markup: they reach the page only as
+  escaped text or through `sanitizeFormattedBody` (Rust sanitizes first, the page
+  again), and the CSP forbids remote images, connections and inline script. Keep
+  it that way — the webview has IPC access.
+- A mock-driven pane that isn't being painted delivers no `ResizeObserver`
+  callbacks or scroll events, so layout behaviour (stick-to-bottom, history
+  anchoring) can only be checked with a frame forced between steps.
+- The timeline turns browser scroll anchoring off on purpose (`overflow-anchor:
+  none`): it does nothing at scrollTop 0, which is exactly where someone who just
+  hit the top of history is. Prepending compensates for the added height itself.

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ThornyChat",
+  "identifier": "Woelki.ThornyChat",
+  "build": {
+    "frontendDist": "../../frontend/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm --prefix ../frontend run dev",
+    "beforeBuildCommand": "npm --prefix ../frontend run build"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [],
+    "security": {
+      "freezePrototype": true,
+      "csp": {
+        "default-src": "'none'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "font-src": "'self' data:",
+        "img-src": "'self' data: blob: tcmedia: http://tcmedia.localhost https://tcmedia.localhost",
+        "media-src": "'self' blob: tcmedia: http://tcmedia.localhost https://tcmedia.localhost https:",
+        "connect-src": "ipc: http://ipc.localhost https://ipc.localhost",
+        "frame-src": "https://www.youtube-nocookie.com https://player.vimeo.com https://geo.dailymotion.com https://rumble.com https://player.kick.com",
+        "object-src": "'none'",
+        "base-uri": "'none'",
+        "form-action": "'none'"
+      },
+      "dangerousDisableAssetCspModification": false
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "category": "SocialNetworking",
+    "shortDescription": "A Windows-first Matrix client",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper" },
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}

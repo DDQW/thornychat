@@ -4,3 +4,11 @@ target = "x86_64-pc-windows-msvc"
 [alias]
 # The three-variant release build (generic + znver4 + znver5), see crates/xtask.
 xtask = "run -p xtask --"
+
+[env]
+# Where `cargo test -p client-core --features ts export_bindings` writes the
+# TypeScript types for the command/event protocol (relative to the workspace
+# root). JSON numbers are never bigint on the JS side, so 64-bit integers are
+# exported as `number`.
+TS_RS_EXPORT_DIR = { value = "frontend/src/lib/bindings", relative = true }
+TS_RS_LARGE_INT = "number"

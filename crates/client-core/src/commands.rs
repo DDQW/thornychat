@@ -20,7 +20,9 @@ use uuid::Uuid;
 
 pub type RequestId = Uuid;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[serde(tag = "type", content = "data")]
 pub enum ClientCommand {
     // --- Phase 0: session / sync lifecycle ---
     Logout,
@@ -135,8 +137,16 @@ pub enum ClientCommand {
     VerificationCancel,
 
     // --- Phase 3: key backup / recovery ---
-    EnableRecovery { passphrase: Option<zeroize::Zeroizing<String>>, request_id: RequestId },
-    RestoreFromBackup { recovery_key: zeroize::Zeroizing<String>, request_id: RequestId },
+    EnableRecovery {
+        #[cfg_attr(feature = "ts", ts(type = "string | null"))]
+        passphrase: Option<zeroize::Zeroizing<String>>,
+        request_id: RequestId,
+    },
+    RestoreFromBackup {
+        #[cfg_attr(feature = "ts", ts(type = "string"))]
+        recovery_key: zeroize::Zeroizing<String>,
+        request_id: RequestId,
+    },
 
     /// Open (or create) a direct-message room with the user; answered by
     /// `ClientEvent::DirectMessageReady`. `encrypted` chooses whether a

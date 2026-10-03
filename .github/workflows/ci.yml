@@ -1,5 +1,6 @@
-# Runs on windows-latest only: ui/client-core pull in Windows-only
-# dependencies (ISpellChecker, WebView2, winreg), so no other OS compiles.
+# Runs on windows-latest only: client-core and the desktop shell pull in
+# Windows-only dependencies (the registry and process snapshot for the game
+# connectors, WebView2), so no other OS compiles.
 name: CI
 
 on:
@@ -15,6 +16,20 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      # The frontend comes first: the Rust shell embeds frontend/dist at compile
+      # time, so even `cargo check` needs it to exist.
+      - name: Frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run check
+          npm test
+          npm run build
       # Installs the toolchain pinned by rust-toolchain.toml (incl. clippy).
       - name: Install pinned toolchain
         run: rustup toolchain install
@@ -25,3 +40,11 @@ jobs:
       # from-clean run is the authoritative one).
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      # The TypeScript protocol types are generated from client-core and
+      # committed. If they drifted, someone changed a command or event without
+      # running `cargo xtask bindings`.
+      - name: Protocol bindings are up to date
+        run: |
+          cargo test -p client-core --features ts --locked
+          $changes = git status --porcelain -- frontend/src/lib/bindings
+          if ($changes) { Write-Output $changes; Write-Error 'Bindings are stale: run cargo xtask bindings and commit.'; exit 1 }

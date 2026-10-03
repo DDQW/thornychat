@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "What the ThornyChat page may do. Everything beyond this goes through the app's own commands, which validate their input.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

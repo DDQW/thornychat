@@ -1,0 +1,414 @@
+/* A CJK-complete fallback, for Windows images that ship without CJK system
+   fonts (Server Core, some IoT/LTSC/N editions) where server-authored text
+   would otherwise render as empty boxes. `local()` sources are tried first, so
+   a machine with its own CJK font keeps using that and never loads this file.
+   Noto Sans CJK is SIL OFL 1.1; the licence sits next to the font. */
+@font-face {
+  font-family: 'ThornyChat CJK Fallback';
+  font-display: swap;
+  src:
+    local('Microsoft YaHei UI'),
+    local('Microsoft YaHei'),
+    local('Yu Gothic UI'),
+    local('Malgun Gothic'),
+    local('Microsoft JhengHei UI'),
+    url('/fonts/NotoSansCJKsc-Regular.otf') format('opentype');
+  unicode-range: U+2E80-2FDF, U+3000-30FF, U+3100-312F, U+3190-31FF, U+3400-4DBF, U+4E00-9FFF, U+AC00-D7AF, U+F900-FAFF, U+FE30-FE4F, U+FF00-FFEF;
+}
+
+/* Design tokens come from the persisted theme (see src/lib/theme.ts), which sets
+   the colour variables on :root at runtime. The values here are the dark
+   theme's, so the first paint is right before settings arrive. */
+:root {
+  --bg: #1a1a1a;
+  --surface: #262626;
+  --surface-strong: #333333;
+  --text: #f2f2f2;
+  --muted: #999999;
+  --accent: #bdb6ec;
+  --accent-text: #2c2843;
+  --success: #85e0ba;
+  --danger: #e69d9d;
+  --emote: #c9a9e0;
+  --accent-wash: rgb(189 182 236 / 0.16);
+  --danger-wash: rgb(230 157 157 / 0.16);
+  --hover: rgb(242 242 242 / 0.07);
+  --border: rgb(242 242 242 / 0.12);
+  --radius: 10px;
+  --radius-sm: 6px;
+  --name-sat: 62%;
+  --name-light: 72%;
+  --font: system-ui, 'Segoe UI Variable', 'Segoe UI', 'ThornyChat CJK Fallback', sans-serif;
+  --sidebar-width: 280px;
+  --members-width: 240px;
+  --header-height: 52px;
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 var(--font);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: var(--accent);
+}
+
+::selection {
+  background: var(--accent-wash);
+}
+
+/* Scrollbars that match the surfaces instead of the OS default. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--surface-strong) transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* --- buttons --- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-strong);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--surface-strong), var(--text) 8%);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.btn.primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--accent-text);
+  font-weight: 600;
+}
+.btn.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent), white 12%);
+}
+.btn.ghost {
+  background: transparent;
+  border-color: transparent;
+}
+.btn.ghost:hover:not(:disabled) {
+  background: var(--hover);
+}
+.btn.danger {
+  background: var(--danger-wash);
+  border-color: transparent;
+  color: var(--danger);
+}
+.btn.small {
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+}
+.icon-btn:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+.icon-btn.active {
+  background: var(--accent-wash);
+  color: var(--accent);
+}
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* --- inputs --- */
+.input,
+.textarea,
+.select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  outline: none;
+}
+.input:focus,
+.textarea:focus,
+.select:focus {
+  border-color: var(--accent);
+}
+.input::placeholder,
+.textarea::placeholder {
+  color: var(--muted);
+}
+
+.field {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.field > label,
+.field > .label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* --- layout helpers --- */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.grow {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.muted {
+  color: var(--muted);
+}
+.small {
+  font-size: 12px;
+}
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+/* --- overlays --- */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 0.55);
+}
+.dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 100%);
+  max-height: 100%;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--surface);
+  box-shadow: 0 20px 60px rgb(0 0 0 / 0.45);
+  overflow: hidden;
+}
+.dialog > header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+.dialog > .body {
+  padding: 16px;
+  overflow-y: auto;
+}
+.dialog > footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.menu {
+  position: fixed;
+  z-index: 80;
+  min-width: 180px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-strong);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 0.4);
+}
+.menu button {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  text-align: left;
+}
+.menu button:hover:not(:disabled) {
+  background: var(--hover);
+}
+.menu button.danger {
+  color: var(--danger);
+}
+.menu button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.menu hr {
+  margin: 4px 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+.badge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 11px;
+  font-weight: 700;
+}
+.badge.muted-badge {
+  background: var(--surface-strong);
+  color: var(--muted);
+}
+
+.card {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.error-text {
+  color: var(--danger);
+}
+
+.spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Settings rows: a title + explanation on the left, the control on the right. */
+.setting {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 0;
+}
+.setting .what {
+  flex: 1 1 auto;
+}
+.setting .what .hint {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* A toggle switch. */
+.switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 38px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 11px;
+  background: var(--surface-strong);
+  transition: background 0.12s;
+}
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform 0.12s, background 0.12s;
+}
+.switch[aria-checked='true'] {
+  background: var(--accent);
+}
+.switch[aria-checked='true']::after {
+  transform: translateX(16px);
+  background: var(--accent-text);
+}
+
+/* Per-user name colours: the hue comes from the user id, the rest from the theme. */
+.name {
+  color: hsl(var(--hue, 0) var(--name-sat) var(--name-light));
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

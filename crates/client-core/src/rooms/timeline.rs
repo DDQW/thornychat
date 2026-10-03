@@ -349,6 +349,8 @@ fn convert_item(item: &SdkTimelineItem, own_user_id: Option<&UserId>) -> Option<
                 sender_display_name.as_deref(),
             );
 
+            let formatted_body = formatted_body_of(event.content());
+
             Some(TimelineItem {
                 event_id: event.event_id().map(|id| id.to_string()),
                 sender: event.sender().to_string(),
@@ -356,6 +358,7 @@ fn convert_item(item: &SdkTimelineItem, own_user_id: Option<&UserId>) -> Option<
                 sender_avatar_url,
                 timestamp_ms: u64::from(event.timestamp().get()),
                 content,
+                formatted_body,
                 // Lax mode matches what Element shows by default (doesn't
                 // nag about every never-verified sender, still flags real
                 // problems like a verification violation or sent-in-clear).
@@ -392,6 +395,7 @@ fn virtual_item(content: TimelineItemContent, timestamp_ms: u64) -> TimelineItem
         sender_avatar_url: None,
         timestamp_ms,
         content,
+        formatted_body: None,
         shield: None,
         reactions: Vec::new(),
         thread_root: None,
@@ -401,6 +405,29 @@ fn virtual_item(content: TimelineItemContent, timestamp_ms: u64) -> TimelineItem
         edited: false,
         send_failed: None,
     }
+}
+
+/// The sanitized HTML of a text-like message's `formatted_body`, if it has
+/// one. Sanitized here (Matrix-spec allow-list, rich-reply fallback removed)
+/// so unfiltered markup from another client never leaves the Rust side; the
+/// frontend runs its own sanitizer over the result as a second layer.
+fn formatted_body_of(content: &SdkTimelineItemContent) -> Option<String> {
+    use matrix_sdk::ruma::events::room::message::MessageFormat;
+    use matrix_sdk::ruma::html::{sanitize_html, HtmlSanitizerMode, RemoveReplyFallback};
+
+    let SdkTimelineItemContent::MsgLike(msg_like) = content else { return None };
+    let MsgLikeKind::Message(message) = &msg_like.kind else { return None };
+    let formatted = match message.msgtype() {
+        MessageType::Text(text) => text.formatted.as_ref(),
+        MessageType::Notice(notice) => notice.formatted.as_ref(),
+        MessageType::Emote(emote) => emote.formatted.as_ref(),
+        _ => None,
+    }?;
+    if formatted.format != MessageFormat::Html {
+        return None;
+    }
+    let clean = sanitize_html(&formatted.body, HtmlSanitizerMode::Compat, RemoveReplyFallback::Yes);
+    (!clean.trim().is_empty()).then_some(clean)
 }
 
 /// Whether an `m.replace` aggregation has been applied to this content.

@@ -28,3 +28,10 @@ open = { workspace = true }
 uuid = { workspace = true }
 url = "2"
 mime = "0.3"
+ts-rs = { version = "12", optional = true, features = ["uuid-impl", "no-serde-warnings"] }
+
+[features]
+# Generates the TypeScript bindings the Tauri frontend imports. Off in normal
+# builds: `cargo test -p client-core --features ts export_bindings` rewrites
+# frontend/src/lib/bindings (see .cargo/config.toml for the output dir).
+ts = ["dep:ts-rs"]

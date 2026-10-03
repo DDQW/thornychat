@@ -28,14 +28,14 @@ cargo clippy --workspace --all-targets
 Both must come back clean. Two local quirks worth knowing:
 
 - Clippy's MIR-based lints replay stale results on a warm cache — if you touched something subtle, a `cargo clean` before the final clippy run is the honest check.
-- The three-variant release build is `cargo xtask` (see the README's Building section); you don't need it for a PR, `cargo build` + tests is fine.
+- The release build is `cargo xtask` (see the README's Building section); you don't need it for a PR. For a change that touches the frontend, also run `npm --prefix frontend run check` and `npm --prefix frontend test`.
 
 ## What fits this project
 
-- **Windows-first, native-first.** The client is one self-contained iced/Rust executable. Features that would drag in a web view (beyond the existing inline-video player) or a background service are a hard sell.
+- **Windows-first, and Rust owns the client.** The window is a web view, but the Matrix client — session, encryption, sync, media cache, Windows integration — lives in Rust. The page is a UI layer: it gets no network access of its own, so anything it needs from the outside world goes through a Rust command that restricts what it will fetch. A background service is a hard sell.
 - **Simple and predictable beats clever.** Behavior should be user-controlled and boringly consistent; heuristics that guess at intent tend to get ripped out here. If a behavior could surprise someone, gate it behind a setting — and ship it off by default.
 - **Privacy is a default, not a toggle buried in docs.** Anything that shares presence or activity (receipts, typing, connectors) starts disabled and says clearly what it will share.
-- **Match the code around you.** Comments explain constraints and *why*, not what the next line does. Keep the module layout: `client-core` never touches iced, `ui` never touches `matrix_sdk` types.
+- **Match the code around you.** Comments explain constraints and *why*, not what the next line does. Keep the module layout: `client-core` never touches the UI, and the frontend never touches Matrix beyond the generated protocol types in `frontend/src/lib/bindings`.
 
 Check the README's "Not there yet" list and `ROADMAP.md` before starting something big, and for anything substantial, open an issue first so nobody builds the same thing twice.
 

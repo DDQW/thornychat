@@ -1,0 +1,53 @@
+[package]
+name = "thornychat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ThornyChat: a Windows-first Matrix client (Tauri shell around client-core)"
+
+[[bin]]
+name = "thornychat"
+path = "src/main.rs"
+
+[features]
+# Set by `cargo tauri build` and `cargo xtask`: embeds the built frontend
+# (frontend/dist) in the exe instead of loading the Vite dev server. A plain
+# `cargo build` without it produces an exe that only works under `cargo tauri dev`.
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+client-core = { workspace = true }
+
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+zeroize = { workspace = true }
+anyhow = { workspace = true }
+open = { workspace = true }
+url = "2"
+mime_guess = "2"
+infer = "0.19"
+# Twemoji SVGs, tweet cards and Steam cards are fetched here, not in the
+# webview: the page's CSP allows no remote connections at all.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+
+# Registry (autostart, Steam/GOG/Epic detection) and the process snapshot the
+# game-activity connectors use.
+windows = { workspace = true }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

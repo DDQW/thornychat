@@ -3,6 +3,55 @@
 Decided 2026-09-29. The UI moves from iced to a Tauri shell with a Svelte
 frontend. `client-core` stays as the Rust backend.
 
+## Status (2026-10-03)
+
+The iced UI is **gone**: `crates/ui` and `crates/app` were deleted in the same
+change that added `crates/desktop` and `frontend/`, instead of the originally
+planned build-alongside. That was the explicit call at the time; the last iced
+build is the `iced-final` tag and git history has everything else. The
+"Strategy" row below is kept as the original intent.
+
+| Phase | State |
+|---|---|
+| 0 Spike | Folded into the build (see "Spike findings"). |
+| 1 Prepare | Done: serde derives and generated TypeScript types (`ts-rs`, not `tauri-specta` — it is still release-candidate); sanitized `formatted_body` on timeline items; non-UI Rust moved into `crates/desktop`. |
+| 2 Shell and bridge | Done: single dispatcher + event channel, `tcmedia` protocol with Range support, settings, single instance, logging, shutdown deadline, strict CSP, navigation blocking, links opened externally. |
+| 3 Frontend foundation | Done: Svelte 5 runes stores, diff application, theme → CSS variables. |
+| 4 Screens | Done: login, room list + spaces + explorer, timeline, composer, reactions, edit/redact/reply, emoji picker (+custom packs, stickers), lightbox, link/tweet/Steam/video cards, members panel, settings (all tabs), verification + recovery, call banner. |
+| 5 Platform | Done: tray, autostart, window state, game connectors, toast on push (the event itself is still never emitted — see ROADMAP). Not done: toast click-through. |
+| 6 Packaging | NSIS installer via `cargo xtask installer`; the three CPU variants kept; CI builds the frontend first. Updater and signing undecided. |
+| 7 Cutover | Done in one step (no dogfood period). The "Done" list in `ROADMAP.md` is the parity checklist; its migration section lists what differs. |
+
+### Spike findings
+
+1. **Timeline.** No virtualization: the worker already windows the list and the page
+   reopens it past 200 items, so rows are plain DOM. Two things the browser does by
+   itself were wrong for chat and are done by hand: scroll anchoring is off (it does
+   nothing at scrollTop 0), and prepending history compensates for the added height.
+   Verified against a mock worker, including the scrollTop-0 case.
+2. **Media.** A `tcmedia` custom protocol backed by the existing disk cache; no bytes
+   cross IPC. Verified in the built exe over `https://tcmedia.localhost`, including
+   that traversal, unknown hosts and out-of-allow-list URLs are refused.
+3. **Embeds.** The window is created with `use_https_scheme` so the page's origin is
+   `https://tauri.localhost` — YouTube refuses embedders without a real https
+   origin. **Not exercised against YouTube itself.**
+4. **Spellcheck.** **Unverified**: depends on WebView2 picking up the Windows
+   dictionaries on the target machine.
+5. **`formatted_body`.** Sanitized in Rust (Matrix spec allow-list, reply fallback
+   removed), then again in the page (DOMPurify with the same list, no remote images,
+   no author classes/ids/styles), then constrained by the CSP. Covered by tests on
+   both sides; the CSP and navigation guard verified in the built exe.
+6. **Resources.** **Not measured** (needs a signed-in session to be a fair
+   comparison with the iced build). Idle login screen: ~34 MB in the main process,
+   plus the WebView2 processes.
+
+### What nobody has run yet
+
+Everything that needs a real account: sync, a real timeline, Matrix media through
+`tcmedia`, uploads, SSO, key backup and verification. The page was exercised
+against a mock of the sync worker and the Rust side against unit tests and the
+no-account paths of the real exe.
+
 ## Decisions
 
 | Question | Decision |
