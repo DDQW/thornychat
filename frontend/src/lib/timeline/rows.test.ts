@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TimelineItem, TimelineItemContent } from '../bindings';
-import { buildRows, GROUP_WINDOW_MS, type RowOptions } from './rows';
+import { buildRows, GROUP_WINDOW_MS, reuseRows, type RowOptions } from './rows';
 
 const options: RowOptions = { showMembership: true, hideUnreadDivider: false };
 
@@ -29,6 +29,45 @@ const text = (id: string, sender: string, at = 0, extra: Partial<TimelineItem> =
 const kinds = (rows: ReturnType<typeof buildRows>) => rows.map((r) => r.kind);
 const continuations = (rows: ReturnType<typeof buildRows>) =>
   rows.filter((r) => r.kind === 'message').map((r) => (r.kind === 'message' ? r.continuation : null));
+
+describe('reuseRows', () => {
+  const a = text('a', '@x:s', 0);
+  const b = text('b', '@x:s', 1000);
+  const c = text('c', '@y:s', 2000);
+
+  it('hands back the previous object for every unchanged row', () => {
+    const before = buildRows([a, b], options);
+    const after = reuseRows(buildRows([a, b, c], options), before);
+    expect(after[0]).toBe(before[0]);
+    expect(after[1]).toBe(before[1]);
+    expect(after[2]).not.toBe(before[1]);
+    expect(after).toHaveLength(3);
+  });
+
+  it('replaces a row whose item changed (a reaction, an edit)', () => {
+    const before = buildRows([a, b], options);
+    const edited = { ...b, edited: true };
+    const after = reuseRows(buildRows([a, edited], options), before);
+    expect(after[0]).toBe(before[0]);
+    expect(after[1]).not.toBe(before[1]);
+    expect(after[1]?.kind === 'message' && after[1].item).toBe(edited);
+  });
+
+  it('replaces a row whose grouping changed', () => {
+    // "b" continues "a"'s group until a different sender's message lands between them.
+    const before = buildRows([a, b], options);
+    const after = reuseRows(buildRows([a, c, b], options), before);
+    const row = after.find((r) => r.key === before[1]!.key);
+    expect(row).not.toBe(before[1]);
+    expect(row?.kind === 'message' && row.continuation).toBe(false);
+  });
+
+  it('keeps dividers that did not move', () => {
+    const divider = item('d', '', { type: 'DateDivider', data: 'Today' }, 5);
+    const before = buildRows([divider, a], options);
+    expect(reuseRows(buildRows([divider, a, b], options), before)[0]).toBe(before[0]);
+  });
+});
 
 describe('buildRows grouping', () => {
   it('groups consecutive messages from one sender', () => {

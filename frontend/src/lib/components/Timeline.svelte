@@ -2,7 +2,7 @@
   import { onDestroy, tick } from 'svelte';
   import { markRoomRead, paginateBackwards, shrinkTimeline } from '../actions';
   import { nameOf } from '../people';
-  import { buildRows } from '../timeline/rows';
+  import { buildRows, reuseRows, type Row } from '../timeline/rows';
   import { matchesQuery } from '../timeline/search';
   import { rooms } from '../stores/rooms.svelte';
   import { session } from '../stores/session.svelte';
@@ -31,14 +31,18 @@
     const items = timeline?.items ?? [];
     return searching ? items.filter((item) => matchesQuery(item, query, nameOf(item.sender, roomId, item.sender_display_name))) : items;
   });
-  const rows = $derived(
-    timeline
+  // Unchanged rows keep their object, so only the rows a diff touched re-render.
+  let previousRows: Row[] = [];
+  const rows = $derived.by(() => {
+    const next = timeline
       ? buildRows(visibleItems, {
           showMembership: !searching && (settings.value?.chat.show_membership_events ?? true),
           hideUnreadDivider: timeline.dividerSuppressed,
         })
-      : [],
-  );
+      : [];
+    previousRows = reuseRows(next, previousRows);
+    return previousRows;
+  });
   $effect(() => {
     onmatches?.(searching ? visibleItems.length : 0);
   });
@@ -229,7 +233,10 @@
 <style>
   .timeline {
     position: relative;
-    flex: 1 1 auto;
+    /* A zero basis, not auto: with auto, every layout of the room column (the
+       composer growing a line, someone starting to type) re-measured all the
+       messages to size this box — 7.7 ms with 200 of them, ~1 ms without. */
+    flex: 1 1 0;
     min-height: 0;
   }
   .scroller {

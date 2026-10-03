@@ -84,7 +84,7 @@ pub async fn fetch_web_image(cache_dir: &std::path::Path, url: &str) -> anyhow::
 /// FNV-1a: a stable, dependency-free hash for cache file names (not security
 /// relevant — the allow-list is the guard, and a collision would only serve
 /// the wrong card image).
-fn fnv1a(text: &str) -> u64 {
+pub(crate) fn fnv1a(text: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in text.as_bytes() {
         hash ^= u64::from(*byte);

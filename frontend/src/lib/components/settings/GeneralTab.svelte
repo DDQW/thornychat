@@ -4,6 +4,7 @@
   import type { LogLevel } from '../../types';
   import { session } from '../../stores/session.svelte';
   import { settings } from '../../stores/settings.svelte';
+  import { spelling } from '../../stores/spelling.svelte';
   import { ui } from '../../stores/ui.svelte';
   import SettingToggle from '../SettingToggle.svelte';
 
@@ -28,6 +29,7 @@
   // The real registry state, not an assumption: it may have been removed by
   // hand (or an uninstaller) since this was last open.
   onMount(() => {
+    spelling.loadStatus();
     backend.autostartEnabled().then(
       (enabled) => (autostart = enabled),
       () => {},
@@ -103,10 +105,22 @@
   <h2>Spelling</h2>
   <SettingToggle
     title="Check spelling"
-    hint="Mark misspelled words as you type, using the Windows dictionaries and your personal dictionary. Right-click a marked word for suggestions."
+    hint="Underline misspelled words as you type, using the Windows speller and your personal dictionary. Click into a marked word, or right-click it, for suggestions."
     checked={value.spellcheck.enabled}
     onchange={(on) => settings.update((d) => (d.spellcheck.enabled = on))}
   />
+  <SettingToggle
+    title="Fix obvious typos as you type"
+    hint="When you finish a word, a fix the speller is sure of replaces it (“teh” becomes “the”). Press Backspace right after to undo it; that word is then left alone for the rest of the message."
+    checked={value.spellcheck.autocorrect}
+    disabled={!value.spellcheck.enabled}
+    onchange={(on) => settings.update((d) => (d.spellcheck.autocorrect = on))}
+  />
+  {#if value.spellcheck.enabled && spelling.status}
+    <p class="muted small">
+      {spelling.status.available ? `Dictionary: ${spelling.status.language ?? 'the Windows default'}, from your Windows language settings.` : "The Windows speller isn't available on this PC, so nothing is checked."}
+    </p>
+  {/if}
 
   <h2>Diagnostics</h2>
   <div class="setting">

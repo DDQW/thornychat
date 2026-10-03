@@ -64,6 +64,38 @@ export function buildRows(items: readonly TimelineItem[], options: RowOptions): 
   return rows;
 }
 
+/**
+ * `next`, with every row that is unchanged since `previous` replaced by the
+ * previous row object itself.
+ *
+ * The timeline's keyed `{#each}` treats a new row object as a changed row,
+ * and every component reading it re-runs — so without this, one new message
+ * re-rendered every message body on screen (measured: 208 HTML re-parses and
+ * ~30 ms for one append to a 200-item room). Rows are immutable, so "same
+ * kind, same item, same grouping" is "the same row".
+ */
+export function reuseRows(next: Row[], previous: readonly Row[]): Row[] {
+  if (previous.length === 0) return next;
+  const byKey = new Map(previous.map((row) => [row.key, row]));
+  return next.map((row) => {
+    const old = byKey.get(row.key);
+    return old && sameRow(old, row) ? old : row;
+  });
+}
+
+function sameRow(a: Row, b: Row): boolean {
+  switch (a.kind) {
+    case 'date':
+      return b.kind === 'date' && a.label === b.label;
+    case 'unread':
+      return b.kind === 'unread';
+    case 'system':
+      return b.kind === 'system' && a.item === b.item && a.text === b.text;
+    case 'message':
+      return b.kind === 'message' && a.item === b.item && a.continuation === b.continuation;
+  }
+}
+
 function continues(previous: TimelineItem, current: TimelineItem): boolean {
   if (previous.sender !== current.sender) return false;
   if (current.in_reply_to) return false;

@@ -1,6 +1,7 @@
-//! Spell-check preferences. Checking itself is the webview's own (WebView2
-//! marks typos in the composer with the Windows dictionaries); these are the
-//! on/off knobs. Persisted as `spellcheck.json`, profile-independent.
+//! Spell-check preferences: whether the composer marks misspellings, and
+//! whether it fixes obvious typos as you type. The checking itself is the
+//! Windows speller ([`crate::spellcheck`]); these are the on/off knobs the
+//! page reads. Persisted as `spellcheck.json`, profile-independent.
 
 use std::path::PathBuf;
 
@@ -10,11 +11,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SpellcheckConfig {
-    /// Mark misspellings in the composer. Non-destructive: it only ever
-    /// underlines, it never rewrites your text.
+    /// Mark misspellings in the composer and offer suggestions for them.
+    /// Non-destructive: it never rewrites your text by itself.
     pub enabled: bool,
-    /// Silently apply the speller's high-confidence fix when a word is
-    /// finished. Ships **off** — typing stays predictable until opted in.
+    /// Apply the speller's high-confidence fix when a word is finished with a
+    /// space (Backspace immediately after reverts it). Ships **off** — typing
+    /// stays predictable until opted in.
     pub autocorrect: bool,
 }
 

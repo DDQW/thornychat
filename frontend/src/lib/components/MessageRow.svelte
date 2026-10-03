@@ -52,6 +52,17 @@
 
   let pickerAnchor = $state<DOMRect | null>(null);
   let confirmingDelete = $state(false);
+  /**
+   * The pointer is over this row, or focus is inside it. The action bar only
+   * exists then: it is half of every row's DOM (14 of 26 nodes, 4 of 4 icons)
+   * and only ever visible on one row at a time.
+   */
+  let active = $state(false);
+  const showActions = $derived(eventId !== null && content.type !== 'Redacted' && (active || confirmingDelete || pickerAnchor !== null));
+
+  function onfocusout(event: FocusEvent) {
+    if (!(event.currentTarget as Element).contains(event.relatedTarget as Node | null)) active = false;
+  }
 
   function react(pick: Pick) {
     pickerAnchor = null;
@@ -98,6 +109,10 @@
   data-event-id={eventId}
   style:--hue={nameHue(item.sender)}
   oncontextmenu={openMenu}
+  onmouseenter={() => (active = true)}
+  onmouseleave={() => (active = false)}
+  onfocusin={() => (active = true)}
+  {onfocusout}
   role="article"
 >
   <div class="gutter">
@@ -182,8 +197,8 @@
     {/if}
   </div>
 
-  {#if eventId && content.type !== 'Redacted'}
-    <div class="actions" class:open={confirmingDelete || pickerAnchor !== null}>
+  {#if showActions}
+    <div class="actions">
       {#if confirmingDelete}
         <span class="small">Delete this message?</span>
         <button class="btn danger small" onclick={remove}>Delete</button>
@@ -338,7 +353,7 @@
     position: absolute;
     top: -14px;
     right: 16px;
-    display: none;
+    display: flex;
     align-items: center;
     gap: 2px;
     padding: 2px 4px;
@@ -346,10 +361,5 @@
     border-radius: var(--radius-sm);
     background: var(--surface-strong);
     box-shadow: 0 4px 14px rgb(0 0 0 / 0.3);
-  }
-  .msg:hover .actions,
-  .msg:focus-within .actions,
-  .actions.open {
-    display: flex;
   }
 </style>

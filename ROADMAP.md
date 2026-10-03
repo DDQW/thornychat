@@ -27,11 +27,19 @@ embed (the page is served from `https://tauri.localhost` specifically to satisfy
 its referer check; not exercised against YouTube itself).
 
 **Behaviour that changed**
-- Spelling: the Windows-speller suggestion bar and opt-in autocorrect are gone.
-  WebView2 underlines typos itself and offers suggestions on right-click; whether
-  it picks up the Windows dictionaries on this machine is unchecked. The stored
-  `autocorrect` flag is kept but nothing reads it.
-- The lightbox no longer Lanczos-upscales past ~300% (the browser's own scaling).
+- Spelling is the Windows speller again (`ISpellChecker` on its own STA thread,
+  `crates/desktop/src/spellcheck.rs`; marking, suggestion bar, autocorrect and its
+  Backspace undo in `frontend/src/lib/spell.ts`). WebView2's own checker was tried
+  first and marks nothing in this app (checked on the built exe, 2026-10-03), so the
+  native attribute is only a fallback for when the speller is unavailable. New:
+  typos are underlined (the iced build recoloured them), and right-clicking a marked
+  word offers its suggestions. Autocorrect is a toggle again (Settings → General).
+- The lightbox sizes the picture by layout and labels zoom in actual pixels (100% =
+  one image pixel per screen pixel); the old transform-scaled image stayed rastered
+  at its fitted size, so zooming in showed no more detail than the fit view. Past
+  150% it swaps in a Lanczos3 copy made by the media protocol (`?upscale=`, cached
+  in `upscale-cache`, 256 MB cap). Pan stops at the image edge, zoom-out at the fit;
+  double-click toggles fit/actual pixels; keys `+` `-` `0` `1`.
 - Window geometry now comes from `tauri-plugin-window-state`; the old
   `window.json` (incl. its GPU preferences, which no longer apply) is ignored.
 - `cargo xtask install-dev` / `toast-test` are gone: the NSIS installer
@@ -64,7 +72,12 @@ the WebView2 child-window video player, the Win32 clipboard probe.
   commands (`/me`, `/plain`, `/join`, `/knock`, `/leave`|`/part`, `/invite`,
   `/kick`, `/ban`, `/ignore`|`/unignore`; `//` escapes) + in-app manual,
   right-click cut/copy/paste menu, Windows ISpellChecker typo marking
-  in-composer + suggestion bar w/ opt-in autocorrect.
+  in-composer (wavy underline) + suggestion bar + right-click suggestions w/
+  opt-in autocorrect (Backspace undoes; autocorrect corpus guarded by a test).
+- Big rooms: the members panel is windowed (20 000 members: 2.4 s → ~25 ms to
+  open), rosters of closed rooms are released, unchanged timeline rows and room
+  summaries keep their objects so one event re-renders one row, and `<video>`
+  range requests are served in 4 MB chunks.
 - E2EE: cross-signing bootstrap w/ UIAA fallback, SAS verify, opt-in key
   backup/recovery (Settings → Security), trust shields.
 - Media & rich content: reactions (no-bg pills, hover attribution, full
@@ -74,7 +87,7 @@ the WebView2 child-window video player, the Win32 clipboard probe.
   homeserver OG proxy (privacy-gated) + FxTwitter tweet cards; inline video
   for YouTube/Vimeo/Dailymotion/Rumble/Kick (live channels only, no VOD/clip
   embed) and direct video files, hosted in a WebView2 child window; image
-  lightbox w/ cursor-anchored zoom, Lanczos3 upscale past ~300% native
+  lightbox w/ cursor-anchored zoom, Lanczos3 upscale past 150% native
   (Real-ESRGAN evaluated and rejected — hallucinates detail), save-to-disk;
   file messages click-to-save w/ the real filename suggested; media/emoji
   disk caches capped (512 MB/64 MB, oldest evicted at startup, unit-tested).

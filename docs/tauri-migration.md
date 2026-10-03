@@ -35,8 +35,12 @@ build is the `iced-final` tag and git history has everything else. The
 3. **Embeds.** The window is created with `use_https_scheme` so the page's origin is
    `https://tauri.localhost` — YouTube refuses embedders without a real https
    origin. **Not exercised against YouTube itself.**
-4. **Spellcheck.** **Unverified**: depends on WebView2 picking up the Windows
-   dictionaries on the target machine.
+4. **Spellcheck.** WebView2's built-in checker marks **nothing** in this app — not
+   in a `textarea`, not in `contenteditable`, with `spellcheck` on and the Windows
+   language list including English (checked on the built exe, 2026-10-03). The
+   `ISpellChecker` engine was therefore ported (`crates/desktop/src/spellcheck.rs`,
+   one STA thread behind Tauri commands) with the marking, suggestion bar and
+   autocorrect rebuilt in the page (`frontend/src/lib/spell.ts`).
 5. **`formatted_body`.** Sanitized in Rust (Matrix spec allow-list, reply fallback
    removed), then again in the page (DOMPurify with the same list, no remote images,
    no author classes/ids/styles), then constrained by the CSP. Covered by tests on
@@ -85,8 +89,8 @@ no-account paths of the real exe.
 | `ui/platform/*` (toasts, AUMID, tray, autostart, power, relaunch, file dialog) | **Move** to a non-iced crate. Toasts and tray keep custom code if click-to-open-room needs it; autostart and dialogs may become Tauri plugins. |
 | `connectors/*`, `tweets.rs`, `steam.rs`, `twemoji.rs` fetching, `*_config.rs` | **Move** to the backend crate; expose as commands / the media protocol. |
 | `slash.rs` | **Port to TS**, with its tests. |
-| `spellcheck.rs` (ISpellChecker) | **Keep for autocorrect only** if WebView2's own typo marking is confirmed in Phase 0. |
-| `video_player.rs`, `animated_image.rs`, `synthetic_input.rs`, `spellcheck_highlight.rs`, `lightbox_image.rs`, `theme.rs`, `render_watchdog.rs`, `clipboard_paste.rs` (mostly) | **Delete.** The browser covers these. |
+| `spellcheck.rs` (ISpellChecker) | **Kept** (WebView2's own marking does nothing here): `crates/desktop/src/spellcheck.rs`, with the highlight/autocorrect logic ported to `frontend/src/lib/spell.ts`. |
+| `video_player.rs`, `animated_image.rs`, `synthetic_input.rs`, `lightbox_image.rs`, `theme.rs`, `render_watchdog.rs`, `clipboard_paste.rs` (mostly) | **Delete.** The browser covers these (`upscale.rs` lives on as `crates/desktop/src/upscale.rs` behind the media protocol). |
 | `update.rs`, `state.rs`, `view.rs`, `screens/*`, `emoji_picker.rs`, `media_cache.rs` | **Rewrite** in the frontend. This is the bulk of the work. |
 | `xtask` | **Adapt** to drive `cargo tauri build` for the three CPU variants. |
 

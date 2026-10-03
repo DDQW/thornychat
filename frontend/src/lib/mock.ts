@@ -3,6 +3,10 @@
 // homeserver. It plays the part of the sync worker: it answers commands with
 // the same events the real one would, over data that exercises every message
 // kind the timeline renders. Nothing in the app imports this directly.
+//
+// Two URL parameters make rooms big, for performance work: `?history=N` opens
+// every room with N synthetic messages of mixed kinds, and `?members=N` gives
+// it an N-member roster.
 
 import type { Backend } from './api';
 import type {
@@ -157,11 +161,61 @@ function sampleHistory(now: number): TimelineItem[] {
   return items;
 }
 
+/** `count` messages of mixed kinds (text, emoji, links, markup, images, reactions, replies). */
+function syntheticHistory(count: number, now: number): TimelineItem[] {
+  const senders = MEMBERS.map((member) => member.user_id);
+  const lines = [
+    'Morning! The build is green again 🎉',
+    'Did anyone look at https://github.com/DDQW/thornychat/issues/12 yet?',
+    'lgtm',
+    'I think the timeline should stay capped at a couple of hundred items; past that the DOM grows for days.',
+    'haha 😂😂',
+    'Reminder: standup at 10',
+  ];
+  return Array.from({ length: count }, (_, i) => {
+    const at = now - (count - i) * 45_000;
+    const sender = senders[i % senders.length]!;
+    switch (i % 10) {
+      case 3:
+        return item(sender, text('Use **bold** and `code`'), at, { formatted_body: '<p>Use <strong>bold</strong> and <code>code</code>, see <a href="https://matrix.org">matrix.org</a></p>' });
+      case 6:
+        return item(sender, { type: 'Image', data: { url: 'mxc://mock/sunset', caption: null, width: 640, height: 360 } }, at);
+      case 8:
+        return item(sender, text(lines[i % lines.length]!), at, { reactions: [{ key: '👍', count: 2, reacted_by_me: false, senders: senders.slice(0, 2) }], read_by: [senders[2]!] });
+      default:
+        return item(sender, text(lines[i % lines.length]!), at, i % 10 === 5 ? { in_reply_to: { event_id: '$x', sender: 'Alice', snippet: 'an earlier message', image_url: null } } : {});
+    }
+  });
+}
+
+/** A roster of `count` people, for `?members=N`. */
+function syntheticMembers(count: number): RoomMember[] {
+  return [
+    ...MEMBERS,
+    ...Array.from({ length: count }, (_, i) => ({ user_id: `@user${i}:example.org`, display_name: `Person ${String(i).padStart(5, '0')}`, avatar_url: null, power_level: 0 })),
+  ];
+}
+
 function olderHistory(before: number, page: number): TimelineItem[] {
   return Array.from({ length: 12 }, (_, i) =>
     item(i % 3 === 0 ? '@bob:thorny.chat' : '@alice:thorny.chat', text(`Older message #${page * 12 + i + 1}: lorem ipsum dolor sit amet.`), before - (12 - i) * 5 * 60_000 - page * 90 * 60_000),
   );
 }
+
+/** The mock's speller: a few classic typos and what it would offer for them. */
+const TYPOS: Record<string, string[]> = {
+  teh: ['the', 'ten', 'tech'],
+  recieve: ['receive'],
+  recieved: ['received'],
+  definately: ['definitely', 'defiantly'],
+  seperate: ['separate'],
+  fiel: ['file', 'feel', 'fuel'],
+  wierd: ['weird', 'wired'],
+  adress: ['address'],
+  untill: ['until'],
+  thier: ['their'],
+  smyth: ['smith'],
+};
 
 function svgFor(label: string, color: string, width = 640, height = 360): string {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${color}"/><stop offset="1" stop-color="#222"/></linearGradient></defs><rect width="100%" height="100%" fill="url(#g)"/><text x="50%" y="50%" fill="white" font-family="sans-serif" font-size="${Math.round(height / 9)}" text-anchor="middle" dominant-baseline="middle">${label}</text></svg>`;
@@ -181,7 +235,12 @@ export function createMockBackend(): Backend {
   };
   const profileFiles = new Map<string, string>();
   const timelines = new Map<string, TimelineItem[]>();
-  let loggedIn = new URLSearchParams(location.search).get('login') === null;
+  const params = new URLSearchParams(location.search);
+  let loggedIn = params.get('login') === null;
+  const bigHistory = Number(params.get('history')) || 0;
+  const bigRoster = Number(params.get('members')) || 0;
+  const dictionary = new Set<string>();
+  const typo = (word: string) => (dictionary.has(word.toLowerCase()) ? undefined : TYPOS[word.toLowerCase()]);
   let autostart = false;
 
   const emit = (event: ClientEvent) => queueMicrotask(() => onEvent(event));
@@ -209,11 +268,11 @@ export function createMockBackend(): Backend {
     switch (command.type) {
       case 'OpenRoom': {
         const id = command.data.room_id;
-        const list = id === '!lonely:thorny.chat' ? [] : sampleHistory(Date.now());
+        const list = id === '!lonely:thorny.chat' ? [] : bigHistory > 0 ? syntheticHistory(bigHistory, Date.now()) : sampleHistory(Date.now());
         timelines.set(id, list);
         setTimeout(() => {
           diffs(id, [{ type: 'Reset', data: list }]);
-          emit({ type: 'RoomMembersUpdated', data: { room_id: id, members: MEMBERS } });
+          emit({ type: 'RoomMembersUpdated', data: { room_id: id, members: bigRoster > 0 ? syntheticMembers(bigRoster) : MEMBERS } });
           emit({
             type: 'PowerLevelTagsUpdated',
             data: { room_id: id, tags: [{ level: 100, name: 'Admins', color: '#e5a3ff' }, { level: 50, name: 'Moderators', color: null }] },
@@ -507,6 +566,21 @@ export function createMockBackend(): Backend {
       return 'Deleted 3 log files, emptied today\'s — 2.0 KB freed.';
     },
     async quit() {},
+    async spellStatus() {
+      return { available: true, language: 'en-US' };
+    },
+    async spellCheck(words) {
+      return words.map((word) => typo(word) !== undefined);
+    },
+    async spellSuggest(word) {
+      return typo(word) ?? [];
+    },
+    async spellCorrection(word) {
+      return typo(word)?.[0] ?? null;
+    },
+    async spellAdd(word) {
+      dictionary.add(word.toLowerCase());
+    },
     async onConnectorEmote() {
       return () => {};
     },
@@ -517,6 +591,8 @@ export function createMockBackend(): Backend {
       const small = ['sticker1', 'emoji1', 'emoji2'].includes(name);
       return svgFor(name, colors[name] ?? '#3b6', small ? 128 : 640, small ? 128 : 360);
     },
+    // The mock's pictures are vector art; there is nothing to upscale.
+    upscaledUrl: () => null,
     twemojiUrl: (codepoints) => `https://cdn.jsdelivr.net/gh/jdecked/twemoji@latest/assets/svg/${codepoints}.svg`,
     webImageUrl: (url) => url,
   };

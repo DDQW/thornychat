@@ -19,7 +19,9 @@ mod embeds;
 mod log_limit;
 mod logging;
 mod media;
+mod spellcheck;
 mod tray;
+mod upscale;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -169,6 +171,11 @@ fn main() {
             commands::load_profile_file,
             commands::save_profile_file,
             commands::quit_app,
+            spellcheck::spell_status,
+            spellcheck::spell_check,
+            spellcheck::spell_suggest,
+            spellcheck::spell_correction,
+            spellcheck::spell_add,
         ])
         .build(tauri::generate_context!())
         .expect("error while building the ThornyChat application");

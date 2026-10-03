@@ -27,6 +27,13 @@ export interface OwnProfile {
 /** The small per-profile files the shell stores for the page (see commands.rs). */
 export type ProfileFile = 'emoji_usage' | 'stickers' | 'last_room';
 
+/** The Windows speller behind the composer's spell check (see crates/desktop/src/spellcheck.rs). */
+export interface SpellStatus {
+  available: boolean;
+  /** BCP-47 tag of the dictionary in use, e.g. `en-US`. */
+  language: string | null;
+}
+
 export interface AppInfo {
   version: string;
   profile: string;

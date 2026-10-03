@@ -37,6 +37,11 @@ open = { workspace = true }
 url = "2"
 mime_guess = "2"
 infer = "0.19"
+# Lanczos3 upscaling for the lightbox (see src/upscale.rs). Formats listed
+# explicitly instead of image's defaults, which drag in an AV1 *encoder* and
+# OpenEXR for nothing: these are the still formats a peer plausibly sends and
+# the webview can also show (AVIF and SVG stay with the browser's scaling).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 # Twemoji SVGs, tweet cards and Steam cards are fetched here, not in the
 # webview: the page's CSP allows no remote connections at all.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }

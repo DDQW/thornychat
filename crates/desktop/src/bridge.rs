@@ -29,6 +29,8 @@ pub struct Bridge {
     pub profile_dir: PathBuf,
     /// Twemoji SVGs and proxied card images.
     pub emoji_dir: PathBuf,
+    /// Lanczos-upscaled copies for the lightbox (see `upscale.rs`).
+    pub upscale_dir: PathBuf,
     event_tx: mpsc::UnboundedSender<ClientEvent>,
     running: Mutex<Option<Arc<RunningClient>>>,
     sink: Mutex<Option<Channel<ClientEvent>>>,
@@ -47,11 +49,15 @@ impl Bridge {
                 (fallback.join("media"), fallback.join("emoji"), fallback.join("profile"))
             }
         };
+        // A sibling of the media cache, not inside it: that one's size cap
+        // counts only its own files, and these have a cap of their own.
+        let upscale_dir = media_dir.with_file_name("upscale-cache");
         let bridge = Arc::new(Self {
             profile,
             media_dir,
             profile_dir,
             emoji_dir,
+            upscale_dir,
             event_tx,
             running: Mutex::new(None),
             sink: Mutex::new(None),

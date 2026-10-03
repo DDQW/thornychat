@@ -36,7 +36,9 @@ export function handleEvent(event: ClientEvent): void {
       break;
     }
     case 'RoomMembersUpdated':
-      rooms.members = withKey(rooms.members, event.data.room_id, event.data.members);
+      // Only the open room's roster is kept; one that lands after its room was
+      // closed would never be released.
+      if (event.data.room_id === rooms.selectedId) rooms.members = withKey(rooms.members, event.data.room_id, event.data.members);
       break;
     case 'DirectMessageReady':
     case 'RoomCreated':
@@ -44,7 +46,7 @@ export function handleEvent(event: ClientEvent): void {
       rooms.select(event.data.room_id);
       break;
     case 'PowerLevelTagsUpdated':
-      rooms.powerTags = withKey(rooms.powerTags, event.data.room_id, event.data.tags);
+      if (event.data.room_id === rooms.selectedId) rooms.powerTags = withKey(rooms.powerTags, event.data.room_id, event.data.tags);
       break;
     case 'TypingUpdated':
       rooms.typing = withKey(rooms.typing, event.data.room_id, event.data.user_ids.length ? event.data.user_ids : undefined);

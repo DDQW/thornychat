@@ -4,22 +4,24 @@
 </script>
 
 <script lang="ts">
-  import { marked } from 'marked';
   import { tick, untrack } from 'svelte';
   import { editMessage, runSlashAction, sendMessage, sendSticker, setTyping } from '../actions';
   import { backend } from '../api';
   import { loadEmojiData, type EmojiData } from '../emoji';
   import { formatBytes, truncate } from '../format';
+  import { searchMembers } from '../members';
   import { nameOf } from '../people';
   import { enrichHtml } from '../richtext';
   import { sanitizeFormattedBody } from '../sanitize';
   import { CommandError, expectOutcome, newRequestId } from '../requests';
   import { parse } from '../slash';
+  import { DraftSpeller, EMPTY_SCAN, editKind, markSegments, scanDraft, type Draft, type Word } from '../spell';
   import { composer } from '../stores/composer.svelte';
   import { emoji as emojiStore } from '../stores/emoji.svelte';
   import { rooms } from '../stores/rooms.svelte';
   import { session } from '../stores/session.svelte';
   import { settings } from '../stores/settings.svelte';
+  import { spelling } from '../stores/spelling.svelte';
   import { timelines } from '../stores/timelines.svelte';
   import { ui } from '../stores/ui.svelte';
   import EmojiPicker, { type Pick } from './EmojiPicker.svelte';
@@ -63,6 +65,7 @@
     if (!textarea) return;
     textarea.style.height = 'auto';
     textarea.style.height = `${Math.min(textarea.scrollHeight, window.innerHeight * 0.4)}px`;
+    measure();
   }
 
   // --- context: reply / edit / injected text ---
@@ -71,6 +74,7 @@
     if (target?.content.type === 'Text') {
       text = target.content.data;
       mentions = [];
+      speller.reset();
       void tick().then(() => textarea?.focus());
     }
   });
@@ -90,6 +94,7 @@
   });
 
   function insertAtCaret(insert: string) {
+    speller.interrupt();
     const area = textarea;
     const start = area?.selectionStart ?? text.length;
     const end = area?.selectionEnd ?? text.length;
@@ -116,10 +121,8 @@
 
   const mentionMatches = $derived.by(() => {
     if (mentionQuery === null) return [];
-    const needle = mentionQuery.toLowerCase();
-    return members
+    return searchMembers(members, mentionQuery, 9)
       .filter((member) => member.user_id !== session.info?.user_id)
-      .filter((member) => `${member.display_name} ${member.user_id}`.toLowerCase().includes(needle))
       .slice(0, 8);
   });
 
@@ -151,6 +154,7 @@
   const menuOpen = $derived(mentionMatches.length > 0 || emojiMatches.length > 0);
 
   function replaceToken(trigger: '@' | ':', insert: string) {
+    speller.interrupt();
     const caret = textarea?.selectionStart ?? text.length;
     const before = text.slice(0, caret);
     const at = trigger === '@' ? before.lastIndexOf('@') : before.lastIndexOf(':');
@@ -173,6 +177,149 @@
     replaceToken(':', match.insert);
     if (match.kind === 'unicode') emojiStore.recordUse(match.char);
   }
+
+  // --- spelling ---
+  // Words go to the Windows speller in the shell; WebView2's own checker marks
+  // nothing in this app. Marks are drawn by an overlay behind the transparent
+  // textarea, so the native attribute is only switched on as a fallback when
+  // our speller is unavailable (two sets of squiggles would be worse than one).
+  const spellOn = $derived(settings.value?.spellcheck.enabled ?? true);
+  const autocorrectOn = $derived(spellOn && (settings.value?.spellcheck.autocorrect ?? false));
+  const speller = new DraftSpeller();
+  let overlay = $state<HTMLDivElement>();
+  /** The textarea's text box (padding included, scrollbar excluded), which the overlay copies. */
+  let box = $state({ width: 0, height: 0 });
+
+  $effect(() => {
+    if (spellOn) spelling.loadStatus();
+  });
+
+  const caret = $derived((void caretVersion, void text, textarea?.selectionStart ?? text.length));
+
+  /** Where live mentions sit: a display name is never a typo. */
+  const mentionSpans = $derived.by(() => {
+    const spans: [number, number][] = [];
+    for (const mention of mentions) {
+      const needle = `@${mention.displayName}`;
+      for (let at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + needle.length)) spans.push([at, at + needle.length]);
+    }
+    return spans;
+  });
+
+  const scan = $derived.by(() => {
+    void spelling.version;
+    if (!spellOn) return EMPTY_SCAN;
+    const inMention = (word: Word) => mentionSpans.some(([start, end]) => word.rawStart < end && word.rawEnd > start);
+    return scanDraft(text, caret, (word) => spelling.verdict(word), inMention);
+  });
+  $effect(() => {
+    if (scan.unknown.length > 0) spelling.request(scan.unknown);
+  });
+  const segments = $derived(scan.marks.length > 0 ? markSegments(text, scan.marks) : []);
+
+  /** The speller's suggestions for the last marked word the caret visited. */
+  let suggested = $state.raw<{ word: string; suggestions: string[] } | null>(null);
+  $effect(() => {
+    const word = scan.target?.core;
+    if (!word || suggested?.word === word) return;
+    backend.spellSuggest(word).then(
+      (suggestions) => (suggested = { word, suggestions }),
+      () => {},
+    );
+  });
+  const flagged = $derived(scan.target && suggested?.word === scan.target.core ? { word: scan.target, suggestions: suggested.suggestions } : null);
+
+  /** Puts the caret at `position` once the new text is in the textarea. */
+  function placeCaret(position: number, refocus = false) {
+    void tick().then(() => {
+      if (refocus) textarea?.focus();
+      textarea?.setSelectionRange(position, position);
+      caretVersion++;
+    });
+  }
+
+  /** Swaps a marked word for `replacement`, unless the draft has moved on under it. */
+  function replaceWord(word: Word, replacement: string) {
+    const current = textarea?.value ?? text;
+    if (current.slice(word.start, word.end) !== word.core) return;
+    speller.interrupt();
+    text = current.slice(0, word.start) + replacement + current.slice(word.end);
+    placeCaret(word.start + replacement.length, true);
+  }
+
+  async function addToDictionary(word: string) {
+    try {
+      await spelling.add(word);
+    } catch (error) {
+      ui.error(`Couldn't add “${word}” to the dictionary: ${String(error)}`);
+    }
+    suggested = null;
+    textarea?.focus();
+  }
+
+  /** Every edit: undo an autocorrect on the Backspace right after it, or autocorrect the word a space just finished. */
+  function onedit(event: Event) {
+    const area = textarea;
+    if (!area || !(event instanceof InputEvent)) return;
+    const kind = editKind(event);
+    const current = (): Draft => ({ text: area.value, caret: area.selectionStart });
+    const undone = speller.afterEdit(kind, current());
+    if (undone) {
+      text = undone.text;
+      placeCaret(undone.caret);
+    } else if (kind === 'word-end' && autocorrectOn) {
+      speller.autocorrect(current(), (word) => backend.spellCorrection(word), current).then(
+        (fixed) => {
+          if (!fixed) return;
+          text = fixed.text;
+          placeCaret(fixed.caret);
+        },
+        () => {},
+      );
+    }
+  }
+
+  /** Right-click on a marked word: its suggestions, in place of the native menu. */
+  function oncontextmenu(event: MouseEvent) {
+    const inside = (rect: DOMRect) => event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
+    const mark = overlay ? [...overlay.querySelectorAll<HTMLElement>('mark')].find((element) => [...element.getClientRects()].some(inside)) : undefined;
+    const word = mark && scan.marks.find((candidate) => candidate.start === Number(mark.dataset.start));
+    if (!word) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const at = { x: event.clientX, y: event.clientY };
+    backend.spellSuggest(word.core).then(
+      (suggestions) => {
+        const fixes = suggestions.length
+          ? suggestions.map((suggestion) => ({ label: suggestion, onselect: () => replaceWord(word, suggestion) }))
+          : [{ label: 'No suggestions', disabled: true, onselect: () => {} }];
+        ui.menu = { ...at, items: [...fixes, { label: 'Add to dictionary', separator: true, onselect: () => void addToDictionary(word.core) }] };
+      },
+      () => {},
+    );
+  }
+
+  /** Keeps the overlay the same size as the textarea's text box. */
+  function measure() {
+    if (!textarea) return;
+    const { clientWidth: width, clientHeight: height } = textarea;
+    if (width !== box.width || height !== box.height) box = { width, height };
+  }
+  $effect(() => {
+    const area = textarea;
+    if (!area) return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(area);
+    return () => observer.disconnect();
+  });
+
+  function syncScroll() {
+    if (overlay && textarea) overlay.scrollTop = textarea.scrollTop;
+  }
+  $effect(() => {
+    void segments;
+    syncScroll();
+  });
 
   // --- attachments ---
   export function addFiles(files: Iterable<File>) {
@@ -244,6 +391,7 @@
         await editMessage(roomId, editing.event_id, body);
         composer.clear();
         text = '';
+        speller.reset();
       } catch (error) {
         inlineError = `Couldn't edit the message: ${String(error)}`;
       } finally {
@@ -265,6 +413,7 @@
     const mentionIds = liveMentions();
     text = '';
     mentions = [];
+    speller.reset();
     composer.clear();
     stopTyping();
 
@@ -295,6 +444,7 @@
     const reply = replyTo?.event_id ?? null;
     text = '';
     mentions = [];
+    speller.reset();
     composer.clear();
     clearStagedKeepingFiles();
     let failures = 0;
@@ -381,9 +531,15 @@
   }
 
   // --- markdown preview (what recipients will see, approximately) ---
+  // The parser is loaded on first use: a sixth of the startup bundle, for a
+  // toggle most people never touch (sending is converted in the shell).
+  let markdown = $state.raw<typeof import('marked') | null>(null);
+  $effect(() => {
+    if (previewing && !markdown) void import('marked').then((module) => (markdown = module));
+  });
   const previewHtml = $derived.by(() => {
-    if (!previewing || !text.trim()) return '';
-    const dirty = marked.parse(text, { async: false, gfm: true, breaks: true }) as string;
+    if (!previewing || !text.trim() || !markdown) return '';
+    const dirty = markdown.marked.parse(text, { async: false, gfm: true, breaks: true }) as string;
     return enrichHtml(sanitizeFormattedBody(dirty, { mediaUrl: (mxc) => backend.mediaUrl(mxc) }), {
       twemojiUrl: (codepoints) => backend.twemojiUrl(codepoints),
     });
@@ -427,6 +583,16 @@
     <div class="preview">{@html previewHtml}</div>
   {/if}
 
+  {#if flagged}
+    <div class="context spell" role="group" aria-label="Spelling suggestions for {flagged.word.core}">
+      <span class="muted">{flagged.suggestions.length > 0 ? 'Did you mean' : `No suggestions for “${flagged.word.core}”`}</span>
+      {#each flagged.suggestions as suggestion (suggestion)}
+        <button class="btn small" onmousedown={(e) => e.preventDefault()} onclick={() => replaceWord(flagged.word, suggestion)}>{suggestion}</button>
+      {/each}
+      <button class="btn small ghost" onmousedown={(e) => e.preventDefault()} onclick={() => addToDictionary(flagged.word.core)}>Add to dictionary</button>
+    </div>
+  {/if}
+
   {#if menuOpen}
     <ul class="autocomplete" role="listbox">
       {#if mentionMatches.length}
@@ -454,21 +620,27 @@
     <input bind:this={fileInput} type="file" multiple hidden onchange={(e) => { addFiles(e.currentTarget.files ?? []); e.currentTarget.value = ''; }} />
     <button class="icon-btn" onclick={() => fileInput?.click()} aria-label="Attach files" title="Attach files"><Icon name="paperclip" /></button>
 
-    <textarea
-      bind:this={textarea}
-      bind:value={text}
-      rows="1"
-      class="grow"
-      placeholder={staged.length ? 'Add a caption…' : 'Message… (@mention, markdown supported, / for commands)'}
-      spellcheck={settings.value?.spellcheck.enabled ?? true}
-      aria-label="Message"
-      {onkeydown}
-      {onpaste}
-      oninput={() => { noteTyping(); caretVersion++; inlineError = ''; }}
-      onclick={() => caretVersion++}
-      onkeyup={() => caretVersion++}
-      onblur={stopTyping}
-    ></textarea>
+    <div class="editor grow">
+      {#if segments.length > 0}
+        <div class="spell-marks" bind:this={overlay} aria-hidden="true" style:width="{box.width}px" style:height="{box.height}px">{#each segments as segment (segment.start)}{#if segment.typo}<mark data-start={segment.start}>{segment.text}</mark>{:else}{segment.text}{/if}{/each}{'\u200b'}</div>
+      {/if}
+      <textarea
+        bind:this={textarea}
+        bind:value={text}
+        rows="1"
+        placeholder={staged.length ? 'Add a caption…' : 'Message… (@mention, markdown supported, / for commands)'}
+        spellcheck={spellOn && spelling.status?.available === false}
+        aria-label="Message"
+        {onkeydown}
+        {onpaste}
+        {oncontextmenu}
+        oninput={(e) => { noteTyping(); caretVersion++; inlineError = ''; onedit(e); }}
+        onclick={() => caretVersion++}
+        onkeyup={() => caretVersion++}
+        onscroll={syncScroll}
+        onblur={stopTyping}
+      ></textarea>
+    </div>
 
     <button class="icon-btn" class:active={previewing} onclick={() => (previewing = !previewing)} aria-label="Preview markdown" aria-pressed={previewing} title="Preview markdown"><Icon name="eye" /></button>
     <button class="icon-btn" onclick={(e) => (pickerAnchor = e.currentTarget.getBoundingClientRect())} aria-label="Emoji and stickers" title="Emoji and stickers"><Icon name="smile" /></button>
@@ -569,7 +741,37 @@
   .preview + .bar {
     border-radius: 0 0 var(--radius) var(--radius);
   }
+  .spell {
+    flex-wrap: wrap;
+  }
+  .editor {
+    position: relative;
+    display: flex;
+  }
+  /* The marks sit behind the (transparent) textarea, laid out exactly like its text. */
+  .spell-marks {
+    position: absolute;
+    top: 0;
+    left: 0;
+    padding: 6px 4px;
+    overflow: hidden;
+    color: transparent;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    overflow-wrap: break-word;
+    pointer-events: none;
+  }
+  .spell-marks mark {
+    background: none;
+    color: transparent;
+    text-decoration: underline wavy var(--danger);
+    text-decoration-skip-ink: none;
+    text-underline-offset: 3px;
+  }
   textarea {
+    position: relative;
+    z-index: 1;
+    width: 100%;
     max-height: 40vh;
     min-height: 32px;
     padding: 6px 4px;

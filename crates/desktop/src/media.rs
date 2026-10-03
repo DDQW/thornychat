@@ -10,6 +10,11 @@
 //! | `/twemoji/<codepoints>.svg` | Twemoji CDN, cached on disk |
 //! | `/web?u=<https url>` | An allow-listed card image host (tweet / Steam art) |
 //!
+//! Either image route takes `upscale=<long edge>` for the lightbox: a
+//! Lanczos3-upscaled copy, made and cached by `upscale.rs` (422 when there is
+//! nothing to gain, 415 for animations and formats it can't decode — the page
+//! then keeps the original).
+//!
 //! Matrix media is authenticated, so it can only be fetched by the client; the
 //! page could never load an `mxc://` URL itself. Responses honour `Range`, which
 //! the `<video>` element needs for seeking.
@@ -53,6 +58,13 @@ async fn serve(bridge: &Bridge, request: &Request<Vec<u8>>) -> Response<Cow<'sta
     };
     let range = request.headers().get(header::RANGE).and_then(|value| value.to_str().ok());
     let mime_hint = uri.query().and_then(|query| query_param(query, "mime"));
+    let upscale = match uri.query().and_then(|query| query_param(query, "upscale")) {
+        None => None,
+        Some(edge) => match parse_upscale(&edge) {
+            Some(edge) => Some(edge),
+            None => return status(StatusCode::BAD_REQUEST, "bad upscale size"),
+        },
+    };
 
     match route {
         Route::Mxc { server, media_id } => {
@@ -60,6 +72,13 @@ async fn serve(bridge: &Bridge, request: &Request<Vec<u8>>) -> Response<Cow<'sta
                 return status(StatusCode::SERVICE_UNAVAILABLE, "not signed in");
             };
             let mxc = format!("mxc://{server}/{media_id}");
+            if let Some(edge) = upscale {
+                let load = || async {
+                    let path = client_core::media::fetch_file(&running.client, &bridge.media_dir, &mxc).await?;
+                    Ok(tokio::fs::read(path).await?)
+                };
+                return serve_upscaled(crate::upscale::upscaled(&bridge.upscale_dir, &mxc, edge, load).await).await;
+            }
             match client_core::media::fetch_file(&running.client, &bridge.media_dir, &mxc).await {
                 Ok(path) => serve_file(&path, range, mime_hint.as_deref()).await,
                 Err(error) => {
@@ -75,6 +94,11 @@ async fn serve(bridge: &Bridge, request: &Request<Vec<u8>>) -> Response<Cow<'sta
                 status(StatusCode::NOT_FOUND, "no such emoji")
             }
         },
+        Route::Web(url) if upscale.is_some() => {
+            let load = || embeds::fetch_web_image(&bridge.emoji_dir, &url);
+            let edge = upscale.unwrap_or_default();
+            serve_upscaled(crate::upscale::upscaled(&bridge.upscale_dir, &url, edge, load).await).await
+        }
         Route::Web(url) => match embeds::fetch_web_image(&bridge.emoji_dir, &url).await {
             Ok(bytes) => {
                 let mime = sniff(&bytes, None);
@@ -85,6 +109,23 @@ async fn serve(bridge: &Bridge, request: &Request<Vec<u8>>) -> Response<Cow<'sta
                 status(StatusCode::BAD_GATEWAY, "image unavailable")
             }
         },
+    }
+}
+
+/// An `upscale=` long edge: a plain positive number no larger than the output
+/// cap (the page asks for at most that; anything else is a malformed URL).
+fn parse_upscale(value: &str) -> Option<u32> {
+    let edge: u32 = value.parse().ok()?;
+    (1..=crate::upscale::MAX_OUTPUT_EDGE).contains(&edge).then_some(edge)
+}
+
+async fn serve_upscaled(result: Result<std::path::PathBuf, crate::upscale::Refusal>) -> Response<Cow<'static, [u8]>> {
+    use crate::upscale::Refusal;
+    match result {
+        Ok(path) => serve_file(&path, None, None).await,
+        Err(Refusal::NotWorthIt) => status(StatusCode::UNPROCESSABLE_ENTITY, "nothing to gain from upscaling"),
+        Err(Refusal::Animated | Refusal::Undecodable | Refusal::TooLarge) => status(StatusCode::UNSUPPORTED_MEDIA_TYPE, "not an image this can upscale"),
+        Err(Refusal::Unavailable) => status(StatusCode::BAD_GATEWAY, "media unavailable"),
     }
 }
 
@@ -133,6 +174,13 @@ fn query_param(query: &str, key: &str) -> Option<String> {
     url::form_urlencoded::parse(query.as_bytes()).find(|(name, _)| name == key).map(|(_, value)| value.into_owned())
 }
 
+/// Most bytes one open-ended range response (`bytes=N-`) carries. That is
+/// what `<video>` asks for, at the start and after every seek; answered in
+/// full, a 256 MiB clip meant a 256 MiB response body per request (measured),
+/// copied again into the webview. A short 206 is ordinary HTTP — the player
+/// asks for the next chunk when it gets there.
+const MAX_OPEN_RANGE_BYTES: u64 = 4 * 1024 * 1024;
+
 /// A byte range request resolved against a file length.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 struct ByteRange {
@@ -166,8 +214,11 @@ fn resolve_range(header: Option<&str>, len: u64) -> RangeRequest {
     let parsed = match (first.is_empty(), last.is_empty()) {
         // "-N": the last N bytes.
         (true, false) => last.parse::<u64>().ok().filter(|&n| n > 0).map(|n| (len.saturating_sub(n), len.saturating_sub(1))),
-        // "N-": from N to the end.
-        (false, true) => first.parse::<u64>().ok().map(|start| (start, len.saturating_sub(1))),
+        // "N-": from N towards the end, a chunk at a time.
+        (false, true) => first
+            .parse::<u64>()
+            .ok()
+            .map(|start| (start, len.saturating_sub(1).min(start.saturating_add(MAX_OPEN_RANGE_BYTES - 1)))),
         (false, false) => match (first.parse::<u64>(), last.parse::<u64>()) {
             (Ok(start), Ok(end)) if start <= end => Some((start, end.min(len.saturating_sub(1)))),
             _ => None,
@@ -299,6 +350,15 @@ mod tests {
     }
 
     #[test]
+    fn upscale_sizes_are_bounded() {
+        assert_eq!(parse_upscale("2048"), Some(2048));
+        assert_eq!(parse_upscale("4096"), Some(4096));
+        for bad in ["0", "4097", "-1", "1e3", "", "99999999999", "2048px"] {
+            assert_eq!(parse_upscale(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
     fn hostile_routes_are_refused() {
         for (path, query) in [
             ("/mxc/matrix.org", None),
@@ -334,6 +394,30 @@ mod tests {
     }
 
     #[test]
+    fn open_ended_ranges_are_served_a_chunk_at_a_time() {
+        let len = 256 * 1024 * 1024;
+        assert_eq!(resolve_range(Some("bytes=0-"), len), partial(0, MAX_OPEN_RANGE_BYTES - 1));
+        let middle = 100 * 1024 * 1024;
+        assert_eq!(resolve_range(Some("bytes=104857600-"), len), partial(middle, middle + MAX_OPEN_RANGE_BYTES - 1));
+        // Near the end, the chunk stops at the last byte.
+        assert_eq!(resolve_range(Some(&format!("bytes={}-", len - 10)), len), partial(len - 10, len - 1));
+        // An explicit range is honoured as asked.
+        assert_eq!(resolve_range(Some("bytes=0-10485759"), len), partial(0, 10 * 1024 * 1024 - 1));
+    }
+
+    #[tokio::test]
+    async fn a_chunked_response_says_where_it_ends() {
+        let path = std::env::temp_dir().join(format!("thornychat-range-test-{}", std::process::id()));
+        std::fs::write(&path, vec![1u8; (MAX_OPEN_RANGE_BYTES + 1000) as usize]).unwrap();
+        let response = serve_file(&path, Some("bytes=0-"), Some("video/mp4")).await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.body().len() as u64, MAX_OPEN_RANGE_BYTES);
+        let expected = format!("bytes 0-{}/{}", MAX_OPEN_RANGE_BYTES - 1, MAX_OPEN_RANGE_BYTES + 1000);
+        assert_eq!(response.headers().get(header::CONTENT_RANGE).unwrap(), expected.as_str());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn a_range_past_the_end_is_unsatisfiable() {
         assert_eq!(resolve_range(Some("bytes=1000-"), 1000), RangeRequest::Unsatisfiable);
         assert_eq!(resolve_range(Some("bytes=2000-3000"), 1000), RangeRequest::Unsatisfiable);
@@ -363,6 +447,23 @@ mod tests {
         assert_eq!(sniff(&junk, Some("text/html")), "application/octet-stream");
         assert_eq!(sniff(&junk, Some("video/mp4; x=y")), "application/octet-stream");
         assert_eq!(sniff(&junk, None), "application/octet-stream");
+    }
+
+    /// What one `<video>` request costs: `cargo test -p thornychat --release open_ended_range_cost -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn open_ended_range_cost() {
+        let path = std::env::temp_dir().join(format!("thornychat-range-bench-{}", std::process::id()));
+        std::fs::write(&path, vec![7u8; 256 * 1024 * 1024]).unwrap();
+        let started = std::time::Instant::now();
+        let response = serve_file(&path, Some("bytes=0-"), Some("video/mp4")).await;
+        println!(
+            "bytes=0- on a 256 MiB file: {:?}, body {} MiB, Content-Range {:?}",
+            started.elapsed(),
+            response.body().len() / (1024 * 1024),
+            response.headers().get(header::CONTENT_RANGE)
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

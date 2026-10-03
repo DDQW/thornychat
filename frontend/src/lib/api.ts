@@ -11,6 +11,7 @@ import type {
   RestoreOutcome,
   SessionInfo,
   Settings,
+  SpellStatus,
   SteamAppData,
   ThemeConfig,
   TweetData,
@@ -49,11 +50,22 @@ export interface Backend {
   readLog(): Promise<string>;
   clearLogs(): Promise<string>;
   quit(): Promise<void>;
+  /** The Windows speller: whether it is usable (and warm), and in which language. */
+  spellStatus(): Promise<SpellStatus>;
+  /** One verdict per word, in order: `true` for misspelled. */
+  spellCheck(words: string[]): Promise<boolean[]>;
+  spellSuggest(word: string): Promise<string[]>;
+  /** The fix autocorrect may apply, when the speller is confident of one. */
+  spellCorrection(word: string): Promise<string | null>;
+  /** Adds a word to the user's Windows dictionary. */
+  spellAdd(word: string): Promise<void>;
   /** Game-activity connector: the emote body to post (e.g. "plays Half-Life"). */
   onConnectorEmote(handler: (body: string) => void): Promise<() => void>;
 
   /** URL the webview can load for an `mxc://` URI, served by the shell. */
   mediaUrl(mxcUrl: string, mimeHint?: string): string;
+  /** A Lanczos3-upscaled copy of an `mxc://` image with this long edge, made by the shell; null where there is none. */
+  upscaledUrl(mxcUrl: string, longEdge: number): string | null;
   twemojiUrl(codepoints: string): string;
   webImageUrl(url: string): string;
 }
@@ -67,6 +79,12 @@ async function createTauriBackend(): Promise<Backend> {
   // The window is created with `use_https_scheme`, so WebView2 serves custom
   // schemes as https://<scheme>.localhost; other platforms use <scheme>://localhost.
   const mediaBase = navigator.userAgent.includes('Windows') ? 'https://tcmedia.localhost' : 'tcmedia://localhost';
+  const mediaUrl = (mxcUrl: string, mimeHint?: string): string => {
+    const match = /^mxc:\/\/([^/]+)\/([^/?#]+)$/.exec(mxcUrl);
+    if (!match) return '';
+    const query = mimeHint ? `?mime=${encodeURIComponent(mimeHint)}` : '';
+    return `${mediaBase}/mxc/${match[1]}/${match[2]}${query}`;
+  };
 
   return {
     async attachEvents(onEvent) {
@@ -111,13 +129,17 @@ async function createTauriBackend(): Promise<Backend> {
     readLog: () => invoke('read_log'),
     clearLogs: () => invoke('clear_logs'),
     quit: () => invoke('quit_app'),
+    spellStatus: () => invoke('spell_status'),
+    spellCheck: (words) => invoke('spell_check', { words }),
+    spellSuggest: (word) => invoke('spell_suggest', { word }),
+    spellCorrection: (word) => invoke('spell_correction', { word }),
+    spellAdd: (word) => invoke('spell_add', { word }),
     onConnectorEmote: (handler) => listen<string>('connector-emote', (event) => handler(event.payload)),
 
-    mediaUrl(mxcUrl, mimeHint) {
-      const match = /^mxc:\/\/([^/]+)\/([^/?#]+)$/.exec(mxcUrl);
-      if (!match) return '';
-      const query = mimeHint ? `?mime=${encodeURIComponent(mimeHint)}` : '';
-      return `${mediaBase}/mxc/${match[1]}/${match[2]}${query}`;
+    mediaUrl,
+    upscaledUrl(mxcUrl, longEdge) {
+      const base = mediaUrl(mxcUrl);
+      return base ? `${base}?upscale=${Math.round(longEdge)}` : null;
     },
     twemojiUrl: (codepoints) => `${mediaBase}/twemoji/${codepoints}.svg`,
     webImageUrl: (url) => `${mediaBase}/web?u=${encodeURIComponent(url)}`,
