@@ -61,6 +61,8 @@ export interface Backend {
   spellAdd(word: string): Promise<void>;
   /** Game-activity connector: the emote body to post (e.g. "plays Half-Life"). */
   onConnectorEmote(handler: (body: string) => void): Promise<() => void>;
+  /** A notification toast was clicked: the room it was about. */
+  onOpenRoom(handler: (roomId: string) => void): Promise<() => void>;
 
   /** URL the webview can load for an `mxc://` URI, served by the shell. */
   mediaUrl(mxcUrl: string, mimeHint?: string): string;
@@ -135,6 +137,7 @@ async function createTauriBackend(): Promise<Backend> {
     spellCorrection: (word) => invoke('spell_correction', { word }),
     spellAdd: (word) => invoke('spell_add', { word }),
     onConnectorEmote: (handler) => listen<string>('connector-emote', (event) => handler(event.payload)),
+    onOpenRoom: (handler) => listen<string>('open-room', (event) => handler(event.payload)),
 
     mediaUrl,
     upscaledUrl(mxcUrl, longEdge) {

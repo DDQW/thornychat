@@ -17,7 +17,6 @@ use client_core::{ClientCommand, ClientEvent, RunningClient};
 use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
-use tauri_plugin_notification::NotificationExt;
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 
@@ -123,17 +122,13 @@ async fn pump(bridge: Arc<Bridge>, mut events: mpsc::UnboundedReceiver<ClientEve
 }
 
 /// A toast for a push-rule hit — skipped while the window has focus, since
-/// the user is already looking at the app.
+/// the user is already looking at the app. Clicking it opens the room.
 fn notify(app: &AppHandle, notification: &client_core::events::NotificationEvent) {
     let focused = app.get_webview_window("main").and_then(|window| window.is_focused().ok()).unwrap_or(false);
     if focused {
         return;
     }
-    if let Err(error) =
-        app.notification().builder().title(&notification.title).body(&notification.body).show()
-    {
-        tracing::warn!(%error, "could not show a notification");
-    }
+    crate::toast::show(app, notification.room_id.clone(), notification.title.clone(), notification.body.clone());
 }
 
 #[derive(Debug, Clone, Serialize)]

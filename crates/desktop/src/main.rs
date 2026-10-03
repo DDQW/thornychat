@@ -20,6 +20,7 @@ mod log_limit;
 mod logging;
 mod media;
 mod spellcheck;
+mod toast;
 mod tray;
 mod upscale;
 
@@ -109,7 +110,6 @@ fn main() {
     let app = builder
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_notification::init())
         .register_asynchronous_uri_scheme_protocol(media::SCHEME, media::handler::<tauri::Wry>)
         .manage(settings.clone())
         .setup(move |app| {

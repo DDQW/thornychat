@@ -155,6 +155,9 @@ async fn run(
     // `event_tx` is gone (send fails, their loops break).
     let _room_list_handle = room_list::spawn_forwarder(client.clone(), event_tx.clone());
     let _notification_watcher = crate::push::spawn_watcher(client.clone(), event_tx.clone());
+    // Push-rule hits → toasts (see `notifications`): registered once, runs
+    // inside every sync response the service processes from here on.
+    crate::notifications::register(&client, event_tx.clone()).await;
     let _ignore_watcher = crate::ignore::spawn_watcher(client.clone(), event_tx.clone());
     let call_manager = crate::calls::CallManager::spawn(client.clone(), event_tx.clone());
     // Detached for the process lifetime, like the watchers above — but this

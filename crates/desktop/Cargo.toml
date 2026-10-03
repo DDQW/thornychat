@@ -25,7 +25,8 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-notification = "2"
+# Toasts, shown directly so a click can open the room (see src/toast.rs).
+tauri-winrt-notification = "0.8"
 
 tokio = { workspace = true }
 serde = { workspace = true }

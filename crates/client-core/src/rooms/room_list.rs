@@ -72,7 +72,7 @@ pub async fn direct_room_ids(client: &Client) -> HashSet<OwnedRoomId> {
 /// without an async call here. Early in the very first sync the cache can
 /// be empty or legitimately `Empty` — fall back to `room.name()`/room id
 /// and let the next room-list emission correct it.
-fn display_name(room: &Room) -> Option<String> {
+pub(crate) fn display_name(room: &Room) -> Option<String> {
     match room.cached_display_name() {
         Some(matrix_sdk::RoomDisplayName::Empty) | None => {
             // No SDK-computed name yet (e.g. a just-created DM before its

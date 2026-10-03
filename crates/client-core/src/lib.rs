@@ -15,6 +15,7 @@ pub mod events;
 pub mod ignore;
 pub mod key_backup;
 pub mod media;
+mod notifications;
 pub mod push;
 pub mod rooms;
 pub mod search;

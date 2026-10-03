@@ -584,6 +584,9 @@ export function createMockBackend(): Backend {
     async onConnectorEmote() {
       return () => {};
     },
+    async onOpenRoom() {
+      return () => {};
+    },
 
     mediaUrl(mxcUrl) {
       const name = mxcUrl.split('/').pop() ?? 'media';

@@ -5,8 +5,8 @@
 //! made locally *and* from other devices).
 //!
 //! The write-side (set/clear mode) lives in `sync.rs`'s command handlers.
-//! Push-rule *evaluation* (feeding `ClientEvent::Notification` for native
-//! toasts) is still Phase 7.
+//! Push-rule *evaluation* is matrix-sdk's, during sync; `notifications.rs`
+//! turns its hits into `ClientEvent::Notification` for native toasts.
 
 use matrix_sdk::notification_settings::{
     IsEncrypted, IsOneToOne, NotificationSettings, RoomNotificationMode,

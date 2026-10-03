@@ -159,16 +159,21 @@ across launches; tray icon (click to raise the window, Show/Quit menu; closing t
 window still quits); single instance per profile (a second launch of the default
 profile raises the first; other profiles run side by side); a per-user NSIS
 installer (`cargo xtask installer`) whose Start Menu shortcut carries the app
-identity `Woelki.ThornyChat` that Windows uses to attribute toasts. Exit now gives
-the sync worker two seconds to leave any call it is in before the process goes.
+identity `Woelki.ThornyChat` that Windows uses to attribute toasts; message toasts
+from the account's push rules (matrix-sdk evaluates them during sync,
+`client-core/src/notifications.rs`; room modes and keywords apply, history and
+your own messages don't toast, nothing toasts while the window has focus), and
+clicking one raises the window and opens the room (`desktop/src/toast.rs`). Exit
+now gives the sync worker two seconds to leave any call it is in before the
+process goes.
 
 Remaining:
-- Push-rule evaluation → `ClientEvent::Notification` (client-core `push.rs`
-  still only reads/writes notification *settings*; the Notification event is never
-  emitted). The shell already turns one into a toast when the window isn't
-  focused, so nothing else is needed on this side once it lands.
-- Toast actions (buttons, inline reply) and click-to-open-room: not wired; a
-  toast click just brings the app forward.
+- Toasts are untested against a live account (no way to produce a push-rule
+  hit without one). A click from the notification centre after the popup has
+  gone relies on Windows relaunching the app through its shortcut (the single
+  instance then raises the window, without opening the room): a COM toast
+  activator would make that path open the room too.
+- Toast actions (buttons, inline reply).
 - Tray unread badge.
 - Updater: no decision yet (`tauri-plugin-updater` needs signing keys).
 - Code signing: the installer is unsigned, so SmartScreen will warn.
@@ -184,9 +189,6 @@ Remaining:
   reopened when it grows past that) but every loaded row is a real DOM node.
   If big rooms with many animated images get heavy, try `virtua` (the plan's
   first candidate) before anything bespoke.
-- Push-rule notifications also need the Tauri-side toast to be checked on a
-  real install: `tauri-plugin-notification` attributes toasts through the
-  installer's shortcut.
 - Connectors: "now playing" media source (Windows media-transport API) to
   sit beside game detection.
 - Repo hygiene: CI runs check/clippy/test, but the planned wiremock-based

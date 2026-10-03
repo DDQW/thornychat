@@ -28,13 +28,23 @@
 
   onMount(() => {
     let stopEmotes = () => {};
+    let stopOpenRoom = () => {};
     void (async () => {
       // The listener must exist before anything can produce an event.
       await backend.attachEvents(handleEvent);
       stopEmotes = await backend.onConnectorEmote(postActivityEmote);
+      // A clicked toast: the shell has already brought the window back.
+      stopOpenRoom = await backend.onOpenRoom((roomId) => {
+        if (!rooms.byId.has(roomId)) return;
+        ui.reset();
+        rooms.select(roomId);
+      });
       await session.boot();
     })();
-    return () => stopEmotes();
+    return () => {
+      stopEmotes();
+      stopOpenRoom();
+    };
   });
 
   function onkeydown(event: KeyboardEvent) {
