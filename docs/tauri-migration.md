@@ -34,7 +34,15 @@ build is the `iced-final` tag and git history has everything else. The
    that traversal, unknown hosts and out-of-allow-list URLs are refused.
 3. **Embeds.** The window is created with `use_https_scheme` so the page's origin is
    `https://tauri.localhost` — YouTube refuses embedders without a real https
-   origin. **Not exercised against YouTube itself.**
+   origin. The player still stayed black at first: on Windows, wry runs every
+   initialization script in every frame (Tauri's "main frame only" flag is
+   ignored), so `freezePrototype` froze `Object.prototype` inside YouTube's
+   iframe too, and its player script throws on that. The freeze is now our own
+   script, applied to the top-level document only (`main.rs`). Tauri's IPC
+   bootstrap reaches those frames the same way; its ACL rejects their calls
+   (checked: `invoke` from the YouTube frame → "not allowed by ACL"). Player
+   pop-ups ("Watch on YouTube") go to the system browser through `on_new_window`.
+   Verified in the built exe, 2026-10-03.
 4. **Spellcheck.** WebView2's built-in checker marks **nothing** in this app — not
    in a `textarea`, not in `contenteditable`, with `spellcheck` on and the Windows
    language list including English (checked on the built exe, 2026-10-03). The

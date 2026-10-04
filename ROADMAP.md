@@ -22,9 +22,10 @@ blocking, homeserver discovery against a live server.
 **Not yet verified, because it needs a signed-in account** — treat these as the
 first things to try on a real session: sync and the room list, the timeline against
 real events (the UI was exercised against a mock worker), Matrix media over
-`tcmedia`, attachment upload, SSO, key backup / verification, and the YouTube
-embed (the page is served from `https://tauri.localhost` specifically to satisfy
-its referer check; not exercised against YouTube itself).
+`tcmedia`, attachment upload, SSO, key backup / verification. (The YouTube and
+Vimeo embeds were checked in the built exe on 2026-10-03, by loading the same
+iframe on the login page; Dailymotion's player answered 403 from this network,
+in a plain browser too.)
 
 **Behaviour that changed**
 - Spelling is the Windows speller again (`ISpellChecker` on its own STA thread,

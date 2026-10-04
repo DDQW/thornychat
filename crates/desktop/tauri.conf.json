@@ -12,7 +12,7 @@
     "withGlobalTauri": false,
     "windows": [],
     "security": {
-      "freezePrototype": true,
+      "freezePrototype": false,
       "csp": {
         "default-src": "'none'",
         "script-src": "'self'",

@@ -78,6 +78,13 @@ fn is_app_origin(url: &tauri::Url) -> bool {
     }
 }
 
+/// Freezes `Object.prototype` against prototype pollution — in the app's own
+/// document only. Tauri's `freezePrototype` setting is off because on Windows
+/// wry injects every initialization script into every frame, cross-origin
+/// iframes included, and YouTube's embedded player throws on a frozen
+/// prototype (it assigns `toString` on its own objects) and stays black.
+const FREEZE_PROTOTYPE_SCRIPT: &str = "if (window === window.top) Object.freeze(Object.prototype);";
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     // `--minimized` (used by autostart) is a flag, not the positional profile
@@ -128,12 +135,22 @@ fn main() {
                 // rather than http://: YouTube's embedded player refuses to
                 // play for an embedder without a real https origin (error 153).
                 .use_https_scheme(true)
+                .initialization_script(FREEZE_PROTOTYPE_SCRIPT)
                 .on_navigation(|url| {
                     let allowed = is_app_origin(url);
                     if !allowed {
                         tracing::warn!(%url, "blocked a navigation away from the app page");
                     }
                     allowed
+                })
+                // An embedded player's logo or "Watch on YouTube" asks for a
+                // new window, which WebView2 would otherwise drop without a
+                // trace. Open it in the system browser instead.
+                .on_new_window(|url, _features| {
+                    if let Err(error) = commands::open_external(url.to_string()) {
+                        tracing::warn!(%url, %error, "refused a new-window request");
+                    }
+                    tauri::webview::NewWindowResponse::Deny
                 })
                 .build()?;
             commands::apply_zoom(&handle, initial_scale);
