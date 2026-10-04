@@ -62,22 +62,81 @@
     scroller?.scrollTo({ top: scroller.scrollHeight, behavior: smooth ? 'smooth' : 'instant' });
   }
 
+  // Only the reader moving up lets go of the bottom. Deciding it from the
+  // distance alone lost the bottom whenever content grew between a scroll to
+  // the bottom and its scroll event (images and link cards loading in a row),
+  // and then nothing scrolled down again.
+  let lastScrollTop = 0;
+
   function onscroll() {
     if (!scroller) return;
-    distanceFromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-    stuck = distanceFromBottom < BOTTOM_SLACK;
+    const top = scroller.scrollTop;
+    distanceFromBottom = scroller.scrollHeight - top - scroller.clientHeight;
+    if (distanceFromBottom < BOTTOM_SLACK) stuck = true;
+    else if (top < lastScrollTop - 1) stuck = false;
+    lastScrollTop = top;
+    captureAnchor();
     maybePaginate();
   }
 
-  // Whenever the content gets taller or shorter — a message arrives, an image
-  // finishes loading, a link card appears — stay glued to the bottom if that's
-  // where the reader is.
+  // --- keeping the reader's place ---
+  // The browser's own scroll anchoring is switched off for this scroller: it
+  // does nothing at scrollTop 0, exactly where someone who just hit the top
+  // is. Instead the message at the top of the view is remembered, and when
+  // anything above it changes height (older history arriving, an image or
+  // link card loading in), scrollTop is moved by the same amount. Anchoring
+  // on a message rather than on whatever row comes first matters: on every
+  // back-pagination the SDK replaces the date divider at the top with a new
+  // one, so the first row is never the same row twice.
+  let anchor: { eventId: string; offset: number } | null = null;
+
+  function messageRows(): HTMLElement[] {
+    return content ? [...content.querySelectorAll<HTMLElement>('[data-event-id]')] : [];
+  }
+
+  function captureAnchor() {
+    anchor = null;
+    if (!scroller || stuck) return;
+    const viewTop = scroller.getBoundingClientRect().top;
+    const elements = messageRows();
+    // Rows are in document order, so the first one reaching into the view is
+    // found by bisection.
+    let low = 0;
+    let high = elements.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (elements[middle]!.getBoundingClientRect().bottom > viewTop) high = middle;
+      else low = middle + 1;
+    }
+    const row = elements[low];
+    if (row?.dataset.eventId) anchor = { eventId: row.dataset.eventId, offset: row.getBoundingClientRect().top - viewTop };
+  }
+
+  function keepAnchor() {
+    if (!scroller || !content || !anchor) return;
+    const row = content.querySelector<HTMLElement>(`[data-event-id="${CSS.escape(anchor.eventId)}"]`);
+    if (!row) {
+      captureAnchor();
+      return;
+    }
+    const shift = row.getBoundingClientRect().top - scroller.getBoundingClientRect().top - anchor.offset;
+    if (Math.abs(shift) < 1) return;
+    scroller.scrollTop += shift;
+    lastScrollTop = scroller.scrollTop;
+  }
+
+  // Whenever the content or the viewport changes size — a message arrives, an
+  // image finishes loading, older history comes in, the composer grows a line —
+  // stay glued to the bottom if that's where the reader is, and otherwise keep
+  // what they're reading where it was.
   $effect(() => {
-    if (!content) return;
+    if (!content || !scroller) return;
     const observer = new ResizeObserver(() => {
       if (stuck) scrollToBottom();
+      else keepAnchor();
     });
     observer.observe(content);
+    observer.observe(scroller);
     return () => observer.disconnect();
   });
 
@@ -95,27 +154,17 @@
     void tick().then(() => scrollToBottom());
   });
 
-  // --- keeping the reader's place when history is prepended ---
-  // The browser's own scroll anchoring is switched off for this scroller: it
-  // does nothing at scrollTop 0 (exactly where someone who just hit the top
-  // is), and it can move scrollTop on its own, which this code would mistake
-  // for the reader scrolling. Instead, when rows appear *above* the ones that
-  // were first, the added height is added to scrollTop.
-  let previousFirstKey: string | null = null;
-  $effect.pre(() => {
-    const first = rows[0]?.key ?? null;
-    const element = scroller;
-    const prepended = previousFirstKey !== null && first !== previousFirstKey && rows.some((row, index) => index > 0 && row.key === previousFirstKey);
-    previousFirstKey = first;
-    if (!element || !prepended || stuck) return;
-    // This runs before the DOM catches up, so these are the old measurements.
-    const before = { height: element.scrollHeight, top: element.scrollTop };
-    void tick().then(() => {
-      if (scroller) scroller.scrollTop = before.top + (scroller.scrollHeight - before.height);
-    });
-  });
-
   // --- older history ---
+  /**
+   * Runs `check` once the next frame has been laid out — after the resize
+   * observer above has moved scrollTop for whatever just arrived. Checking
+   * sooner reads the position from before the compensation (still at the top
+   * after a page of history came in) and asks for one page too many.
+   */
+  function afterLayout(check: () => void) {
+    requestAnimationFrame(() => setTimeout(check));
+  }
+
   function maybePaginate() {
     const tl = timeline;
     if (!tl || !scroller || !tl.loaded || tl.loadingOlder || tl.startReached || rows.length === 0) return;
@@ -132,12 +181,12 @@
         tl.loadingOlder = false;
         // A short list may still not fill the viewport; ask again, but only if
         // that page actually produced something (otherwise we'd spin).
-        if (tl.items.length > before) void tick().then(maybePaginate);
+        if (tl.items.length > before) afterLayout(maybePaginate);
       });
   }
   $effect(() => {
     void rows.length;
-    void tick().then(maybePaginate);
+    afterLayout(maybePaginate);
   });
 
   // --- read marker ---

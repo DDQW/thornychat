@@ -28,7 +28,16 @@ build is the `iced-final` tag and git history has everything else. The
    reopens it past 200 items, so rows are plain DOM. Two things the browser does by
    itself were wrong for chat and are done by hand: scroll anchoring is off (it does
    nothing at scrollTop 0), and prepending history compensates for the added height.
-   Verified against a mock worker, including the scrollTop-0 case.
+   Verified against a mock worker, including the scrollTop-0 case — which turned out
+   not to be enough (2026-10-04): the first version detected a prepend by the old
+   first row reappearing further down, but the SDK replaces the top date divider on
+   every same-day back-pagination, so on a real account nothing was compensated and
+   history loaded page after page under a reader parked at the top. It now anchors
+   on the message at the top of the view and keeps it in place on any resize, and the
+   mock replaces its top divider the way the SDK does. Sticking to the bottom also
+   lost out to the composer's `height: auto` autosize (one forced layout per line
+   clamped the timeline's scrollTop); the composer uses `field-sizing: content` now,
+   and only an upward scroll lets go of the bottom.
 2. **Media.** A `tcmedia` custom protocol backed by the existing disk cache; no bytes
    cross IPC. Verified in the built exe over `https://tcmedia.localhost`, including
    that traversal, unknown hosts and out-of-allow-list URLs are refused.

@@ -172,7 +172,7 @@ function syntheticHistory(count: number, now: number): TimelineItem[] {
     'haha 😂😂',
     'Reminder: standup at 10',
   ];
-  return Array.from({ length: count }, (_, i) => {
+  const messages = Array.from({ length: count }, (_, i) => {
     const at = now - (count - i) * 45_000;
     const sender = senders[i % senders.length]!;
     switch (i % 10) {
@@ -186,6 +186,7 @@ function syntheticHistory(count: number, now: number): TimelineItem[] {
         return item(sender, text(lines[i % lines.length]!), at, i % 10 === 5 ? { in_reply_to: { event_id: '$x', sender: 'Alice', snippet: 'an earlier message', image_url: null } } : {});
     }
   });
+  return [item('', { type: 'DateDivider', data: 'Today' }, messages[0]?.timestamp_ms ?? now), ...messages];
 }
 
 /** A roster of `count` people, for `?members=N`. */
@@ -235,6 +236,7 @@ export function createMockBackend(): Backend {
   };
   const profileFiles = new Map<string, string>();
   const timelines = new Map<string, TimelineItem[]>();
+  const pagesLoaded = new Map<string, number>();
   const params = new URLSearchParams(location.search);
   let loggedIn = params.get('login') === null;
   const bigHistory = Number(params.get('history')) || 0;
@@ -270,6 +272,7 @@ export function createMockBackend(): Backend {
         const id = command.data.room_id;
         const list = id === '!lonely:thorny.chat' ? [] : bigHistory > 0 ? syntheticHistory(bigHistory, Date.now()) : sampleHistory(Date.now());
         timelines.set(id, list);
+        pagesLoaded.delete(id);
         setTimeout(() => {
           diffs(id, [{ type: 'Reset', data: list }]);
           emit({ type: 'RoomMembersUpdated', data: { room_id: id, members: bigRoster > 0 ? syntheticMembers(bigRoster) : MEMBERS } });
@@ -291,14 +294,27 @@ export function createMockBackend(): Backend {
         const { room_id, request_id } = command.data;
         const current = timelines.get(room_id) ?? [];
         const first = current.find((i) => i.timestamp_ms > 0);
-        const page = Math.floor(current.length / 12);
+        const page = pagesLoaded.get(room_id) ?? 0;
+        pagesLoaded.set(room_id, page + 1);
         setTimeout(() => {
-          if (page >= 4) {
+          if (page >= 6) {
             emit({ type: 'TimelineStartReached', data: { room_id } });
           } else {
+            // Like matrix-sdk: the first item is always a date divider, stamped
+            // with the first event after it. Older messages from that same day
+            // get a fresh divider in front and the old one is removed, so the
+            // row that used to be first is gone, not pushed down.
             const older = olderHistory(first?.timestamp_ms ?? Date.now(), page);
-            timelines.set(room_id, [...older, ...current]);
-            diffs(room_id, older.slice().reverse().map((data): TimelineDiff => ({ type: 'PushFront', data })));
+            const head = current[0];
+            const sameDay = head?.content.type === 'DateDivider' && new Date(head.timestamp_ms).toDateString() === new Date(older[0]!.timestamp_ms).toDateString();
+            const label = sameDay && head.content.type === 'DateDivider' ? head.content.data : new Date(older[0]!.timestamp_ms).toDateString();
+            const divider = item('', { type: 'DateDivider', data: label }, older[0]!.timestamp_ms);
+            const rest = sameDay ? current.slice(1) : current;
+            timelines.set(room_id, [divider, ...older, ...rest]);
+            diffs(room_id, [
+              ...(sameDay ? [{ type: 'Remove', data: { index: 0 } } satisfies TimelineDiff] : []),
+              ...[divider, ...older].reverse().map((data): TimelineDiff => ({ type: 'PushFront', data })),
+            ]);
           }
           emit({ type: 'CommandSucceeded', data: { request_id } });
         }, 350);

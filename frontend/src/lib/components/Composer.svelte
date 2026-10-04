@@ -54,19 +54,11 @@
   const replyTo = $derived(composer.replyTo);
   const members = $derived(rooms.members[roomId] ?? []);
 
-  // Keep the draft as it changes; the textarea grows with its content.
+  // Keep the draft as it changes. (The textarea grows with its content by
+  // itself, see `field-sizing` in the styles.)
   $effect(() => {
     drafts.set(roomId, text);
-    void textarea;
-    void tick().then(autosize);
   });
-
-  function autosize() {
-    if (!textarea) return;
-    textarea.style.height = 'auto';
-    textarea.style.height = `${Math.min(textarea.scrollHeight, window.innerHeight * 0.4)}px`;
-    measure();
-  }
 
   // --- context: reply / edit / injected text ---
   $effect(() => {
@@ -768,9 +760,13 @@
     text-decoration-skip-ink: none;
     text-underline-offset: 3px;
   }
+  /* Grows with its content without the old `height: auto` + `scrollHeight`
+     round trip, which collapsed the composer for one forced layout per keystroke
+     and let the timeline above clamp its scroll position — losing the bottom. */
   textarea {
     position: relative;
     z-index: 1;
+    field-sizing: content;
     width: 100%;
     max-height: 40vh;
     min-height: 32px;
