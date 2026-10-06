@@ -534,6 +534,10 @@
     const dirty = markdown.marked.parse(text, { async: false, gfm: true, breaks: true }) as string;
     return enrichHtml(sanitizeFormattedBody(dirty, { mediaUrl: (mxc) => backend.mediaUrl(mxc) }), {
       twemojiUrl: (codepoints) => backend.twemojiUrl(codepoints),
+      customEmoji: (shortcode) => {
+        const custom = emojiStore.resolve(shortcode);
+        return custom ? { url: backend.mediaUrl(custom.mxc_url), shortcode: custom.shortcode } : null;
+      },
     });
   });
 

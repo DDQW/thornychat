@@ -10,6 +10,7 @@
 pub mod calls;
 pub mod client;
 pub mod commands;
+mod emoticons;
 pub mod error;
 pub mod events;
 pub mod ignore;

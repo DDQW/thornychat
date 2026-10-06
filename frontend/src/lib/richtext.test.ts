@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { enrichHtml, escapeHtml, plainTextToHtml } from './richtext';
+import { enrichBody, enrichHtml, escapeHtml, plainTextToHtml } from './richtext';
 
 const options = { twemojiUrl: (codepoints: string) => `http://emoji.test/${codepoints}.svg` };
 
@@ -67,5 +67,52 @@ describe('enrichHtml', () => {
   it('returns input without tokens unchanged', () => {
     const html = '<p>nothing special here</p>';
     expect(enrichHtml(html, options)).toBe(html);
+  });
+});
+
+describe('custom emoji shortcodes', () => {
+  const pack: Record<string, string> = { scratch: 'mxc-scratch', notsure: 'mxc-notsure' };
+  const withPack = {
+    ...options,
+    customEmoji: (code: string) => {
+      const url = pack[code.toLowerCase()];
+      return url ? { url: `http://media.test/${url}`, shortcode: code === 'notsure' ? 'NotSure' : code } : null;
+    },
+  };
+
+  it('turns a pack shortcode into its image, keeping the shortcode as alt text', () => {
+    const out = plainTextToHtml('we could all play a mud :scratch:', withPack);
+    expect(out).toBe('we could all play a mud <img class="emoticon" src="http://media.test/mxc-scratch" alt=":scratch:" title=":scratch:" draggable="false">');
+  });
+
+  it('leaves unknown shortcodes, times and code alone', () => {
+    expect(plainTextToHtml('12:30 and :nope:', withPack)).toBe('12:30 and :nope:');
+    // A miss doesn't swallow the colon that opens the next shortcode.
+    expect(plainTextToHtml('at 12:30:scratch:', withPack)).toContain('at 12:30<img class="emoticon"');
+    const code = '<p><code>:scratch:</code></p>';
+    expect(enrichBody(code, withPack).html).toBe(code);
+  });
+
+  it('stays text without a pack lookup', () => {
+    expect(plainTextToHtml(':scratch:', options)).toBe(':scratch:');
+  });
+});
+
+describe('emoji-only messages', () => {
+  const withPack = { ...options, customEmoji: () => ({ url: 'http://media.test/e', shortcode: 'e' }) };
+
+  it('are flagged for large display', () => {
+    expect(enrichBody('🫡', options).jumbo).toBe(true);
+    expect(enrichBody(' 😀 😀 ', options).jumbo).toBe(true);
+    expect(enrichBody(':e:', withPack).jumbo).toBe(true);
+    // Cinny's custom emoji, after sanitizing.
+    expect(enrichBody('<img class="emoticon" src="http://media.test/x" alt="Disagree">', options).jumbo).toBe(true);
+  });
+
+  it('do not include text, quotes or walls of emoji', () => {
+    expect(enrichBody('ok 😀', options).jumbo).toBe(false);
+    expect(enrichBody('plain', options).jumbo).toBe(false);
+    expect(enrichBody('<blockquote>😀</blockquote>', options).jumbo).toBe(false);
+    expect(enrichBody('😀'.repeat(13), options).jumbo).toBe(false);
   });
 });

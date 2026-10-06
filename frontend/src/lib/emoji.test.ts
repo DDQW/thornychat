@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { buildEmojiData, searchEmoji, twemojiCodepoints } from './emoji';
+import { buildEmojiData, isUnicodeEmoji, searchEmoji, twemojiCodepoints } from './emoji';
+
+describe('isUnicodeEmoji', () => {
+  it('accepts the reaction keys people actually send', () => {
+    for (const key of ['🫡', '✅️', '❤️', '🇪', '🇩🇪', '👋🏻', '#️⃣', '🏃‍♂️']) expect(isUnicodeEmoji(key), key).toBe(true);
+  });
+
+  it('rejects words and shortcodes', () => {
+    for (const key of ['lol', '+1', ':scratch:', '', 'mxc://a/b']) expect(isUnicodeEmoji(key), key).toBe(false);
+  });
+});
 
 describe('twemojiCodepoints', () => {
   it('lowercases hex codepoints joined by dashes', () => {

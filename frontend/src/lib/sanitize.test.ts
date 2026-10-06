@@ -48,6 +48,14 @@ describe('sanitizeFormattedBody', () => {
     expect(out).not.toContain('data-mx-emoticon');
   });
 
+  it('treats images that lost data-mx-emoticon in the SDK as custom emoji too', () => {
+    // How a Cinny emoji arrives after matrix-sdk's own sanitizing.
+    const out = clean('So wait? <img src="mxc://server/ns" alt="NotSure" title="NotSure" height="32" />');
+    expect(out).toContain('class="emoticon"');
+    expect(out).not.toContain('height=');
+    expect(out).toContain('title="NotSure"');
+  });
+
   it('strips author-chosen classes and ids so a message cannot restyle the app', () => {
     const out = clean('<div class="modal-backdrop" id="x"><span class="toast">y</span></div>');
     expect(out).not.toMatch(/class=|id=/);

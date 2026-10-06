@@ -5,6 +5,7 @@
 import type { CustomEmoji, NotificationMode, NotificationScope } from './bindings';
 import { fire, request, requestResult } from './requests';
 import type { Action } from './slash';
+import { emoji } from './stores/emoji.svelte';
 import { rooms } from './stores/rooms.svelte';
 import { settings } from './stores/settings.svelte';
 import { ui } from './stores/ui.svelte';
@@ -30,13 +31,18 @@ export function sendMessage(roomId: string, body: string, options: SendOptions =
       reply_to_event_id: options.replyTo ?? null,
       emote: options.emote ?? false,
       markdown: options.markdown ?? true,
+      // `:shortcode:` pack emoji go out as images other clients can show.
+      emoticons: emoji.usedIn(body),
       request_id,
     },
   }));
 }
 
 export function editMessage(roomId: string, eventId: string, newBody: string): Promise<void> {
-  return request((request_id) => ({ type: 'EditMessage', data: { room_id: roomId, event_id: eventId, new_body: newBody, request_id } }));
+  return request((request_id) => ({
+    type: 'EditMessage',
+    data: { room_id: roomId, event_id: eventId, new_body: newBody, emoticons: emoji.usedIn(newBody), request_id },
+  }));
 }
 
 export function redactMessage(roomId: string, eventId: string, reason: string | null = null): Promise<void> {

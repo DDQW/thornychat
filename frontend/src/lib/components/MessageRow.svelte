@@ -52,6 +52,19 @@
 
   let pickerAnchor = $state<DOMRect | null>(null);
   let confirmingDelete = $state(false);
+  let stickerFailed = $state(false);
+
+  /**
+   * A sticker's drawn size: its declared shape fitted into 160 px (never
+   * enlarged, never under 24 px), or a 128 px square when it declares none.
+   * Fixed up front, so the image arriving doesn't move the timeline.
+   */
+  function stickerSize(width: number | null, height: number | null): { width: number; height: number } {
+    const MAX = 160;
+    if (!width || !height) return { width: 128, height: 128 };
+    const scale = Math.min(MAX / width, MAX / height, 1);
+    return { width: Math.max(24, Math.round(width * scale)), height: Math.max(24, Math.round(height * scale)) };
+  }
   /**
    * The pointer is over this row, or focus is inside it. The action bar only
    * exists then: it is half of every row's DOM (14 of 26 nodes, 4 of 4 icons)
@@ -137,10 +150,11 @@
     {#if item.in_reply_to}
       {@const reply = item.in_reply_to}
       <button class="reply plain" onclick={() => onjump(reply.event_id)} title="Jump to the quoted message">
-        <Icon name="reply" size={13} />
-        {#if reply.sender}<span class="reply-name">{reply.sender}</span>{/if}
         {#if reply.image_url}<img src={backend.mediaUrl(reply.image_url)} alt="" loading="lazy" />{/if}
-        <span class="truncate muted">{reply.snippet}</span>
+        <span class="reply-text">
+          <span class="reply-name"><Icon name="reply" size={12} /> {reply.sender || '…'}</span>
+          <span class="reply-snippet truncate">{reply.snippet}</span>
+        </span>
       </button>
     {/if}
 
@@ -161,7 +175,23 @@
       <MediaImage mxcUrl={content.data.url} name={content.data.caption ?? 'image'} width={content.data.width} height={content.data.height} />
       {#if content.data.caption}<div class="content caption"><MessageBody text={content.data.caption} /></div>{/if}
     {:else if content.type === 'Sticker'}
-      <MediaImage mxcUrl={content.data.url} name={content.data.body} width={content.data.width} height={content.data.height} max={160} />
+      {#if stickerFailed}
+        <div class="content muted">[sticker: {content.data.body}]</div>
+      {:else}
+        {@const size = stickerSize(content.data.width, content.data.height)}
+        <img
+          class="sticker"
+          src={backend.mediaUrl(content.data.url)}
+          alt={content.data.body}
+          title={content.data.body}
+          width={size.width}
+          height={size.height}
+          loading="lazy"
+          decoding="async"
+          draggable="false"
+          onerror={() => (stickerFailed = true)}
+        />
+      {/if}
     {:else if content.type === 'File'}
       <FileCard mxcUrl={content.data.url} filename={content.data.filename} />
       {#if content.data.caption}<div class="content caption"><MessageBody text={content.data.caption} /></div>{/if}
@@ -310,24 +340,50 @@
   .caption {
     margin-top: 4px;
   }
+  /* Cut-out art: no frame or backdrop behind it, unlike a photo. */
+  .sticker {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    object-fit: contain;
+  }
+  /* The quoted message: who on top, what below, the whole block jumps to it. */
   .reply {
     display: flex;
     align-items: center;
-    gap: 6px;
-    max-width: 100%;
-    margin-bottom: 2px;
+    gap: 8px;
+    max-width: min(100%, 560px);
+    margin: 2px 0 4px;
+    padding: 3px 10px 3px 8px;
+    border-left: 2px solid var(--accent);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
     color: var(--muted);
     font-size: 12px;
+    line-height: 1.35;
   }
   .reply:hover {
+    background: var(--accent-wash);
     color: var(--text);
   }
+  .reply-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
   .reply-name {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--accent);
+    font-size: 11px;
     font-weight: 600;
   }
   .reply img {
-    height: 20px;
+    flex: none;
+    width: 36px;
+    height: 36px;
     border-radius: 3px;
+    object-fit: cover;
   }
   .thread {
     display: flex;

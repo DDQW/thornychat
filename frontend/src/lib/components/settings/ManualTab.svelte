@@ -14,6 +14,7 @@
   <li><kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> starts a new line, <kbd>↑</kbd> in an empty box edits your last message.</li>
   <li>Markdown works: <code>**bold**</code>, <code>*italic*</code>, <code>`code`</code>, fenced code blocks, lists and quotes. The eye button previews it.</li>
   <li>Type <code>@</code> to mention someone, <code>:</code> and a few letters for an emoji.</li>
+  <li>A custom (pack) emoji is written as its <code>:shortcode:</code> and sent as the image, so other clients show it too; the same emoji work as reactions. Click a reply's quote to jump to the original, even when it's further back than what's loaded.</li>
   <li>Paste, drop or attach files; whatever you type becomes the caption of the first one.</li>
   <li>Start a line with <code>//</code> to send a literal single <code>/</code>. An unknown <code>/word</code> is sent as ordinary text.</li>
 </ul>

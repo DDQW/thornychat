@@ -19,8 +19,8 @@ use matrix_sdk::room::edit::EditedContent;
 use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
 use matrix_sdk::ruma::events::key::verification::request::ToDeviceKeyVerificationRequestEventContent;
 use matrix_sdk::ruma::events::room::message::{
-    MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
-    RoomMessageEventContentWithoutRelation,
+    EmoteMessageEventContent, MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
+    RoomMessageEventContentWithoutRelation, TextMessageEventContent,
 };
 use matrix_sdk::ruma::events::room::ImageInfo;
 use matrix_sdk::ruma::events::sticker::StickerEventContent;
@@ -793,7 +793,16 @@ async fn handle_command(
             });
         }
 
-        ClientCommand::SendMessage { room_id, body, mentioned_user_ids, reply_to_event_id, emote, markdown, request_id } => {
+        ClientCommand::SendMessage {
+            room_id,
+            body,
+            mentioned_user_ids,
+            reply_to_event_id,
+            emote,
+            markdown,
+            emoticons,
+            request_id,
+        } => {
             let Some(handles) = worker_state.open_rooms.get(&room_id) else {
                 fail(event_tx, request_id, "room is not open");
                 return;
@@ -801,11 +810,16 @@ async fn handle_command(
 
             // `/me` actions ride as `m.emote`; a `/plain` send skips Markdown
             // and posts the body verbatim; everything else is Markdown `m.text`.
-            // All take the same mentions/reply handling below.
+            // Pack emoji named by `:shortcode:` go out as inline images, except
+            // in a verbatim send. All take the same mentions/reply handling below.
             let mut content = if emote {
-                RoomMessageEventContent::emote_markdown(body)
+                let mut emote = EmoteMessageEventContent::markdown(body);
+                crate::emoticons::apply(&emote.body, &mut emote.formatted, &emoticons);
+                RoomMessageEventContent::new(MessageType::Emote(emote))
             } else if markdown {
-                RoomMessageEventContent::text_markdown(body)
+                let mut text = TextMessageEventContent::markdown(body);
+                crate::emoticons::apply(&text.body, &mut text.formatted, &emoticons);
+                RoomMessageEventContent::new(MessageType::Text(text))
             } else {
                 RoomMessageEventContent::text_plain(body)
             };
@@ -847,7 +861,7 @@ async fn handle_command(
             }
         }
 
-        ClientCommand::EditMessage { room_id, event_id, new_body, request_id } => {
+        ClientCommand::EditMessage { room_id, event_id, new_body, emoticons, request_id } => {
             let Some(handles) = worker_state.open_rooms.get(&room_id) else {
                 fail(event_tx, request_id, "room is not open");
                 return;
@@ -858,8 +872,10 @@ async fn handle_command(
             };
 
             let item_id = TimelineEventItemId::EventId(event_id);
+            let mut text = TextMessageEventContent::markdown(new_body);
+            crate::emoticons::apply(&text.body, &mut text.formatted, &emoticons);
             let content =
-                EditedContent::RoomMessage(RoomMessageEventContentWithoutRelation::text_markdown(new_body));
+                EditedContent::RoomMessage(RoomMessageEventContentWithoutRelation::new(MessageType::Text(text)));
 
             match handles.timeline.edit(&item_id, content).await {
                 Ok(()) => succeed(event_tx, request_id),

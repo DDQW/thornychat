@@ -32,6 +32,48 @@ class EmojiStore {
     return map;
   });
 
+  /**
+   * Lowercased shortcode → pack image, for turning a `:name:` in a message or
+   * a reaction key into the picture. Case-insensitive like the old client
+   * (packs say `NotSure`, people type `:notsure:`); emoticons win over
+   * sticker-only images of the same name.
+   */
+  #byLowerShortcode = $derived.by(() => {
+    const map = new Map<string, CustomEmoji>();
+    for (const emoticons of [true, false]) {
+      for (const pack of this.packs) {
+        for (const emoji of pack.emojis) {
+          const key = emoji.shortcode.toLowerCase();
+          if (emoji.is_emoticon === emoticons && !map.has(key)) map.set(key, emoji);
+        }
+      }
+    }
+    return map;
+  });
+
+  /** The pack image a shortcode (with or without its colons) names, if any. */
+  resolve(shortcode: string): CustomEmoji | undefined {
+    return this.#byLowerShortcode.get(shortcode.replace(/^:|:$/g, '').toLowerCase());
+  }
+
+  /**
+   * The custom emoji a message body uses, by `:shortcode:` — what the send
+   * commands need to turn them into inline images other clients can show.
+   * Same matching as the timeline's (`richtext.ts`), so what renders as an
+   * image locally is exactly what is sent as one.
+   */
+  usedIn(body: string): CustomEmoji[] {
+    const used = new Map<string, CustomEmoji>();
+    const pattern = /:([\w+-]{1,64})(?=:)/g;
+    for (let match = pattern.exec(body); match; match = pattern.exec(body)) {
+      const emoji = this.resolve(match[1]!);
+      if (!emoji) continue;
+      used.set(emoji.shortcode, emoji);
+      pattern.lastIndex = match.index + match[0].length + 1;
+    }
+    return [...used.values()];
+  }
+
   /** `mxc://` URL → custom emoji, for rendering reactions keyed by the image. */
   byMxc = $derived.by(() => {
     const map = new Map<string, CustomEmoji>();

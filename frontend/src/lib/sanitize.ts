@@ -81,10 +81,20 @@ function getPurifier() {
       node.setAttribute('src', options.mediaUrl(src));
       node.setAttribute('loading', 'lazy');
       node.setAttribute('decoding', 'async');
-      if (node.hasAttribute('data-mx-emoticon')) {
-        node.setAttribute('class', 'emoticon');
-        node.removeAttribute('data-mx-emoticon');
-      }
+      // Every image in a message body is drawn as a custom emoji, sized to
+      // the text. `data-mx-emoticon` can't tell them apart here: matrix-sdk
+      // sanitizes each message with ruma's spec allow-list before we see it,
+      // and that list drops the attribute. In practice the only images
+      // clients put inside message HTML are custom emoji (Cinny, FluffyChat,
+      // nheko, the mautrix bridges); a picture travels as its own `m.image`.
+      // The sender's width/height (Cinny says height="32") would fight the
+      // text-relative size.
+      node.setAttribute('class', 'emoticon');
+      node.removeAttribute('data-mx-emoticon');
+      node.removeAttribute('width');
+      node.removeAttribute('height');
+      const alt = node.getAttribute('alt')?.trim();
+      if (alt && !node.hasAttribute('title')) node.setAttribute('title', alt);
     }
 
     // Matrix colour attributes become an inline colour, but only a plain hex

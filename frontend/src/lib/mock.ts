@@ -153,6 +153,30 @@ function sampleHistory(now: number): TimelineItem[] {
         edited: true,
       },
     ),
+    // Custom emoji as Cinny sends them, after matrix-sdk's sanitizer: it keeps
+    // the image but drops `data-mx-emoticon`, so it arrives as a bare <img>.
+    item('@bob:thorny.chat', text('So wait, you guys are gonna play WoW Forever? :NotSure:'), t(0, 55), {
+      event_id: '$notsure',
+      formatted_body: 'So wait, you guys are gonna play WoW Forever? <img src="mxc://mock/notsure" alt="NotSure" title="NotSure" height="32" />',
+      reactions: [
+        { key: 'mxc://mock/emoji1', count: 3, reacted_by_me: true, senders: [ME, '@alice:thorny.chat', '@carol:thorny.chat'] },
+        { key: 'mxc://mock/elsewhere', count: 1, reacted_by_me: false, senders: ['@carol:thorny.chat'] },
+        { key: ':thorn_heart:', count: 1, reacted_by_me: false, senders: ['@irc_dave:thorny.chat'] },
+        { key: '✅️', count: 2, reacted_by_me: false, senders: ['@alice:thorny.chat', '@carol:thorny.chat'] },
+        { key: '🇪', count: 1, reacted_by_me: false, senders: ['@alice:thorny.chat'] },
+        { key: 'lol', count: 1, reacted_by_me: false, senders: ['@irc_dave:thorny.chat'] },
+      ],
+    }),
+    item('@carol:thorny.chat', text(':thorn_heart:'), t(0, 52), {
+      formatted_body: '<img src="mxc://mock/emoji2" alt="thorn_heart" title="thorn_heart" height="32" />',
+      in_reply_to: { event_id: '$notsure', sender: 'Bob Builder', snippet: 'So wait, you guys are gonna play WoW Forever? :NotSure:', image_url: null },
+    }),
+    // How this client used to send them: the bare shortcode, no HTML.
+    item(ME, text('we could all play a mud :thorn_wave:'), t(0, 50)),
+    item('@alice:thorny.chat', text('🫡'), t(0, 48), {
+      in_reply_to: { event_id: '$quoted-older', sender: 'Alice', snippet: 'Older message #19: lorem ipsum dolor sit amet.', image_url: null },
+    }),
+    item('@bob:thorny.chat', { type: 'Sticker', data: { url: 'mxc://mock/goblin', body: 'happy_goblin_merchant', width: 512, height: 489 } }, t(0, 45)),
     item('@carol:thorny.chat', { type: 'Redacted' }, t(0, 40)),
     item(ME, text('Looks great to me, shipping it.'), t(0, 20), { read_by: ['@alice:thorny.chat', '@bob:thorny.chat'] }),
     item('', { type: 'NewMessagesDivider' }, t(0, 10)),
@@ -199,7 +223,13 @@ function syntheticMembers(count: number): RoomMember[] {
 
 function olderHistory(before: number, page: number): TimelineItem[] {
   return Array.from({ length: 12 }, (_, i) =>
-    item(i % 3 === 0 ? '@bob:thorny.chat' : '@alice:thorny.chat', text(`Older message #${page * 12 + i + 1}: lorem ipsum dolor sit amet.`), before - (12 - i) * 5 * 60_000 - page * 90 * 60_000),
+    item(
+      i % 3 === 0 ? '@bob:thorny.chat' : '@alice:thorny.chat',
+      text(`Older message #${page * 12 + i + 1}: lorem ipsum dolor sit amet.`),
+      before - (12 - i) * 5 * 60_000 - page * 90 * 60_000,
+      // Two pages back: the message a reply in the sample history quotes.
+      page === 1 && i === 6 ? { event_id: '$quoted-older' } : {},
+    ),
   );
 }
 
@@ -220,6 +250,12 @@ const TYPOS: Record<string, string[]> = {
 
 function svgFor(label: string, color: string, width = 640, height = 360): string {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${color}"/><stop offset="1" stop-color="#222"/></linearGradient></defs><rect width="100%" height="100%" fill="url(#g)"/><text x="50%" y="50%" fill="white" font-family="sans-serif" font-size="${Math.round(height / 9)}" text-anchor="middle" dominant-baseline="middle">${label}</text></svg>`;
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+}
+
+function cutoutSvg(label: string, color: string, width: number, height: number): string {
+  const r = Math.min(width, height) / 2;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><circle cx="${width / 2}" cy="${height / 2}" r="${r}" fill="${color}"/><text x="50%" y="50%" fill="white" font-family="sans-serif" font-size="${Math.round(r / 3)}" text-anchor="middle" dominant-baseline="middle">${label}</text></svg>`;
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 }
 
@@ -261,7 +297,16 @@ export function createMockBackend(): Backend {
       emit({ type: 'IgnoredUsersUpdated', data: [] });
       emit({
         type: 'CustomEmojiPacksUpdated',
-        data: [{ name: 'Thorny pack', emojis: [{ shortcode: 'thorn_wave', mxc_url: 'mxc://mock/emoji1', is_emoticon: true, is_sticker: true, width: 128, height: 128 }, { shortcode: 'thorn_heart', mxc_url: 'mxc://mock/emoji2', is_emoticon: true, is_sticker: false, width: null, height: null }] }],
+        data: [
+          {
+            name: 'Thorny pack',
+            emojis: [
+              { shortcode: 'thorn_wave', mxc_url: 'mxc://mock/emoji1', is_emoticon: true, is_sticker: true, width: 128, height: 128 },
+              { shortcode: 'thorn_heart', mxc_url: 'mxc://mock/emoji2', is_emoticon: true, is_sticker: false, width: null, height: null },
+              { shortcode: 'NotSure', mxc_url: 'mxc://mock/notsure', is_emoticon: true, is_sticker: false, width: 128, height: 128 },
+            ],
+          },
+        ],
       });
     }, 150);
   }
@@ -606,9 +651,11 @@ export function createMockBackend(): Backend {
 
     mediaUrl(mxcUrl) {
       const name = mxcUrl.split('/').pop() ?? 'media';
-      const colors: Record<string, string> = { sunset: '#d9622b', sticker1: '#7a5cff', clipthumb: '#2b8ad9', preview: '#c4302b', emoji1: '#2bd98a', emoji2: '#d92b6e' };
-      const small = ['sticker1', 'emoji1', 'emoji2'].includes(name);
-      return svgFor(name, colors[name] ?? '#3b6', small ? 128 : 640, small ? 128 : 360);
+      const colors: Record<string, string> = { sunset: '#d9622b', sticker1: '#7a5cff', clipthumb: '#2b8ad9', preview: '#c4302b', emoji1: '#2bd98a', emoji2: '#d92b6e', notsure: '#d9b82b', elsewhere: '#2bb8d9', goblin: '#8a6a3b' };
+      // Emoji and stickers are cut-out shapes on a transparent background, like the real ones.
+      if (['sticker1', 'emoji1', 'emoji2', 'notsure', 'elsewhere'].includes(name)) return cutoutSvg(name, colors[name]!, 128, 128);
+      if (name === 'goblin') return cutoutSvg(name, colors[name]!, 512, 489);
+      return svgFor(name, colors[name] ?? '#3b6', 640, 360);
     },
     // The mock's pictures are vector art; there is nothing to upscale.
     upscaledUrl: () => null,

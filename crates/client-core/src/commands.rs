@@ -18,6 +18,8 @@
 
 use uuid::Uuid;
 
+use crate::events::CustomEmoji;
+
 pub type RequestId = Uuid;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -54,9 +56,19 @@ pub enum ClientCommand {
         /// `false` sends the body verbatim as plain text (the `/plain`
         /// command) instead of the usual Markdown render.
         markdown: bool,
+        /// The pack emoji the body names by `:shortcode:`; each is sent as
+        /// its inline image (see `emoticons`). Ignored for a `/plain` send.
+        emoticons: Vec<CustomEmoji>,
         request_id: RequestId,
     },
-    EditMessage { room_id: String, event_id: String, new_body: String, request_id: RequestId },
+    EditMessage {
+        room_id: String,
+        event_id: String,
+        new_body: String,
+        /// As for `SendMessage`.
+        emoticons: Vec<CustomEmoji>,
+        request_id: RequestId,
+    },
     RedactEvent { room_id: String, event_id: String, reason: Option<String>, request_id: RequestId },
     SendAttachment {
         room_id: String,

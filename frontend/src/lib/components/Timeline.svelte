@@ -72,7 +72,9 @@
     if (!scroller) return;
     const top = scroller.scrollTop;
     distanceFromBottom = scroller.scrollHeight - top - scroller.clientHeight;
-    if (distanceFromBottom < BOTTOM_SLACK) stuck = true;
+    // A quote jump loading history holds the view where it is, which can be
+    // the bottom; that mustn't re-stick it and snap back down after the jump.
+    if (distanceFromBottom < BOTTOM_SLACK) stuck ||= !jumping;
     else if (top < lastScrollTop - 1) stuck = false;
     lastScrollTop = top;
     captureAnchor();
@@ -222,15 +224,75 @@
   });
 
   // --- jump to a quoted message ---
-  export function jumpTo(eventId: string) {
-    const target = content?.querySelector(`[data-event-id="${CSS.escape(eventId)}"]`);
-    if (!target) {
-      ui.toast("That message isn't loaded — scroll up to load older messages.", 'info', 3500);
-      return;
+  /** Pages of history (80 events each) a quote jump loads looking for its message. */
+  const MAX_JUMP_PAGES = 10;
+  /** A quote jump is under way (loading history for it, or scrolling to it). */
+  let jumping = false;
+
+  async function until(condition: () => boolean, timeoutMs: number): Promise<boolean> {
+    const deadline = performance.now() + timeoutMs;
+    while (!condition() && performance.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+    return condition();
+  }
+
+  /**
+   * Scrolls to the quoted message and flashes it. One that is older than what
+   * is loaded is fetched first, a page of history at a time.
+   */
+  export async function jumpTo(eventId: string) {
+    const tl = timeline;
+    if (!tl || jumping) return;
+    const loaded = () => tl.items.some((item) => item.event_id === eventId);
+
+    // Stop following the bottom for the whole jump. Loading history for it
+    // holds the view in place, often at the bottom, and a resize while still
+    // following (the last page landing, an image loading in) would snap back
+    // down there right after the jump.
+    jumping = true;
+    stuck = false;
+    captureAnchor();
+    try {
+      if (!loaded() && !tl.startReached) {
+        ui.toast('Loading older messages to find it…', 'info', 2500);
+        try {
+          for (let page = 0; page < MAX_JUMP_PAGES && !loaded() && !tl.startReached; page++) {
+            await until(() => !tl.loadingOlder, 10_000);
+            const before = tl.items.length;
+            tl.loadingOlder = true;
+            try {
+              await paginateBackwards(roomId);
+            } finally {
+              tl.loadingOlder = false;
+            }
+            // The page's diffs can land just after the command reports success.
+            await until(() => tl.items.length !== before || loaded(), 1500);
+          }
+        } catch (error) {
+          ui.error(`Couldn't load older messages: ${String(error)}`);
+        }
+      }
+
+      await tick();
+      const target = content?.querySelector<HTMLElement>(`[data-event-id="${CSS.escape(eventId)}"]`);
+      if (!target) {
+        const why = loaded() ? 'Clear the search to jump to that message.' : "Couldn't find that message in the room's history.";
+        ui.toast(why, 'info', 3500);
+        if (scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < BOTTOM_SLACK) stuck = true;
+        return;
+      }
+      stuck = false;
+      target.scrollIntoView({ block: 'center', behavior: 'instant' });
+      if (scroller) {
+        lastScrollTop = scroller.scrollTop;
+        distanceFromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+      }
+      captureAnchor();
+      ui.highlightEvent = eventId;
+      setTimeout(() => ui.highlightEvent === eventId && (ui.highlightEvent = null), 1800);
+    } finally {
+      // Held until the jump's own scroll event and resize callbacks are through.
+      afterLayout(() => (jumping = false));
     }
-    target.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    ui.highlightEvent = eventId;
-    setTimeout(() => ui.highlightEvent === eventId && (ui.highlightEvent = null), 1800);
   }
 
   const startedAt = $derived(timeline?.items.find((item) => item.timestamp_ms > 0)?.timestamp_ms);

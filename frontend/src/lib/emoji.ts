@@ -17,6 +17,14 @@ export function twemojiCodepoints(emoji: string): string {
     .join('-');
 }
 
+/**
+ * Whether a reaction key is a unicode emoji (Twemoji can draw it) rather than
+ * free text — some clients and bridges react with words ("lol", "+1").
+ */
+export function isUnicodeEmoji(key: string): boolean {
+  return /^(?:[\p{Extended_Pictographic}\p{Regional_Indicator}]|[#*0-9]️?⃣)/u.test(key);
+}
+
 export interface PickerEmoji {
   /** The glyph to send, with this client's skin-tone preference applied. */
   char: string;

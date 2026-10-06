@@ -1,7 +1,8 @@
 <script lang="ts">
   import { backend } from '../api';
-  import { enrichHtml, plainTextToHtml } from '../richtext';
+  import { enrichBody, escapeHtml, type EnrichOptions } from '../richtext';
   import { sanitizeFormattedBody } from '../sanitize';
+  import { emoji } from '../stores/emoji.svelte';
 
   interface Props {
     /** The plain body. Always present; used when there is no formatted version. */
@@ -11,12 +12,17 @@
   }
   let { text, formatted = null }: Props = $props();
 
-  const enrich = { twemojiUrl: (codepoints: string) => backend.twemojiUrl(codepoints) };
+  const enrich: EnrichOptions = {
+    twemojiUrl: (codepoints) => backend.twemojiUrl(codepoints),
+    customEmoji: (shortcode) => {
+      const custom = emoji.resolve(shortcode);
+      return custom ? { url: backend.mediaUrl(custom.mxc_url), shortcode: custom.shortcode } : null;
+    },
+  };
 
-  const html = $derived(
-    formatted
-      ? enrichHtml(sanitizeFormattedBody(formatted, { mediaUrl: (mxc) => backend.mediaUrl(mxc) }), enrich)
-      : plainTextToHtml(text, enrich),
+  // Re-derived when the packs arrive, so `:name:` turns into its image then.
+  const body = $derived(
+    enrichBody(formatted ? sanitizeFormattedBody(formatted, { mediaUrl: (mxc) => backend.mediaUrl(mxc) }) : escapeHtml(text), enrich),
   );
 
   /** Click a spoiler to reveal it. */
@@ -25,17 +31,23 @@
     if (spoiler) spoiler.classList.toggle('revealed');
   }
 
-  /** A Twemoji image that fails to load (offline, first use) falls back to the real glyph. */
+  /**
+   * A Twemoji image that fails to load (offline, first use) falls back to the
+   * real glyph, a custom emoji to its `:shortcode:`.
+   */
   function emojiFallback(event: Event) {
     const image = event.target;
-    if (image instanceof HTMLImageElement && image.classList.contains('twemoji')) {
+    if (!(image instanceof HTMLImageElement)) return;
+    if (image.classList.contains('twemoji')) {
       image.replaceWith(document.createTextNode(image.alt));
+    } else if (image.classList.contains('emoticon') && image.alt) {
+      image.replaceWith(document.createTextNode(image.alt.startsWith(':') ? image.alt : `:${image.alt}:`));
     }
   }
 </script>
 
 <!-- eslint-disable-next-line svelte/no-at-html-tags -- sanitized above, twice -->
-<div class="body" class:plain={!formatted} onclick={reveal} onerrorcapture={emojiFallback} role="presentation">{@html html}</div>
+<div class="body" class:plain={!formatted} class:jumbo={body.jumbo} onclick={reveal} onerrorcapture={emojiFallback} role="presentation">{@html body.html}</div>
 
 <style>
   .body {
@@ -131,11 +143,23 @@
     height: 1.3em;
     vertical-align: -0.3em;
   }
-  /* A message that is only emoji is drawn large, like every chat app does. */
+  /* Custom emoji sit in the line like Twemoji do; wide ones keep their shape. */
   .body :global(img.emoticon) {
-    max-width: 2em;
-    max-height: 2em;
-    vertical-align: -0.5em;
+    width: auto;
+    height: 1.5em;
+    max-width: 4.5em;
+    vertical-align: -0.4em;
     object-fit: contain;
+  }
+  /* A message that is only emoji is drawn large, like every chat app does. */
+  .body.jumbo :global(img.twemoji) {
+    width: 2.25em;
+    height: 2.25em;
+    vertical-align: middle;
+  }
+  .body.jumbo :global(img.emoticon) {
+    height: 2.5em;
+    max-width: 7.5em;
+    vertical-align: middle;
   }
 </style>
