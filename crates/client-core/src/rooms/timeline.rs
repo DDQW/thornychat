@@ -447,7 +447,7 @@ fn content_is_edited(content: &SdkTimelineItemContent) -> bool {
 /// quotes above a reply. Details may legitimately be unavailable (the SDK
 /// lazily loads replied-to events); the UI shows just "↩" + ellipsis then.
 fn convert_reply_preview(details: &InReplyToDetails) -> ReplyPreview {
-    let (sender, snippet, image_url) = match &details.event {
+    let (sender, snippet, image_url, emoticons) = match &details.event {
         TimelineDetails::Ready(embedded) => {
             let sender = match &embedded.sender_profile {
                 TimelineDetails::Ready(profile) => profile
@@ -461,16 +461,21 @@ fn convert_reply_preview(details: &InReplyToDetails) -> ReplyPreview {
                 | TimelineItemContent::Sticker { url, .. } => Some(url),
                 _ => None,
             };
-            (sender, summarize_content(&embedded.content, embedded.sender.as_str()), image_url)
+            // The snippet is the plain body, where a custom emoji is only its
+            // `:name:`; the images come from the quoted message's HTML.
+            let emoticons = formatted_body_of(&embedded.content)
+                .map(|html| crate::emoticons::in_html(&html))
+                .unwrap_or_default();
+            (sender, summarize_content(&embedded.content, embedded.sender.as_str()), image_url, emoticons)
         }
         // The quoted event is gone for good — redacted or purged server-side,
         // so the fetch 404s and no amount of waiting will fill this in. Say so,
         // rather than showing the same "…" as a pending fetch and leaving a
         // reply banner that looks like it's loading forever.
-        TimelineDetails::Error(_) => (String::new(), "Message unavailable".to_string(), None),
-        _ => (String::new(), "…".to_string(), None),
+        TimelineDetails::Error(_) => (String::new(), "Message unavailable".to_string(), None, Vec::new()),
+        _ => (String::new(), "…".to_string(), None, Vec::new()),
     };
-    ReplyPreview { event_id: details.event_id.to_string(), sender, snippet, image_url }
+    ReplyPreview { event_id: details.event_id.to_string(), sender, snippet, image_url, emoticons }
 }
 
 fn summarize_content(content: &SdkTimelineItemContent, sender: &str) -> String {

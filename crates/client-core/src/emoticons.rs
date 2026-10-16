@@ -7,12 +7,16 @@
 //!
 //! The rewrite runs over the HTML that Markdown produced, so code spans,
 //! code blocks and link text keep their colons.
+//!
+//! Going the other way, [`in_html`] reads the custom emoji out of someone's
+//! message, for the places that only show its plain body (reply quotes).
 
 use std::collections::HashMap;
 
 use matrix_sdk::ruma::events::room::message::{FormattedBody, MessageFormat};
+use matrix_sdk::ruma::html::{Html, NodeRef};
 
-use crate::events::CustomEmoji;
+use crate::events::{CustomEmoji, InlineEmoticon};
 
 /// The `height` other clients get (Cinny's value; they draw it text-sized).
 const HEIGHT: u32 = 32;
@@ -169,6 +173,42 @@ fn push_image(out: &mut String, emoji: &CustomEmoji) {
     out.push_str(&format!(":\" height=\"{HEIGHT}\" />"));
 }
 
+/// Most emoticons [`in_html`] returns: a quote shows one short line.
+const MAX_FOUND: usize = 32;
+
+/// The custom emoji an already-sanitized `formatted_body` draws, first of each
+/// name. That is every `<img src="mxc://…">` with a usable alt text: by now
+/// matrix-sdk has dropped `data-mx-emoticon`, and an image inside message
+/// HTML is a custom emoji in practice (a picture is its own `m.image`). Cinny
+/// writes the alt as `name`, this client as `:name:`; the plain body says
+/// `:name:` either way.
+pub(crate) fn in_html(html: &str) -> Vec<InlineEmoticon> {
+    let mut found = Vec::new();
+    for node in Html::parse(html).children() {
+        collect_images(&node, &mut found);
+    }
+    found
+}
+
+fn collect_images(node: &NodeRef, found: &mut Vec<InlineEmoticon>) {
+    if found.len() >= MAX_FOUND {
+        return;
+    }
+    if let Some(element) = node.as_element().filter(|element| &*element.name.local == "img") {
+        let attrs = element.attrs.borrow();
+        let attr = |name: &str| attrs.iter().find(|attr| &*attr.name.local == name).map(|attr| attr.value.to_string());
+        if let (Some(src), Some(alt)) = (attr("src"), attr("alt")) {
+            let shortcode = alt.trim().trim_matches(':');
+            if src.starts_with("mxc://") && is_shortcode(shortcode) && !found.iter().any(|seen| seen.shortcode == shortcode) {
+                found.push(InlineEmoticon { shortcode: shortcode.to_string(), mxc_url: src });
+            }
+        }
+    }
+    for child in node.children() {
+        collect_images(&child, found);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use matrix_sdk::ruma::events::room::message::TextMessageEventContent;
@@ -273,5 +313,34 @@ mod tests {
         assert_eq!(tag_name("</code>"), Some(("code", true, false)));
         assert_eq!(tag_name("<br />"), Some(("br", false, true)));
         assert!(replace_shortcodes("<p>:a:</p>", &codes).is_none());
+    }
+
+    #[test]
+    fn emoticons_are_read_back_out_of_html() {
+        // Cinny's shape after matrix-sdk's sanitizer, then this client's own.
+        let html = concat!(
+            r#"<p>Doing what? <img src="mxc://rpghq.org/ZHrq" alt="NotSure" title="NotSure" height="32" />"#,
+            r#" <b>and <img src="mxc://rpghq.org/mhm" alt=":mhm:" height="32" /></b>"#,
+            r#" again <img src="mxc://rpghq.org/other" alt="NotSure" /></p>"#,
+        );
+        let found = in_html(html);
+        assert_eq!(
+            found,
+            vec![
+                InlineEmoticon { shortcode: "NotSure".into(), mxc_url: "mxc://rpghq.org/ZHrq".into() },
+                InlineEmoticon { shortcode: "mhm".into(), mxc_url: "mxc://rpghq.org/mhm".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn images_that_are_not_emoticons_are_skipped() {
+        let html = concat!(
+            r#"<img src="mxc://hq.example/noalt" />"#,
+            r#"<img src="mxc://hq.example/spaces" alt="two words" />"#,
+            r#"<img src="https://hq.example/remote.png" alt="remote" />"#,
+        );
+        assert!(in_html(html).is_empty());
+        assert!(in_html("no images at all").is_empty());
     }
 }

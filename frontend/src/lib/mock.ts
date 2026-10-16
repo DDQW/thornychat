@@ -138,7 +138,7 @@ function sampleHistory(now: number): TimelineItem[] {
       '@carol:thorny.chat',
       text('Thanks! That looks lovely.'),
       t(3, 3),
-      { in_reply_to: { event_id: '$img', sender: 'Alice', snippet: '[image: Sunset from the office]', image_url: 'mxc://mock/sunset' } },
+      { in_reply_to: { event_id: '$img', sender: 'Alice', snippet: '[image: Sunset from the office]', image_url: 'mxc://mock/sunset', emoticons: [] } },
     ),
     item('@bob:thorny.chat', { type: 'File', data: { url: 'mxc://mock/report', filename: 'quarterly-report.pdf', caption: null } }, t(2)),
     item('@bob:thorny.chat', { type: 'Video', data: { url: 'mxc://mock/clip', filename: 'demo.mp4', caption: 'Demo of the new build', mimetype: 'video/mp4', thumbnail_url: 'mxc://mock/clipthumb' } }, t(2, 1)),
@@ -169,12 +169,22 @@ function sampleHistory(now: number): TimelineItem[] {
     }),
     item('@carol:thorny.chat', text(':thorn_heart:'), t(0, 52), {
       formatted_body: '<img src="mxc://mock/emoji2" alt="thorn_heart" title="thorn_heart" height="32" />',
-      in_reply_to: { event_id: '$notsure', sender: 'Bob Builder', snippet: 'So wait, you guys are gonna play WoW Forever? :NotSure:', image_url: null },
+      in_reply_to: { event_id: '$notsure', sender: 'Bob Builder', snippet: 'So wait, you guys are gonna play WoW Forever? :NotSure:', image_url: null, emoticons: [{ shortcode: 'NotSure', mxc_url: 'mxc://mock/notsure' }] },
+    }),
+    // Someone's personal emoji: in no pack this account has, so only the
+    // message's own HTML says what :peon_boi: looks like, and the quote of it
+    // gets the image from the quoted message (ReplyPreview.emoticons).
+    item('@bob:thorny.chat', text('zug zug :peon_boi:'), t(0, 51), {
+      event_id: '$peon',
+      formatted_body: 'zug zug <img src="mxc://mock/peon" alt="peon_boi" title="peon_boi" height="32" />',
+    }),
+    item('@alice:thorny.chat', text('lmao'), t(0, 50), {
+      in_reply_to: { event_id: '$peon', sender: 'Bob Builder', snippet: 'zug zug :peon_boi:', image_url: null, emoticons: [{ shortcode: 'peon_boi', mxc_url: 'mxc://mock/peon' }] },
     }),
     // How this client used to send them: the bare shortcode, no HTML.
     item(ME, text('we could all play a mud :thorn_wave:'), t(0, 50)),
     item('@alice:thorny.chat', text('🫡'), t(0, 48), {
-      in_reply_to: { event_id: '$quoted-older', sender: 'Alice', snippet: 'Older message #19: lorem ipsum dolor sit amet.', image_url: null },
+      in_reply_to: { event_id: '$quoted-older', sender: 'Alice', snippet: 'Older message #19: lorem ipsum dolor sit amet.', image_url: null, emoticons: [] },
     }),
     item('@bob:thorny.chat', { type: 'Sticker', data: { url: 'mxc://mock/goblin', body: 'happy_goblin_merchant', width: 512, height: 489 } }, t(0, 45)),
     item('@carol:thorny.chat', { type: 'Redacted' }, t(0, 40)),
@@ -207,7 +217,7 @@ function syntheticHistory(count: number, now: number): TimelineItem[] {
       case 8:
         return item(sender, text(lines[i % lines.length]!), at, { reactions: [{ key: '👍', count: 2, reacted_by_me: false, senders: senders.slice(0, 2) }], read_by: [senders[2]!] });
       default:
-        return item(sender, text(lines[i % lines.length]!), at, i % 10 === 5 ? { in_reply_to: { event_id: '$x', sender: 'Alice', snippet: 'an earlier message', image_url: null } } : {});
+        return item(sender, text(lines[i % lines.length]!), at, i % 10 === 5 ? { in_reply_to: { event_id: '$x', sender: 'Alice', snippet: 'an earlier message', image_url: null, emoticons: [] } } : {});
     }
   });
   return [item('', { type: 'DateDivider', data: 'Today' }, messages[0]?.timestamp_ms ?? now), ...messages];
@@ -369,7 +379,7 @@ export function createMockBackend(): Backend {
         const { room_id, body, request_id, emote, reply_to_event_id } = command.data;
         const echo = item(ME, emote ? { type: 'Emote', data: body } : text(body), Date.now(), {
           event_id: null,
-          in_reply_to: reply_to_event_id ? { event_id: reply_to_event_id, sender: 'Someone', snippet: 'a message', image_url: null } : null,
+          in_reply_to: reply_to_event_id ? { event_id: reply_to_event_id, sender: 'Someone', snippet: 'a message', image_url: null, emoticons: [] } : null,
         });
         const list = timelines.get(room_id) ?? [];
         timelines.set(room_id, [...list, echo]);
@@ -651,9 +661,9 @@ export function createMockBackend(): Backend {
 
     mediaUrl(mxcUrl) {
       const name = mxcUrl.split('/').pop() ?? 'media';
-      const colors: Record<string, string> = { sunset: '#d9622b', sticker1: '#7a5cff', clipthumb: '#2b8ad9', preview: '#c4302b', emoji1: '#2bd98a', emoji2: '#d92b6e', notsure: '#d9b82b', elsewhere: '#2bb8d9', goblin: '#8a6a3b' };
+      const colors: Record<string, string> = { sunset: '#d9622b', sticker1: '#7a5cff', clipthumb: '#2b8ad9', preview: '#c4302b', emoji1: '#2bd98a', emoji2: '#d92b6e', notsure: '#d9b82b', peon: '#5cae3a', elsewhere: '#2bb8d9', goblin: '#8a6a3b' };
       // Emoji and stickers are cut-out shapes on a transparent background, like the real ones.
-      if (['sticker1', 'emoji1', 'emoji2', 'notsure', 'elsewhere'].includes(name)) return cutoutSvg(name, colors[name]!, 128, 128);
+      if (['sticker1', 'emoji1', 'emoji2', 'notsure', 'elsewhere', 'peon'].includes(name)) return cutoutSvg(name, colors[name]!, 128, 128);
       if (name === 'goblin') return cutoutSvg(name, colors[name]!, 512, 489);
       return svgFor(name, colors[name] ?? '#3b6', 640, 360);
     },

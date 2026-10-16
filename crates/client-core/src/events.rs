@@ -369,6 +369,19 @@ pub struct ReplyPreview {
     /// Set when the quoted message is an image — quotes render it as a
     /// small thumbnail.
     pub image_url: Option<String>,
+    /// The custom emoji the quoted message draws, so the quote can draw
+    /// them too: the snippet is its plain body, where they are `:name:`.
+    pub emoticons: Vec<InlineEmoticon>,
+}
+
+/// A custom emoji drawn inline in someone's message: the image, and the name
+/// (no colons) the plain body writes it as. Unlike a [`CustomEmoji`], it
+/// needn't be in any pack this account has.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct InlineEmoticon {
+    pub shortcode: String,
+    pub mxc_url: String,
 }
 
 /// One MSC3949 power-level tag: a named (optionally colored) member group

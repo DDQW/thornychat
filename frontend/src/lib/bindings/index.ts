@@ -4,6 +4,7 @@ export type { ClientCommand } from './ClientCommand';
 export type { ClientEvent } from './ClientEvent';
 export type { CustomEmoji } from './CustomEmoji';
 export type { EmojiPack } from './EmojiPack';
+export type { InlineEmoticon } from './InlineEmoticon';
 export type { NotificationEvent } from './NotificationEvent';
 export type { NotificationMode } from './NotificationMode';
 export type { NotificationScope } from './NotificationScope';

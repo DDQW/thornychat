@@ -64,6 +64,18 @@ describe('enrichHtml', () => {
     expect(out).toContain('href="https://x.test"');
   });
 
+  it('can leave URLs as text but still draw emoji (quotes sit inside a button)', () => {
+    const out = plainTextToHtml('see https://x.test :peon_boi: 😀', {
+      ...options,
+      links: false,
+      customEmoji: (code) => (code === 'peon_boi' ? { url: 'http://media.test/peon', shortcode: 'peon_boi' } : null),
+    });
+    expect(out).not.toContain('<a');
+    expect(out).toContain('see https://x.test ');
+    expect(out).toContain('src="http://media.test/peon"');
+    expect(out).toContain('class="twemoji"');
+  });
+
   it('returns input without tokens unchanged', () => {
     const html = '<p>nothing special here</p>';
     expect(enrichHtml(html, options)).toBe(html);

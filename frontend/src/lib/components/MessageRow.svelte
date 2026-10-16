@@ -1,12 +1,14 @@
 <script lang="ts">
   import { redactMessage, retrySend, toggleReaction } from '../actions';
   import { backend } from '../api';
-  import type { TimelineItem } from '../bindings';
+  import type { ReplyPreview, TimelineItem } from '../bindings';
   import { extractLinks } from '../embeds';
   import { formatDateTime, formatTime, nameHue, plural, truncate } from '../format';
   import { memberMenu } from '../memberMenu';
+  import { emojiLoadFailed, plainTextToHtml } from '../richtext';
   import { avatarOf, memberMap, nameOf } from '../people';
   import { composer } from '../stores/composer.svelte';
+  import { emoji } from '../stores/emoji.svelte';
   import { settings } from '../stores/settings.svelte';
   import { session } from '../stores/session.svelte';
   import { ui } from '../stores/ui.svelte';
@@ -38,6 +40,25 @@
   const content = $derived(item.content);
   const canModerate = $derived((memberMap(roomId)?.get(myId)?.power_level ?? 0) >= 50);
   const canEdit = $derived(mine && eventId !== null && content.type === 'Text');
+
+  /**
+   * The quote's text with its emoji drawn: a `:name:` is first looked up in
+   * the custom emoji the quoted message itself drew (someone's personal ones
+   * are in no pack here), then in the packs. No links: the quote is a button.
+   */
+  function snippetHtml(reply: ReplyPreview): string {
+    return plainTextToHtml(reply.snippet, {
+      twemojiUrl: (codepoints) => backend.twemojiUrl(codepoints),
+      customEmoji: (shortcode) => {
+        const wanted = shortcode.toLowerCase();
+        const quoted = reply.emoticons.find((e) => e.shortcode === shortcode) ?? reply.emoticons.find((e) => e.shortcode.toLowerCase() === wanted);
+        const pack = quoted ? undefined : emoji.resolve(shortcode);
+        const found = quoted ?? pack;
+        return found ? { url: backend.mediaUrl(found.mxc_url), shortcode: found.shortcode } : null;
+      },
+      links: false,
+    });
+  }
   const canDelete = $derived(eventId !== null && content.type !== 'Redacted' && (mine || canModerate));
 
   const plainText = $derived(content.type === 'Text' || content.type === 'Emote' ? content.data : null);
@@ -150,10 +171,11 @@
     {#if item.in_reply_to}
       {@const reply = item.in_reply_to}
       <button class="reply plain" onclick={() => onjump(reply.event_id)} title="Jump to the quoted message">
-        {#if reply.image_url}<img src={backend.mediaUrl(reply.image_url)} alt="" loading="lazy" />{/if}
+        {#if reply.image_url}<img class="thumb" src={backend.mediaUrl(reply.image_url)} alt="" loading="lazy" />{/if}
         <span class="reply-text">
           <span class="reply-name"><Icon name="reply" size={12} /> {reply.sender || '…'}</span>
-          <span class="reply-snippet truncate">{reply.snippet}</span>
+          <!-- eslint-disable-next-line svelte/no-at-html-tags -- escaped text plus images built with DOM APIs (richtext.ts) -->
+          <span class="reply-snippet truncate" onerrorcapture={emojiLoadFailed}>{@html snippetHtml(reply)}</span>
         </span>
       </button>
     {/if}
@@ -378,12 +400,21 @@
     font-size: 11px;
     font-weight: 600;
   }
-  .reply img {
+  .reply .thumb {
     flex: none;
     width: 36px;
     height: 36px;
     border-radius: 3px;
     object-fit: cover;
+  }
+  /* Emoji in the quote sit in its small line like text. */
+  .reply-snippet :global(img.twemoji),
+  .reply-snippet :global(img.emoticon) {
+    width: auto;
+    height: 1.35em;
+    max-width: 4em;
+    vertical-align: -0.3em;
+    object-fit: contain;
   }
   .thread {
     display: flex;

@@ -86,7 +86,7 @@ describe('buildRows grouping', () => {
   });
 
   it('a reply always gets its own header', () => {
-    const reply = text('b', '@x:s', 1000, { in_reply_to: { event_id: 'a', sender: 'x', snippet: 'hi', image_url: null } });
+    const reply = text('b', '@x:s', 1000, { in_reply_to: { event_id: 'a', sender: 'x', snippet: 'hi', image_url: null, emoticons: [] } });
     expect(continuations(buildRows([text('a', '@x:s'), reply], options))).toEqual([false, false]);
   });
 
