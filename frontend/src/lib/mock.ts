@@ -354,7 +354,15 @@ export function createMockBackend(): Backend {
           emit({ type: 'RoomMembersUpdated', data: { room_id: id, members: bigRoster > 0 ? syntheticMembers(bigRoster) : MEMBERS } });
           emit({
             type: 'PowerLevelTagsUpdated',
-            data: { room_id: id, tags: [{ level: 100, name: 'Admins', color: '#e5a3ff' }, { level: 50, name: 'Moderators', color: null }] },
+            // Real rooms pick colours like these (rpghq's roster).
+            data: {
+              room_id: id,
+              tags: [
+                { level: 100, name: 'Admins', color: '#0000ff' },
+                { level: 50, name: 'Moderators', color: '#00ff00' },
+                { level: 0, name: 'Red team', color: '#ff0000' },
+              ],
+            },
           });
           if (id === '!dev:thorny.chat') {
             emit({ type: 'CallStateUpdated', data: { room_id: id, joined: false, participants: [{ user_id: '@alice:thorny.chat', device_id: 'A' }, { user_id: '@bob:thorny.chat', device_id: 'B' }] } });

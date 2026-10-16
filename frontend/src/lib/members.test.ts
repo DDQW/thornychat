@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PowerLevelTag, RoomMember } from './bindings';
-import { groupMembers, HEADER_HEIGHT, layoutRoster, MEMBER_HEIGHT, safeColor, searchMembers, visibleRows } from './members';
+import { groupMembers, HEADER_HEIGHT, layoutRoster, MEMBER_HEIGHT, safeColor, searchMembers, tagColor, visibleRows } from './members';
 
 const member = (id: string, name: string, power_level: number): RoomMember => ({ user_id: id, display_name: name, avatar_url: null, power_level });
 
@@ -103,5 +103,19 @@ describe('safeColor', () => {
   it('only passes plain hex colours', () => {
     expect(safeColor('#a1B2c3')).toBe('#a1B2c3');
     for (const bad of ['red', '#fff', 'url(javascript:1)', '#12345g', null]) expect(safeColor(bad)).toBeNull();
+  });
+});
+
+describe('tagColor', () => {
+  it('keeps the hue and takes the rest from the theme', () => {
+    expect(tagColor('#0000ff')).toBe('hsl(240 var(--name-sat) var(--name-light))');
+    expect(tagColor('#ff0000')).toBe('hsl(0 var(--name-sat) var(--name-light))');
+    expect(tagColor('#00ff00')).toBe('hsl(120 var(--name-sat) var(--name-light))');
+    expect(tagColor('#ff00ff')).toBe('hsl(300 var(--name-sat) var(--name-light))');
+  });
+  it('leaves grey tags grey and drops unsafe ones', () => {
+    expect(tagColor('#808080')).toBe('hsl(0 0% var(--name-light))');
+    expect(tagColor('url(x)')).toBeNull();
+    expect(tagColor(null)).toBeNull();
   });
 });

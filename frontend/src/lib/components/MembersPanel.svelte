@@ -1,6 +1,6 @@
 <script lang="ts">
   import { openDirectMessage } from '../actions';
-  import { groupMembers, layoutRoster, safeColor, searchMembers, visibleRows } from '../members';
+  import { groupMembers, layoutRoster, searchMembers, tagColor, visibleRows } from '../members';
   import { memberMenu } from '../memberMenu';
   import { rooms } from '../stores/rooms.svelte';
   import { session } from '../stores/session.svelte';
@@ -54,7 +54,7 @@
     <div class="list" style:height="{roster.height}px">
       {#each visible as row (row.key)}
         {#if row.kind === 'header'}
-          <h3 style:top="{row.top}px" style:color={safeColor(row.group.color)}>{row.group.name} — {row.group.members.length}</h3>
+          <h3 style:top="{row.top}px" style:color={tagColor(row.group.color)}>{row.group.name} — {row.group.members.length}</h3>
         {:else}
           {@const member = row.member}
           <button
@@ -65,7 +65,7 @@
             title={member.user_id}
           >
             <Avatar src={member.avatar_url} name={member.display_name || member.user_id} seed={member.user_id} size={28} />
-            <span class="truncate grow" style:color={safeColor(row.group.color)}>{member.display_name || member.user_id}</span>
+            <span class="truncate grow" style:color={tagColor(row.group.color)}>{member.display_name || member.user_id}</span>
             {#if rooms.ignored.includes(member.user_id)}<span class="muted small">ignored</span>{/if}
           </button>
         {/if}

@@ -120,3 +120,20 @@ export function searchMembers(members: readonly RoomMember[], query: string, lim
 export function safeColor(color: string | null): string | null {
   return color && /^#[0-9a-f]{6}$/i.test(color) ? color : null;
 }
+
+/**
+ * A tag colour as the roster draws it: the room's hue, with the theme's name
+ * saturation and lightness (the same as per-user name colours), so a room's
+ * pure `#0000ff` doesn't come out unreadable on the dark theme. A grey tag
+ * stays grey. Null for a missing or unsafe colour.
+ */
+export function tagColor(color: string | null): string | null {
+  const hex = safeColor(color);
+  if (!hex) return null;
+  const [r, g, b] = [1, 3, 5].map((at) => parseInt(hex.slice(at, at + 2), 16) / 255) as [number, number, number];
+  const max = Math.max(r, g, b);
+  const chroma = max - Math.min(r, g, b);
+  if (chroma < 0.08) return 'hsl(0 0% var(--name-light))';
+  const sector = max === r ? ((g - b) / chroma + 6) % 6 : max === g ? (b - r) / chroma + 2 : (r - g) / chroma + 4;
+  return `hsl(${Math.round(sector * 60)} var(--name-sat) var(--name-light))`;
+}
