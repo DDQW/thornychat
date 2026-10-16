@@ -29,7 +29,7 @@
 <article class="tweet" class:nested>
   <header>
     {#if tweet.author.avatar_url}
-      <img class="avatar" src={backend.webImageUrl(tweet.author.avatar_url)} alt="" width="32" height="32" loading="lazy" />
+      <img class="avatar squircle" src={backend.webImageUrl(tweet.author.avatar_url)} alt="" width="32" height="32" loading="lazy" />
     {:else}
       <Avatar name={tweet.author.name} size={32} />
     {/if}
@@ -83,9 +83,6 @@
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-  .avatar {
-    border-radius: 50%;
   }
   .who {
     display: grid;

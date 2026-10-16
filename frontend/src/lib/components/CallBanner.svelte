@@ -37,7 +37,7 @@
     <Icon name="phone" size={16} />
     <div class="faces">
       {#each people.slice(0, 6) as user (user)}
-        <span title={nameOf(user, roomId)}><Avatar src={avatarOf(user, roomId)} name={nameOf(user, roomId)} seed={user} size={24} /></span>
+        <span class="squircle" title={nameOf(user, roomId)}><Avatar src={avatarOf(user, roomId)} name={nameOf(user, roomId)} seed={user} size={24} /></span>
       {/each}
     </div>
     <span class="grow">
@@ -69,7 +69,6 @@
   }
   .faces span {
     margin-right: -6px;
-    border-radius: 50%;
     box-shadow: 0 0 0 2px var(--bg);
   }
 </style>

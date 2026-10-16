@@ -398,6 +398,13 @@ a {
   background: var(--accent-text);
 }
 
+/* Avatars: the full radius, with superellipse corners. (Here rather than in
+   the components: svelte-check's CSS linter doesn't know corner-shape yet.) */
+.squircle {
+  border-radius: 50%;
+  corner-shape: squircle;
+}
+
 /* Per-user name colours: the hue comes from the user id, the rest from the theme. */
 .name {
   color: hsl(var(--hue, 0) var(--name-sat) var(--name-light));

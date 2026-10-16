@@ -23,8 +23,7 @@
 </script>
 
 <span
-  class="avatar"
-  class:square
+  class="avatar {square ? 'square' : 'squircle'}"
   style:width="{size}px"
   style:height="{size}px"
   style:font-size="{Math.max(10, Math.round(size * 0.4))}px"
@@ -42,7 +41,6 @@
     display: inline-grid;
     flex: 0 0 auto;
     place-items: center;
-    border-radius: 50%;
     background: hsl(var(--hue) 35% 32%);
     color: hsl(var(--hue) 70% 90%);
     font-weight: 600;
