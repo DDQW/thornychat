@@ -69,6 +69,16 @@ const GROUP_LABELS: Record<number, [string, string]> = {
 };
 
 /**
+ * Emoji 18.0 additions emojibase-data 18 ships but Twemoji has no SVG for yet
+ * (the CDN 404s every one). Kept out of the picker and shortcodes: the system
+ * font can't draw them either, so they'd show — and be sent — as tofu. Drop
+ * entries once Twemoji catches up.
+ */
+const NOT_IN_TWEMOJI = new Set([
+  '1FAEB', '1FAF9', '1FAFA', '1FACC', '1FADD', '1F6D9', '1FA8B', '1FA8C', '1FA8D',
+]);
+
+/**
  * This client's skin-tone preference, applied everywhere an emoji with tone
  * variants is shown or sent: light (the first variant), falling back to the
  * neutral yellow for emoji without any.
@@ -83,7 +93,7 @@ export function buildEmojiData(raw: RawEmoji[], shortcodeTable: Record<string, s
   const all: PickerEmoji[] = [];
   const shortcodes = new Map<string, PickerEmoji>();
 
-  const ordered = raw.filter((entry) => entry.group !== undefined && GROUP_LABELS[entry.group]).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  const ordered = raw.filter((entry) => entry.group !== undefined && GROUP_LABELS[entry.group] && !NOT_IN_TWEMOJI.has(entry.hexcode)).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   for (const entry of ordered) {
     const [key, label] = GROUP_LABELS[entry.group!]!;
     const emoji: PickerEmoji = {

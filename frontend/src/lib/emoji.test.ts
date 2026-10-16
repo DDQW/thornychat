@@ -54,6 +54,15 @@ describe('buildEmojiData', () => {
     expect(data.shortcodes.get('wave')?.char).toBe('👋🏻');
     expect(data.shortcodes.get('nope')).toBeUndefined();
   });
+
+  it('leaves out emoji Twemoji cannot draw yet', () => {
+    const data = buildEmojiData(
+      [...raw, { group: 4, hexcode: '1FADD', label: 'pickle', order: 4, unicode: '\u{1FADD}' }],
+      { '1FADD': 'pickle' },
+    );
+    expect(data.all.map((e) => e.label)).not.toContain('pickle');
+    expect(data.shortcodes.get('pickle')).toBeUndefined();
+  });
 });
 
 describe('searchEmoji', () => {

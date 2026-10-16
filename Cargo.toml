@@ -56,7 +56,7 @@ windows = { version = "0.62", features = [
 # Not in the build yet: no crate depends on it, so this pin only fixes the
 # starting API surface for `client-core::calls::webrtc_session`. Kept current
 # so that work does not begin against a release that is already stale.
-webrtc = "0.20"
+webrtc = "0.21"
 
 # Utility
 serde = { version = "1", features = ["derive"] }
