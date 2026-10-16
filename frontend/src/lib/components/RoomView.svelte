@@ -29,9 +29,12 @@
   const showMembers = $derived(!(settings.value?.chat.hide_members ?? false));
   const hasCall = $derived((rooms.calls[room.room_id]?.participants.length ?? 0) > 0);
 
-  // A reply, an edit or a search belongs to one room.
+  // A reply, an edit or a search belongs to one room. Keyed on the id alone:
+  // `room` is a new object whenever the summary changes (someone writes,
+  // the unread count moves), and that must not drop a reply being typed.
+  const roomId = $derived(room.room_id);
   $effect(() => {
-    void room.room_id;
+    void roomId;
     composer.clear();
     searchOpen = false;
     query = '';

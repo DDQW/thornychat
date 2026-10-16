@@ -287,6 +287,10 @@ export function createMockBackend(): Backend {
   let loggedIn = params.get('login') === null;
   const bigHistory = Number(params.get('history')) || 0;
   const bigRoster = Number(params.get('members')) || 0;
+  // `?chatter=N`: someone writes in the open room every N seconds, and its
+  // summary changes as the SDK's does (a new object, new preview).
+  const chatter = Number(params.get('chatter')) || 0;
+  let chatterRoom: string | null = null;
   const dictionary = new Set<string>();
   const typo = (word: string) => (dictionary.has(word.toLowerCase()) ? undefined : TYPOS[word.toLowerCase()]);
   let autostart = false;
@@ -300,7 +304,7 @@ export function createMockBackend(): Backend {
     loggedIn = true;
     setTimeout(() => {
       emit({ type: 'SyncStateChanged', data: { type: 'Syncing' } });
-      emit({ type: 'RoomListUpdated', data: ROOMS });
+      emit({ type: 'RoomListUpdated', data: freshRooms() });
       emit({ type: 'SpaceChildrenFetched', data: { space_id: '!hq:thorny.chat', children: ['!general:thorny.chat', '!dev:thorny.chat', '!random:thorny.chat'] } });
       emit({ type: 'RoomNotificationModesUpdated', data: [['!random:thorny.chat', 'Mute']] });
       emit({ type: 'DefaultNotificationModesUpdated', data: { direct_messages: 'AllMessages', group_chats: 'MentionsAndKeywordsOnly' } });
@@ -321,10 +325,27 @@ export function createMockBackend(): Backend {
     }, 150);
   }
 
+  // New objects every time, as the worker's deserialized lists are.
+  const freshRooms = () => ROOMS.map((summary) => ({ ...summary }));
+  let chatLine = 0;
+  function chat() {
+    const id = chatterRoom;
+    if (!id) return;
+    const line = `Chatter #${++chatLine}`;
+    const said = item('@carol:thorny.chat', text(line), Date.now());
+    timelines.set(id, [...(timelines.get(id) ?? []), said]);
+    diffs(id, [{ type: 'PushBack', data: said }]);
+    const index = ROOMS.findIndex((r) => r.room_id === id);
+    if (index >= 0) ROOMS[index] = { ...ROOMS[index]!, last_message_preview: `Carol: ${line}` };
+    emit({ type: 'RoomListUpdated', data: freshRooms() });
+  }
+
   function handle(command: ClientCommand) {
     switch (command.type) {
       case 'OpenRoom': {
         const id = command.data.room_id;
+        if (chatter > 0 && chatterRoom === null) setInterval(chat, chatter * 1000);
+        chatterRoom = id;
         const list = id === '!lonely:thorny.chat' ? [] : bigHistory > 0 ? syntheticHistory(bigHistory, Date.now()) : sampleHistory(Date.now());
         timelines.set(id, list);
         pagesLoaded.delete(id);
