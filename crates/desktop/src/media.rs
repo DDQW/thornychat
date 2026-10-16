@@ -313,15 +313,39 @@ fn status(code: StatusCode, message: &'static str) -> Response<Cow<'static, [u8]
 /// sender-declared type (`?mime=`) the page passes along for video. Only
 /// image, video and audio types ever come out — everything else is opaque.
 fn sniff(head: &[u8], hint: Option<&str>) -> String {
-    let sniffed = infer::get(head).map(|kind| kind.mime_type().to_string()).or_else(|| {
-        let text = String::from_utf8_lossy(&head[..head.len().min(512)]);
-        let trimmed = text.trim_start();
-        (trimmed.starts_with("<svg") || (trimmed.starts_with("<?xml") && trimmed.contains("<svg")))
-            .then(|| "image/svg+xml".to_string())
-    });
+    // SVG first: `infer` calls anything that opens with `<?xml` "text/xml"
+    // and anything that opens with a comment "text/html", and neither is a
+    // type served here, so an exported SVG (Inkscape and Illustrator both
+    // write the XML declaration) came out opaque and never drew.
+    let sniffed = if looks_like_svg(head) {
+        Some("image/svg+xml".to_string())
+    } else {
+        infer::get(head).map(|kind| kind.mime_type().to_string())
+    };
     let hinted = hint.filter(|hint| is_safe_media_type(hint)).map(str::to_string);
     let mime = sniffed.filter(|mime| is_safe_media_type(mime)).or(hinted);
     mime.unwrap_or_else(|| "application/octet-stream".to_string())
+}
+
+/// An SVG document: its root `<svg>` tag, alone or after the prologue an
+/// editor puts in front of it (XML declaration, comments, a doctype).
+fn looks_like_svg(head: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(head);
+    let mut rest = text.trim_start_matches('\u{feff}').trim_start();
+    loop {
+        if rest.starts_with("<svg") {
+            return true;
+        }
+        let end = if rest.starts_with("<!--") {
+            rest.find("-->").map(|index| index + 3)
+        } else if rest.starts_with("<?") || rest.starts_with("<!") {
+            rest.find('>').map(|index| index + 1)
+        } else {
+            None
+        };
+        let Some(end) = end else { return false };
+        rest = rest[end..].trim_start();
+    }
 }
 
 fn is_safe_media_type(mime: &str) -> bool {
@@ -438,6 +462,20 @@ mod tests {
         // The sender's claim doesn't override what the bytes say.
         assert_eq!(sniff(&png, Some("video/mp4")), "image/png");
         assert_eq!(sniff(b"<svg xmlns='http://www.w3.org/2000/svg'/>", None), "image/svg+xml");
+    }
+
+    #[test]
+    fn svg_with_a_prologue_is_still_svg() {
+        let inkscape = b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n<!-- Created with Inkscape (http://www.inkscape.org/) -->\n\n<svg\n   width=\"64\"";
+        let illustrator = b"\xef\xbb\xbf<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n<!-- Generator: Adobe Illustrator 24.0.0, SVG Export Plug-In . SVG Version: 6.00 Build 0)  -->\r\n<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">\r\n<svg version=\"1.1\" id=\"Layer_1\">";
+        let comment_first = b"<!-- emoji by someone --><svg viewBox='0 0 16 16'/>";
+        for svg in [&inkscape[..], &illustrator[..], &comment_first[..]] {
+            assert_eq!(sniff(svg, None), "image/svg+xml", "{}", String::from_utf8_lossy(svg));
+        }
+        // Markup that isn't SVG stays opaque.
+        for other in [&b"<?xml version=\"1.0\"?><rss/>"[..], b"<!-- hi --><html><script>", b"<!-- never closed <svg"] {
+            assert_eq!(sniff(other, None), "application/octet-stream", "{}", String::from_utf8_lossy(other));
+        }
     }
 
     #[test]
