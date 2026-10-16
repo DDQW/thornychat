@@ -3,10 +3,15 @@
 //! ThornyChat is a Tauri app: the Rust shell embeds a built copy of the Svelte
 //! frontend (`frontend/dist`), so every release build starts by building that.
 //!
-//!   cargo xtask                 build the frontend, then the three release variants
-//!   cargo xtask installer       build the frontend, then the NSIS installer (generic CPU)
-//!   cargo xtask frontend        build only the frontend
-//!   cargo xtask bindings        regenerate the TypeScript types from client-core
+//!   cargo xtask                    build the frontend, then the znver4 exe (the standard build)
+//!   cargo xtask installer          build the frontend, then the znver4 NSIS installer
+//!   cargo xtask all                build the frontend, then all three release variants
+//!   cargo xtask installer-generic  build the frontend, then a generic-CPU NSIS installer
+//!   cargo xtask frontend           build only the frontend
+//!   cargo xtask bindings           regenerate the TypeScript types from client-core
+//!
+//! ThornyChat is mainly for its author's own (Zen 4) machine, so znver4 is the
+//! standard build; the generic one is for handing to someone else.
 //!
 //! The three variants each get their own target/ subdirectory so they don't
 //! overwrite each other:
@@ -35,11 +40,13 @@
 use std::env;
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
 const EXE_SUBPATH: &str = "x86_64-pc-windows-msvc/release/thornychat.exe";
 const VARIANTS: [&str; 2] = ["znver4", "znver5"];
+/// What `cargo xtask` and `cargo xtask installer` build for.
+const DEFAULT_CPU: &str = "znver4";
 
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -48,11 +55,22 @@ fn main() {
     match args.first().map(String::as_str) {
         None => {
             build_frontend(&root);
+            ensure_writable(&[root.join("target").join(DEFAULT_CPU).join(EXE_SUBPATH)]);
+            build(DEFAULT_CPU, &root, Some(DEFAULT_CPU));
+            println!();
+            println!("Built target/{DEFAULT_CPU}/{EXE_SUBPATH}");
+        }
+        Some("all") => {
+            build_frontend(&root);
             build_all(&root);
         }
         Some("installer") => {
             build_frontend(&root);
-            installer(&root);
+            installer(&root, Some(DEFAULT_CPU));
+        }
+        Some("installer-generic") => {
+            build_frontend(&root);
+            installer(&root, None);
         }
         Some("frontend") => build_frontend(&root),
         Some("bindings") => bindings(&root),
@@ -60,10 +78,12 @@ fn main() {
             eprintln!("error: unknown command `{other}`");
             eprintln!();
             eprintln!("usage:");
-            eprintln!("  cargo xtask             build the frontend and the three release variants");
-            eprintln!("  cargo xtask installer   build the frontend and the NSIS installer");
-            eprintln!("  cargo xtask frontend    build only the frontend");
-            eprintln!("  cargo xtask bindings    regenerate frontend/src/lib/bindings from client-core");
+            eprintln!("  cargo xtask                    build the frontend and the znver4 exe");
+            eprintln!("  cargo xtask installer          build the frontend and the znver4 NSIS installer");
+            eprintln!("  cargo xtask all                build the frontend and the three release variants");
+            eprintln!("  cargo xtask installer-generic  build the frontend and a generic-CPU NSIS installer");
+            eprintln!("  cargo xtask frontend           build only the frontend");
+            eprintln!("  cargo xtask bindings           regenerate frontend/src/lib/bindings from client-core");
             exit(2);
         }
     }
@@ -108,40 +128,29 @@ fn bindings(root: &Path) {
     );
 }
 
-fn installer(root: &Path) {
-    println!("=== Building the installer (generic) ===");
+/// The NSIS installer, for `target_cpu` (in that variant's target dir, so it
+/// shares its build cache) or, with `None`, for baseline x86-64.
+fn installer(root: &Path, target_cpu: Option<&str>) {
+    println!("=== Building the installer ({}) ===", target_cpu.unwrap_or("generic"));
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    run(
-        "cargo tauri build",
-        Command::new(cargo)
-            .args(["tauri", "build", "--bundles", "nsis"])
-            .current_dir(root.join("crates/desktop"))
-            .env_remove("RUSTFLAGS")
-            .env_remove("CARGO_TARGET_DIR"),
-    );
+    let mut cmd = Command::new(cargo);
+    cmd.args(["tauri", "build", "--bundles", "nsis"])
+        .current_dir(root.join("crates/desktop"))
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_TARGET_DIR");
+    if let Some(cpu) = target_cpu {
+        // Relative paths in CARGO_TARGET_DIR resolve against the cwd, which
+        // is crates/desktop here.
+        cmd.env("RUSTFLAGS", format!("-C target-cpu={cpu}")).env("CARGO_TARGET_DIR", root.join("target").join(cpu));
+    }
+    run("cargo tauri build", &mut cmd);
 }
 
 fn build_all(root: &Path) {
-    // The linker can't overwrite a running exe - catch that up front instead
-    // of failing minutes into a build. Opening for write trips the same file
-    // lock the linker would; a copy running from some other directory doesn't
-    // hold these paths and correctly doesn't block.
     let outputs: Vec<_> = std::iter::once(root.join("target").join(EXE_SUBPATH))
         .chain(VARIANTS.iter().map(|v| root.join("target").join(v).join(EXE_SUBPATH)))
         .collect();
-    for exe in &outputs {
-        match OpenOptions::new().write(true).open(exe) {
-            Ok(_) => {}
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => {
-                eprintln!(
-                    "error: {} can't be overwritten ({e}) - close the running app first.",
-                    exe.display()
-                );
-                exit(1);
-            }
-        }
-    }
+    ensure_writable(&outputs);
 
     // Generic first: no target-cpu flag, default target dir.
     build("generic (baseline x86-64)", root, None);
@@ -154,6 +163,26 @@ fn build_all(root: &Path) {
     println!("  target/{EXE_SUBPATH}   (generic)");
     for v in VARIANTS {
         println!("  target/{v}/{EXE_SUBPATH}");
+    }
+}
+
+/// The linker can't overwrite a running exe - catch that up front instead of
+/// failing minutes into a build. Opening for write trips the same file lock
+/// the linker would; a copy running from some other directory doesn't hold
+/// these paths and correctly doesn't block.
+fn ensure_writable(outputs: &[PathBuf]) {
+    for exe in outputs {
+        match OpenOptions::new().write(true).open(exe) {
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => {
+                eprintln!(
+                    "error: {} can't be overwritten ({e}) - close the running app first.",
+                    exe.display()
+                );
+                exit(1);
+            }
+        }
     }
 }
 

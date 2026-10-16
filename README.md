@@ -73,26 +73,38 @@ commit the result (CI fails if they drift). A *new* type also needs a line in
 
 ### Release
 
-`cargo xtask` is the standard release build — it builds the frontend, then three
-binaries, each in its own `target/` subdirectory so they don't overwrite each
+ThornyChat is mainly built for its author's own Zen 4 machine, so the standard
+release build targets that CPU:
+
+```
+cargo xtask                    # frontend + the znver4 exe
+cargo xtask installer          # frontend + the znver4 NSIS installer
+cargo xtask all                # frontend + all three variants below
+cargo xtask installer-generic  # frontend + a generic-CPU NSIS installer
+```
+
+Each variant gets its own `target/` subdirectory so they don't overwrite each
 other. A bare `cargo build --release` is **not** equivalent: without the
 `custom-protocol` feature the exe expects the dev server instead of carrying its
 frontend.
 
 | Variant  | Path                                                  | What it is |
 | -------- | ----------------------------------------------------- | ---------- |
+| znver4   | `target/znver4/x86_64-pc-windows-msvc/release/thornychat.exe` | **The standard build.** AVX-512 (incl. IFMA) + DDR5, on Zen 4's double-pumped 256-bit units; the dev machine's native CPU. |
 | generic  | `target/x86_64-pc-windows-msvc/release/thornychat.exe` | Baseline x86-64: runs on any 64-bit CPU. The one to hand to someone else or ship as a download. |
-| znver4   | `target/znver4/x86_64-pc-windows-msvc/release/thornychat.exe` | AVX-512 (incl. IFMA) + DDR5, on Zen 4's double-pumped 256-bit units; the dev machine's native CPU. |
 | znver5   | `target/znver5/x86_64-pc-windows-msvc/release/thornychat.exe` | Zen 5: a native full-width 512-bit AVX-512 datapath plus wider dispatch — the newest generation. |
 
 **Never ship a znverN (or `target-cpu=native`) binary to unknown hardware.** A CPU
 without those instructions dies with an illegal-instruction fault. The generic
-build is the one that's safe everywhere. (The CPU level only matters for
-matrix-sdk's crypto; the webview does the rest.)
+build (and `cargo xtask installer-generic`) is the one that's safe everywhere.
+(The CPU level only matters for matrix-sdk's crypto; the webview does the rest.)
+Debug builds, `cargo test` and CI stay generic.
 
-`cargo xtask installer` builds the per-user NSIS installer (generic CPU), which also
-creates the Start Menu shortcut Windows needs to attribute toast notifications to
-ThornyChat.
+The installers are per-user NSIS installers, which also create the Start Menu
+shortcut Windows needs to attribute toast notifications to ThornyChat. The
+znver4 one lands in
+`target/znver4/x86_64-pc-windows-msvc/release/bundle/nsis/`, the generic one in
+`target/x86_64-pc-windows-msvc/release/bundle/nsis/`.
 
 ## License
 
