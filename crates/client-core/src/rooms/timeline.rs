@@ -7,13 +7,15 @@
 //! marker converts to nothing, so diff indices are renumbered into the UI
 //! list's space (see `kept` / `translate_diff`).
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use matrix_sdk::ruma::events::room::message::MessageType;
 use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::events::sticker::{StickerEventContent, StickerMediaSource};
 use matrix_sdk::ruma::events::StateEventContentChange;
-use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, RoomId, UserId};
+use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, OwnedEventId, RoomId, UserId};
 use matrix_sdk::{Client, Room};
 use matrix_sdk_ui::timeline::{
     MembershipChange, ReactionsByKeyBySender, RoomExt, RoomMembershipChange, Timeline,
@@ -26,6 +28,7 @@ use matrix_sdk_ui::timeline::{
 use matrix_sdk_ui::eyeball_im::VectorDiff;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
@@ -68,8 +71,8 @@ pub async fn open(
     // just a flag, so a `Set` landing on an identical item can be recognised
     // as a no-op and dropped — see `translate_diff`.
     let (initial, mut diff_stream) = timeline.subscribe().await;
-    let mut reply_details_requested = std::collections::HashSet::new();
-    request_missing_reply_details(&timeline, initial.iter(), &mut reply_details_requested);
+    let mut reply_quotes = ReplyQuotes::new(Arc::clone(&timeline));
+    reply_quotes.observe(initial.iter());
 
     let mut kept: Vec<Option<TimelineItem>> = Vec::with_capacity(initial.len());
     let mut initial_items: Vec<TimelineItem> = Vec::new();
@@ -87,30 +90,24 @@ pub async fn open(
         diffs: vec![TimelineDiff::Reset(initial_items)],
     });
 
-    let forward_timeline = Arc::clone(&timeline);
     let handle = tokio::spawn(async move {
         while let Some(batch) = diff_stream.next().await {
-            // Reply previews load lazily; kick off a fetch for any quoted event
-            // an item in this batch still hasn't resolved (over the raw SDK
-            // items, before conversion drops anything).
+            // Reply previews load lazily: see to the quotes of every item this
+            // batch adds or changes (over the raw SDK items, before conversion
+            // drops anything).
             for vdiff in &batch {
                 match vdiff {
-                    VectorDiff::Append { values } | VectorDiff::Reset { values } => {
-                        request_missing_reply_details(
-                            &forward_timeline,
-                            values.iter(),
-                            &mut reply_details_requested,
-                        );
+                    VectorDiff::Append { values } => reply_quotes.observe(values.iter()),
+                    VectorDiff::Reset { values } => {
+                        reply_quotes.forget();
+                        reply_quotes.observe(values.iter());
                     }
+                    VectorDiff::Clear => reply_quotes.forget(),
                     VectorDiff::PushFront { value }
                     | VectorDiff::PushBack { value }
                     | VectorDiff::Insert { value, .. }
                     | VectorDiff::Set { value, .. } => {
-                        request_missing_reply_details(
-                            &forward_timeline,
-                            std::iter::once(value),
-                            &mut reply_details_requested,
-                        );
+                        reply_quotes.observe(std::iter::once(value));
                     }
                     _ => {}
                 }
@@ -254,35 +251,128 @@ fn translate_diff(
     }
 }
 
-/// The SDK only resolves a reply's quoted-event details when that event
-/// happens to already be in the local timeline — otherwise they stay
-/// `Unavailable` until `fetch_details_for_event` is explicitly called
-/// (which fetches over the network and re-emits the item through the diff
-/// stream). Kick that off for every unresolved quote, once per reply
-/// event.
-fn request_missing_reply_details<'a>(
-    timeline: &Arc<Timeline>,
-    items: impl Iterator<Item = &'a Arc<SdkTimelineItem>>,
-    already_requested: &mut std::collections::HashSet<String>,
-) {
-    for item in items {
-        let TimelineItemKind::Event(event) = item.kind() else { continue };
-        let SdkTimelineItemContent::MsgLike(msg_like) = event.content() else { continue };
-        let Some(details) = &msg_like.in_reply_to else { continue };
-        if matches!(details.event, TimelineDetails::Unavailable) {
-            let Some(reply_event_id) = event.event_id() else { continue };
-            if !already_requested.insert(reply_event_id.to_string()) {
-                continue;
-            }
-            let timeline = Arc::clone(timeline);
-            let reply_event_id = reply_event_id.to_owned();
-            tokio::spawn(async move {
-                if let Err(error) = timeline.fetch_details_for_event(&reply_event_id).await {
-                    tracing::debug!(%reply_event_id, %error, "failed to fetch reply details");
-                }
-            });
+/// How many quoted events are fetched over the network at once. Opening a
+/// busy room after a sync gap leaves dozens of quotes unresolved, and firing
+/// them all together got requests throttled by the homeserver's proxy
+/// (rpghq.org sits behind Cloudflare) — each such failure used to stick as
+/// "Message unavailable" for a message that plainly exists.
+const REPLY_FETCHES_AT_ONCE: usize = 4;
+
+/// Waits before each retry of a quoted event that failed to load for any
+/// reason but a 404, so a throttled or dropped request gets another go.
+const REPLY_RETRY_DELAYS: [Duration; 4] = [
+    Duration::from_secs(2),
+    Duration::from_secs(10),
+    Duration::from_secs(60),
+    Duration::from_secs(300),
+];
+
+/// Resolves the quotes above replies. The SDK only fills a reply's quoted-event
+/// details in when that event is already in the local timeline; otherwise they
+/// stay `Unavailable` until `fetch_details_for_event` is called, which fetches
+/// over the network and re-emits the item through the diff stream. It also
+/// never revisits a quote that failed: not when the quoted event later turns
+/// up through back-pagination (as it does when the quote is clicked), only
+/// when that event is edited.
+struct ReplyQuotes {
+    timeline: Arc<Timeline>,
+    fetch_slots: Arc<Semaphore>,
+    /// Replies a fetch task has been started for, so each gets one.
+    requested: HashSet<OwnedEventId>,
+    /// Replies whose quote failed to load, by the quoted event's ID: when that
+    /// event arrives in the timeline, the quote can be filled in locally.
+    failed: HashMap<OwnedEventId, HashSet<OwnedEventId>>,
+}
+
+impl ReplyQuotes {
+    fn new(timeline: Arc<Timeline>) -> Self {
+        Self {
+            timeline,
+            fetch_slots: Arc::new(Semaphore::new(REPLY_FETCHES_AT_ONCE)),
+            requested: HashSet::new(),
+            failed: HashMap::new(),
         }
     }
+
+    /// Drops what is known about earlier items once the SDK has rebuilt the
+    /// timeline (after a sync gap, say): the rebuilt replies start out
+    /// unresolved again and each needs a fetch of its own.
+    fn forget(&mut self) {
+        self.requested.clear();
+        self.failed.clear();
+    }
+
+    /// Looks over items that were just added or changed: starts a fetch for
+    /// every quote not loaded yet, notes the ones that failed, and refills
+    /// failed quotes whose event is now among `items`.
+    fn observe<'a>(&mut self, items: impl Iterator<Item = &'a Arc<SdkTimelineItem>>) {
+        for item in items {
+            let TimelineItemKind::Event(event) = item.kind() else { continue };
+            let Some(event_id) = event.event_id() else { continue };
+
+            if let Some(replies) = self.failed.remove(event_id) {
+                // The quoted event is in the timeline now, so this resolves
+                // without a request.
+                for reply in replies {
+                    let timeline = Arc::clone(&self.timeline);
+                    tokio::spawn(async move {
+                        if let Err(error) = timeline.fetch_details_for_event(&reply).await {
+                            tracing::debug!(%reply, %error, "failed to refill a reply quote");
+                        }
+                    });
+                }
+            }
+
+            let SdkTimelineItemContent::MsgLike(msg_like) = event.content() else { continue };
+            let Some(details) = &msg_like.in_reply_to else { continue };
+            match &details.event {
+                TimelineDetails::Unavailable => {
+                    if self.requested.insert(event_id.to_owned()) {
+                        self.spawn_fetch(event_id.to_owned());
+                    }
+                }
+                TimelineDetails::Error(_) => {
+                    self.failed.entry(details.event_id.clone()).or_default().insert(event_id.to_owned());
+                }
+                TimelineDetails::Pending | TimelineDetails::Ready(_) => {}
+            }
+        }
+    }
+
+    /// Fetches one reply's quoted event, retrying with backoff while the
+    /// failure might be temporary.
+    fn spawn_fetch(&self, reply: OwnedEventId) {
+        let timeline = Arc::clone(&self.timeline);
+        let fetch_slots = Arc::clone(&self.fetch_slots);
+        tokio::spawn(async move {
+            let mut delays = REPLY_RETRY_DELAYS.iter();
+            loop {
+                {
+                    let Ok(_slot) = fetch_slots.acquire().await else { return };
+                    if let Err(error) = timeline.fetch_details_for_event(&reply).await {
+                        tracing::debug!(%reply, %error, "failed to fetch reply details");
+                        return;
+                    }
+                }
+                let details = timeline.item_by_event_id(&reply).await.and_then(|item| item.content().in_reply_to());
+                let retry = match details.map(|details| details.event) {
+                    Some(TimelineDetails::Error(error)) if !quoted_event_is_gone(&error) => {
+                        tracing::debug!(%reply, %error, "reply quote failed to load");
+                        true
+                    }
+                    _ => false,
+                };
+                let Some(delay) = delays.next().filter(|_| retry) else { return };
+                tokio::time::sleep(*delay).await;
+            }
+        });
+    }
+}
+
+/// Whether a quoted event failed to load because the server doesn't have it
+/// (redacted and purged, or never visible to us): no retry will change that.
+fn quoted_event_is_gone(error: &matrix_sdk::Error) -> bool {
+    error.as_client_api_error().is_some_and(|error| error.status_code.as_u16() == 404)
 }
 
 /// Forwards other users' typing state for a room as `ClientEvent::TypingUpdated`.
@@ -472,7 +562,12 @@ fn convert_reply_preview(details: &InReplyToDetails) -> ReplyPreview {
         // so the fetch 404s and no amount of waiting will fill this in. Say so,
         // rather than showing the same "…" as a pending fetch and leaving a
         // reply banner that looks like it's loading forever.
-        TimelineDetails::Error(_) => (String::new(), "Message unavailable".to_string(), None, Vec::new()),
+        TimelineDetails::Error(error) if quoted_event_is_gone(error) => {
+            (String::new(), "Message unavailable".to_string(), None, Vec::new())
+        }
+        // Throttled, offline, a server hiccup: `ReplyQuotes` retries these, and
+        // the quote fills in when the event shows up in the timeline anyway.
+        TimelineDetails::Error(_) => (String::new(), "Couldn't load message".to_string(), None, Vec::new()),
         _ => (String::new(), "…".to_string(), None, Vec::new()),
     };
     ReplyPreview { event_id: details.event_id.to_string(), sender, snippet, image_url, emoticons }
@@ -763,4 +858,27 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use matrix_sdk::ruma::api::client::uiaa::UiaaResponse;
+    use matrix_sdk::ruma::api::error::{Error as ApiError, ErrorBody, FromHttpResponseError};
+    use matrix_sdk::ruma::exports::http::StatusCode;
+    use matrix_sdk::HttpError;
+
+    fn server_error(status: StatusCode) -> matrix_sdk::Error {
+        let body = ErrorBody::Json(serde_json::json!({}));
+        let response = UiaaResponse::MatrixError(ApiError::new(status, body));
+        matrix_sdk::Error::Http(Box::new(HttpError::Api(Box::new(FromHttpResponseError::Server(response)))))
+    }
+
+    #[test]
+    fn only_a_404_means_the_quoted_event_is_gone() {
+        assert!(quoted_event_is_gone(&server_error(StatusCode::NOT_FOUND)));
+        assert!(!quoted_event_is_gone(&server_error(StatusCode::TOO_MANY_REQUESTS)));
+        assert!(!quoted_event_is_gone(&server_error(StatusCode::BAD_GATEWAY)));
+        assert!(!quoted_event_is_gone(&matrix_sdk::Error::AuthenticationRequired));
+    }
 }
