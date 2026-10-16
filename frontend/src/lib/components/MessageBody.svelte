@@ -31,15 +31,27 @@
     if (spoiler) spoiler.classList.toggle('revealed');
   }
 
+  /** How long a custom emoji that failed to load waits before its one retry. */
+  const EMOTICON_RETRY_MS = 2000;
+
   /**
    * A Twemoji image that fails to load (offline, first use) falls back to the
-   * real glyph, a custom emoji to its `:shortcode:`.
+   * real glyph, a custom emoji to its `:shortcode:` — but only after a second
+   * try: the first time one is shown it comes straight from the homeserver,
+   * and a blip there shouldn't leave the name in place of the picture for as
+   * long as the message is on screen.
    */
   function emojiFallback(event: Event) {
     const image = event.target;
     if (!(image instanceof HTMLImageElement)) return;
     if (image.classList.contains('twemoji')) {
       image.replaceWith(document.createTextNode(image.alt));
+    } else if (image.classList.contains('emoticon') && !image.hasAttribute('data-retried')) {
+      image.setAttribute('data-retried', '');
+      // A new URL, so nothing reuses the failed response (the media route
+      // ignores the extra parameter).
+      const retry = `${image.src}${image.src.includes('?') ? '&' : '?'}retry=1`;
+      setTimeout(() => image.setAttribute('src', retry), EMOTICON_RETRY_MS);
     } else if (image.classList.contains('emoticon') && image.alt) {
       image.replaceWith(document.createTextNode(image.alt.startsWith(':') ? image.alt : `:${image.alt}:`));
     }

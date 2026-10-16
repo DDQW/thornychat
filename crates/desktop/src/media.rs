@@ -366,6 +366,11 @@ mod tests {
             parse_route("/mxc/matrix.org/TQtMBGzGjgtdYfjYIMtXSLjZ", None),
             Some(Route::Mxc { server: "matrix.org".into(), media_id: "TQtMBGzGjgtdYfjYIMtXSLjZ".into() })
         );
+        // The page's one retry of a custom emoji adds `retry=1`; it's the same image.
+        assert_eq!(
+            parse_route("/mxc/rpghq.org/ZtLsesnQsDMukwTGcGNlJOup", Some("retry=1")),
+            Some(Route::Mxc { server: "rpghq.org".into(), media_id: "ZtLsesnQsDMukwTGcGNlJOup".into() })
+        );
         assert_eq!(parse_route("/twemoji/1f600.svg", None), Some(Route::Twemoji("1f600".into())));
         assert_eq!(
             parse_route("/web", Some("u=https%3A%2F%2Fpbs.twimg.com%2Fa.jpg")),
