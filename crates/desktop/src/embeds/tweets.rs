@@ -56,12 +56,21 @@ pub struct TweetMedia {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TweetPhoto {
     pub url: String,
+    /// Pixel size, so the card can reserve the picture's shape before it loads.
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TweetVideo {
     #[serde(default)]
     pub thumbnail_url: Option<String>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
 }
 
 

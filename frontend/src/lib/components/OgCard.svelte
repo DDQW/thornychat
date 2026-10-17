@@ -11,6 +11,11 @@
   // Square images are avatars/icons and sit beside the text; wide ones are
   // banners and go below it.
   const square = $derived(!!preview.image_width && !!preview.image_height && Math.abs(preview.image_width - preview.image_height) < 24 && preview.image_width < 300);
+  // A banner's shape is reserved before it loads (the declared one, else the
+  // 1.91:1 OpenGraph images are made for): images in the timeline only start
+  // loading once they scroll into view, and one growing from nothing there
+  // pushed every message below it down.
+  const bannerRatio = $derived(preview.image_width && preview.image_height ? `${preview.image_width} / ${preview.image_height}` : '1.91 / 1');
 </script>
 
 {#if preview.title || preview.description}
@@ -21,7 +26,7 @@
       {#if preview.description}<p class="muted small">{truncate(preview.description, 280)}</p>{/if}
     </div>
     {#if preview.image_mxc}
-      <img src={backend.mediaUrl(preview.image_mxc)} alt="" loading="lazy" />
+      <img src={backend.mediaUrl(preview.image_mxc)} alt="" loading="lazy" style:aspect-ratio={square ? undefined : bannerRatio} />
     {/if}
   </article>
 {/if}

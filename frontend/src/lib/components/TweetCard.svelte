@@ -15,7 +15,18 @@
 
   const html = $derived(plainTextToHtml(tweet.text, { twemojiUrl: (c) => backend.twemojiUrl(c) }));
   const photos = $derived((tweet.media?.photos ?? []).slice(0, 4));
-  const videoThumbs = $derived((tweet.media?.videos ?? []).map((v) => v.thumbnail_url).filter((u): u is string => !!u).slice(0, 1));
+  const videoThumbs = $derived((tweet.media?.videos ?? []).filter((v): v is typeof v & { thumbnail_url: string } => !!v.thumbnail_url).slice(0, 1));
+  const single = $derived(photos.length + videoThumbs.length === 1);
+
+  /**
+   * The shape a lone picture is drawn at, fixed before it loads so its
+   * arrival doesn't move the timeline: its declared size, else 16:9. In a
+   * grid every cell is 16:9 (the CSS default).
+   */
+  function shape(media: { width?: number | null; height?: number | null }): string | undefined {
+    if (!single) return undefined;
+    return media.width && media.height ? `${media.width} / ${media.height}` : '16 / 9';
+  }
   const stats = $derived(
     [
       ['replies', tweet.replies],
@@ -43,12 +54,12 @@
   <div class="text">{@html html}</div>
 
   {#if photos.length > 0 || videoThumbs.length > 0}
-    <div class="media" class:single={photos.length + videoThumbs.length === 1}>
+    <div class="media" class:single>
       {#each photos as photo (photo.url)}
-        <img src={backend.webImageUrl(photo.url)} alt="" loading="lazy" />
+        <img src={backend.webImageUrl(photo.url)} alt="" loading="lazy" style:aspect-ratio={shape(photo)} />
       {/each}
-      {#each videoThumbs as thumb (thumb)}
-        <img src={backend.webImageUrl(thumb)} alt="Video thumbnail" loading="lazy" />
+      {#each videoThumbs as video (video.thumbnail_url)}
+        <img src={backend.webImageUrl(video.thumbnail_url)} alt="Video thumbnail" loading="lazy" style:aspect-ratio={shape(video)} />
       {/each}
     </div>
   {/if}
@@ -119,7 +130,9 @@
     grid-template-columns: 1fr;
   }
   .media img {
+    display: block;
     width: 100%;
+    aspect-ratio: 16 / 9;
     max-height: 280px;
     object-fit: cover;
   }

@@ -132,14 +132,29 @@
   // stay glued to the bottom if that's where the reader is, and otherwise keep
   // what they're reading where it was.
   $effect(() => {
-    if (!content || !scroller) return;
+    const list = content;
+    if (!list || !scroller) return;
     const observer = new ResizeObserver(() => {
       if (stuck) scrollToBottom();
       else keepAnchor();
     });
-    observer.observe(content);
+    observer.observe(list);
     observer.observe(scroller);
-    return () => observer.disconnect();
+    // Every row as well: two changes that cancel out (a read receipt leaving
+    // one message for another) leave the list's height as it was, yet still
+    // move everything between them.
+    for (const row of list.children) observer.observe(row);
+    const rowsChanged = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of record.addedNodes) if (node instanceof Element && node.parentNode === list) observer.observe(node);
+        for (const node of record.removedNodes) if (node instanceof Element && node.parentNode !== list) observer.unobserve(node);
+      }
+    });
+    rowsChanged.observe(list, { childList: true });
+    return () => {
+      rowsChanged.disconnect();
+      observer.disconnect();
+    };
   });
 
   // Sending a message brings you back to the bottom, even from deep in the

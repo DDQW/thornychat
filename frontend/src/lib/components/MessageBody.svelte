@@ -129,9 +129,11 @@
     height: 1.3em;
     vertical-align: -0.3em;
   }
-  /* Custom emoji sit in the line like Twemoji do; wide ones keep their shape. */
+  /* Custom emoji sit in the line like Twemoji do; wide ones keep their shape.
+     A square is held while one loads, or the line rewraps when it arrives. */
   .body :global(img.emoticon) {
     width: auto;
+    min-width: 1.5em;
     height: 1.5em;
     max-width: 4.5em;
     vertical-align: -0.4em;
@@ -144,6 +146,7 @@
     vertical-align: middle;
   }
   .body.jumbo :global(img.emoticon) {
+    min-width: 2.5em;
     height: 2.5em;
     max-width: 7.5em;
     vertical-align: middle;

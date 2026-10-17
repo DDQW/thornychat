@@ -89,7 +89,10 @@ export interface TweetData {
   likes?: number | null;
   views?: number | null;
   created_timestamp?: number | null;
-  media?: { photos: { url: string }[]; videos: { thumbnail_url?: string | null }[] } | null;
+  media?: {
+    photos: { url: string; width?: number | null; height?: number | null }[];
+    videos: { thumbnail_url?: string | null; width?: number | null; height?: number | null }[];
+  } | null;
   quote?: TweetData | null;
 }
 
