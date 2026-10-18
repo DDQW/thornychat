@@ -235,7 +235,9 @@ function olderHistory(before: number, page: number): TimelineItem[] {
   return Array.from({ length: 12 }, (_, i) =>
     item(
       i % 3 === 0 ? '@bob:thorny.chat' : '@alice:thorny.chat',
-      text(`Older message #${page * 12 + i + 1}: lorem ipsum dolor sit amet.`),
+      // A page back, the video linked again in the sample history: loading
+      // it while that one plays mustn't start this one.
+      page === 0 && i === 9 ? text('First time: https://www.youtube.com/watch?v=dQw4w9WgXcQ') : text(`Older message #${page * 12 + i + 1}: lorem ipsum dolor sit amet.`),
       before - (12 - i) * 5 * 60_000 - page * 90 * 60_000,
       // Two pages back: the message a reply in the sample history quotes.
       page === 1 && i === 6 ? { event_id: '$quoted-older' } : {},

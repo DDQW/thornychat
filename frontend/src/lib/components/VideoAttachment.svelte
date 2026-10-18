@@ -9,11 +9,18 @@
     filename: string;
     mimetype: string | null;
     thumbnailUrl: string | null;
+    /** The message it is in, so the same file sent twice is two players. */
+    owner: string;
   }
-  let { mxcUrl, filename, mimetype, thumbnailUrl }: Props = $props();
+  let { mxcUrl, filename, mimetype, thumbnailUrl, owner }: Props = $props();
 
-  const id = $derived(`attachment:${mxcUrl}`);
+  const id = $derived(`attachment:${owner}:${mxcUrl}`);
   const playing = $derived(player.current === id);
+  // Gone from the page, it stops: coming back must not autostart it.
+  $effect(() => {
+    const mine = id;
+    return () => player.stop(mine);
+  });
   let failed = $state(false);
 
   async function save() {

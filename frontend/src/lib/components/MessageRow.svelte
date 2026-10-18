@@ -34,6 +34,8 @@
   const myId = $derived(session.info?.user_id ?? '');
   const mine = $derived(item.sender === myId);
   const eventId = $derived(item.event_id);
+  /** Names this message to its video players (a local echo has no event ID yet). */
+  const owner = $derived(eventId ?? `local:${item.timestamp_ms}`);
   const pending = $derived(eventId === null && mine);
   const name = $derived(nameOf(item.sender, roomId, item.sender_display_name));
   const avatar = $derived(avatarOf(item.sender, roomId) ?? item.sender_avatar_url);
@@ -185,7 +187,7 @@
         <MessageBody text={content.data} formatted={item.formatted_body} />
         {#if item.edited}<span class="edited muted small" title="This message was edited">(edited)</span>{/if}
       </div>
-      {#if links.length > 0}<LinkCards urls={links} />{/if}
+      {#if links.length > 0}<LinkCards urls={links} {owner} />{/if}
     {:else if content.type === 'Emote'}
       <div class="content emote">
         <span class="star">*</span>
@@ -218,7 +220,7 @@
       <FileCard mxcUrl={content.data.url} filename={content.data.filename} />
       {#if content.data.caption}<div class="content caption"><MessageBody text={content.data.caption} /></div>{/if}
     {:else if content.type === 'Video'}
-      <VideoAttachment mxcUrl={content.data.url} filename={content.data.filename} mimetype={content.data.mimetype} thumbnailUrl={content.data.thumbnail_url} />
+      <VideoAttachment mxcUrl={content.data.url} filename={content.data.filename} mimetype={content.data.mimetype} thumbnailUrl={content.data.thumbnail_url} {owner} />
       {#if content.data.caption}<div class="content caption"><MessageBody text={content.data.caption} /></div>{/if}
     {:else if content.type === 'Redacted'}
       <div class="content muted"><em>Message deleted</em></div>

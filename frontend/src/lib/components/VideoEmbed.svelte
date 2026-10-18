@@ -7,11 +7,18 @@
 
   interface Props {
     video: EmbedVideo;
+    /** The message it is in, so the same link in two messages is two players. */
+    owner: string;
   }
-  let { video }: Props = $props();
+  let { video, owner }: Props = $props();
 
-  const id = $derived(`embed:${video.sourceUrl}`);
+  const id = $derived(`embed:${owner}:${video.sourceUrl}`);
   const playing = $derived(player.current === id);
+  // Gone from the page, it stops: coming back must not autostart it.
+  $effect(() => {
+    const mine = id;
+    return () => player.stop(mine);
+  });
   const preview = $derived(previews.og[video.sourceUrl]);
   const og = $derived(preview?.state === 'ready' ? preview.value : null);
   const title = $derived(og?.title ?? (video.platform === 'file' ? decodeURIComponent(video.sourceUrl.split('/').pop()?.split('?')[0] ?? 'Video') : `${PLATFORM_LABEL[video.platform]} video`));

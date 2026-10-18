@@ -8,8 +8,10 @@
 
   interface Props {
     urls: string[];
+    /** The message the links are in (see VideoEmbed). */
+    owner: string;
   }
-  let { urls }: Props = $props();
+  let { urls, owner }: Props = $props();
 
   const items = $derived(
     urls.map((url) => {
@@ -34,7 +36,7 @@
 
 {#each items as item (item.url)}
   {#if item.kind === 'video'}
-    <VideoEmbed video={item.video} />
+    <VideoEmbed video={item.video} {owner} />
   {:else if item.kind === 'tweet'}
     {@const tweet = previews.tweets[item.url]}
     {#if tweet?.state === 'ready'}
