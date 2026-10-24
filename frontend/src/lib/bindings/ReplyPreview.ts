@@ -16,4 +16,14 @@ image_url: string | null,
  * The custom emoji the quoted message draws, so the quote can draw
  * them too: the snippet is its plain body, where they are `:name:`.
  */
-emoticons: Array<InlineEmoticon>, };
+emoticons: Array<InlineEmoticon>, 
+/**
+ * The server has no such event (redacted and purged, or never visible to
+ * this account): searching the room's history for it can never succeed.
+ */
+gone: boolean, 
+/**
+ * When the quoted message was sent, once its details have loaded — how a
+ * jump to it knows it has paged back past where it would be.
+ */
+timestamp_ms: number | null, };

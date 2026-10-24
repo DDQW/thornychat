@@ -372,6 +372,12 @@ pub struct ReplyPreview {
     /// The custom emoji the quoted message draws, so the quote can draw
     /// them too: the snippet is its plain body, where they are `:name:`.
     pub emoticons: Vec<InlineEmoticon>,
+    /// The server has no such event (redacted and purged, or never visible to
+    /// this account): searching the room's history for it can never succeed.
+    pub gone: bool,
+    /// When the quoted message was sent, once its details have loaded — how a
+    /// jump to it knows it has paged back past where it would be.
+    pub timestamp_ms: Option<u64>,
 }
 
 /// A custom emoji drawn inline in someone's message: the image, and the name

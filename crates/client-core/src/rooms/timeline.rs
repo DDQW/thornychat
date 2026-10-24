@@ -537,7 +537,7 @@ fn content_is_edited(content: &SdkTimelineItemContent) -> bool {
 /// quotes above a reply. Details may legitimately be unavailable (the SDK
 /// lazily loads replied-to events); the UI shows just "↩" + ellipsis then.
 fn convert_reply_preview(details: &InReplyToDetails) -> ReplyPreview {
-    let (sender, snippet, image_url, emoticons) = match &details.event {
+    let (sender, snippet, image_url, emoticons, timestamp_ms, gone) = match &details.event {
         TimelineDetails::Ready(embedded) => {
             let sender = match &embedded.sender_profile {
                 TimelineDetails::Ready(profile) => profile
@@ -556,21 +556,28 @@ fn convert_reply_preview(details: &InReplyToDetails) -> ReplyPreview {
             let emoticons = formatted_body_of(&embedded.content)
                 .map(|html| crate::emoticons::in_html(&html))
                 .unwrap_or_default();
-            (sender, summarize_content(&embedded.content, embedded.sender.as_str()), image_url, emoticons)
+            (
+                sender,
+                summarize_content(&embedded.content, embedded.sender.as_str()),
+                image_url,
+                emoticons,
+                Some(u64::from(embedded.timestamp.get())),
+                false,
+            )
         }
         // The quoted event is gone for good — redacted or purged server-side,
         // so the fetch 404s and no amount of waiting will fill this in. Say so,
         // rather than showing the same "…" as a pending fetch and leaving a
         // reply banner that looks like it's loading forever.
         TimelineDetails::Error(error) if quoted_event_is_gone(error) => {
-            (String::new(), "Message unavailable".to_string(), None, Vec::new())
+            (String::new(), "Message unavailable".to_string(), None, Vec::new(), None, true)
         }
         // Throttled, offline, a server hiccup: `ReplyQuotes` retries these, and
         // the quote fills in when the event shows up in the timeline anyway.
-        TimelineDetails::Error(_) => (String::new(), "Couldn't load message".to_string(), None, Vec::new()),
-        _ => (String::new(), "…".to_string(), None, Vec::new()),
+        TimelineDetails::Error(_) => (String::new(), "Couldn't load message".to_string(), None, Vec::new(), None, false),
+        _ => (String::new(), "…".to_string(), None, Vec::new(), None, false),
     };
-    ReplyPreview { event_id: details.event_id.to_string(), sender, snippet, image_url, emoticons }
+    ReplyPreview { event_id: details.event_id.to_string(), sender, snippet, image_url, emoticons, gone, timestamp_ms }
 }
 
 fn summarize_content(content: &SdkTimelineItemContent, sender: &str) -> String {

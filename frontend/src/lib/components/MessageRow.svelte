@@ -27,7 +27,7 @@
     roomId: string;
     /** Same sender as the row above, shortly after: no header. */
     continuation: boolean;
-    onjump: (eventId: string) => void;
+    onjump: (reply: ReplyPreview) => void;
   }
   let { item, roomId, continuation, onjump }: Props = $props();
 
@@ -172,7 +172,7 @@
 
     {#if item.in_reply_to}
       {@const reply = item.in_reply_to}
-      <button class="reply plain" onclick={() => onjump(reply.event_id)} title="Jump to the quoted message">
+      <button class="reply plain" onclick={() => onjump(reply)} title="Jump to the quoted message">
         {#if reply.image_url}<img class="thumb" src={backend.mediaUrl(reply.image_url)} alt="" loading="lazy" />{/if}
         <span class="reply-text">
           <span class="reply-name"><Icon name="reply" size={12} /> {reply.sender || '…'}</span>

@@ -3,6 +3,7 @@
   import { markRoomRead, paginateBackwards, shrinkTimeline } from '../actions';
   import { nameOf } from '../people';
   import { buildRows, reuseRows, type Row } from '../timeline/rows';
+  import type { ReplyPreview } from '../bindings';
   import { matchesQuery } from '../timeline/search';
   import { rooms } from '../stores/rooms.svelte';
   import { session } from '../stores/session.svelte';
@@ -320,7 +321,7 @@
     untrack(() => {
       if (stuck || jumping || anchor.length === 0) return;
       const present = anchor.some((place) => content?.querySelector(`[data-event-id="${CSS.escape(place.eventId)}"]`));
-      if (!present) void jumpTo(anchor[0]!.eventId, anchor[0]!.offset);
+      if (!present) void jumpTo(anchor[0]!.eventId, { restoreOffset: anchor[0]!.offset });
     });
   });
 
@@ -336,14 +337,36 @@
     return condition();
   }
 
+  /** Clock differences between servers and out-of-order arrival: how far past its time a search goes. */
+  const JUMP_SLACK_MS = 10 * 60_000;
+
+  /** A click on a quote: says so up front when the message is known to be gone, else looks for it. */
+  function jumpToQuote(reply: ReplyPreview) {
+    if (reply.gone) {
+      ui.toast('That message was deleted or is no longer available.', 'info', 3500);
+      return;
+    }
+    void jumpTo(reply.event_id, { sentAt: reply.timestamp_ms });
+  }
+
   /**
    * Scrolls to the quoted message and flashes it. One that is older than what
-   * is loaded is fetched first, a page of history at a time.
+   * is loaded is fetched first, a page of history at a time: until it turns
+   * up, or the history loaded reaches back past when it was sent (then it is
+   * not among the events the timeline shows, and going further finds nothing).
+   * `restoreOffset` puts the message at that distance from the top of the view
+   * instead, quietly: it is how a reader gets their place back.
    */
-  export async function jumpTo(eventId: string, restoreOffset?: number) {
+  export async function jumpTo(eventId: string, { restoreOffset, sentAt }: { restoreOffset?: number; sentAt?: number | null } = {}) {
     const tl = timeline;
     if (!tl || jumping) return;
     const loaded = () => tl.items.some((item) => item.event_id === eventId);
+    const pastItsTime = () => {
+      if (!sentAt) return false;
+      const oldest = tl.items.find((item) => item.event_id !== null)?.timestamp_ms;
+      return oldest !== undefined && oldest < sentAt - JUMP_SLACK_MS;
+    };
+    let tooFar = false;
 
     // Stop following the bottom for the whole jump. Loading history for it
     // holds the view in place, often at the bottom, and a resize while still
@@ -353,10 +376,11 @@
     stuck = false;
     captureAnchor();
     try {
-      if (!loaded() && !tl.startReached) {
+      if (!loaded() && !tl.startReached && !pastItsTime()) {
         if (restoreOffset === undefined) ui.toast('Loading older messages to find it…', 'info', 2500);
         try {
-          for (let page = 0; page < MAX_JUMP_PAGES && !loaded() && !tl.startReached; page++) {
+          let page = 0;
+          for (; page < MAX_JUMP_PAGES && !loaded() && !tl.startReached && !pastItsTime(); page++) {
             await until(() => !tl.loadingOlder, 10_000);
             const before = tl.items.length;
             tl.loadingOlder = true;
@@ -368,6 +392,7 @@
             // The page's diffs can land just after the command reports success.
             await until(() => tl.items.length !== before || loaded(), 1500);
           }
+          tooFar = page === MAX_JUMP_PAGES && !loaded() && !tl.startReached && !pastItsTime();
         } catch (error) {
           ui.error(`Couldn't load older messages: ${String(error)}`);
         }
@@ -376,7 +401,11 @@
       await tick();
       const target = content?.querySelector<HTMLElement>(`[data-event-id="${CSS.escape(eventId)}"]`);
       if (!target) {
-        const why = loaded() ? 'Clear the search to jump to that message.' : "Couldn't find that message in the room's history.";
+        const why = loaded()
+          ? 'Clear the search to jump to that message.'
+          : tooFar
+            ? 'That message is too far back to jump to.'
+            : "That message isn't among the ones this room shows.";
         if (restoreOffset === undefined) ui.toast(why, 'info', 3500);
         if (scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < BOTTOM_SLACK) stuck = true;
         return;
@@ -426,7 +455,7 @@
           {:else if row.kind === 'system'}
             <div class="system muted small">{row.text}</div>
           {:else}
-            <MessageRow item={row.item} {roomId} continuation={row.continuation} onjump={jumpTo} />
+            <MessageRow item={row.item} {roomId} continuation={row.continuation} onjump={jumpToQuote} />
           {/if}
         {/each}
 
