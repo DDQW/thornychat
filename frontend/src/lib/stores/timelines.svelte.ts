@@ -21,12 +21,21 @@ export class RoomTimeline {
   dividerSuppressed = $state(false);
   /** A `ShrinkTimeline` is in flight and its `Reset` hasn't landed yet. */
   shrinkPending = $state(false);
+  /** Resets after the first batch: the list was swapped under whoever is reading it. */
+  resets = $state(0);
 
   apply(diffs: readonly TimelineDiff[]): void {
+    const reset = diffs.some((diff) => diff.type === 'Reset');
+    if (reset && this.loaded) this.resets++;
     this.items = applyDiffs(this.items, diffs);
     this.loaded = true;
-    // A reset (including the one a shrink asks for) ends a pending shrink.
-    if (diffs.some((diff) => diff.type === 'Reset')) this.shrinkPending = false;
+    // A reset (including the one a shrink asks for) ends a pending shrink, and
+    // a shrink puts older history back one pagination away, even history the
+    // reader had already reached the start of.
+    if (reset) {
+      if (this.shrinkPending) this.startReached = false;
+      this.shrinkPending = false;
+    }
   }
 }
 

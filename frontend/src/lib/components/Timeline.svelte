@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, tick } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { markRoomRead, paginateBackwards, shrinkTimeline } from '../actions';
   import { nameOf } from '../people';
   import { buildRows, reuseRows, type Row } from '../timeline/rows';
@@ -282,14 +282,46 @@
   // Past the cap, a timeline quietly following the live edge is reopened so it
   // collapses to the newest page. At the bottom the swap is invisible (the tail
   // is identical before and after); under a scrolled-up reader it would yank
-  // the view, so it waits.
+  // the view, so it waits. The worker takes a moment over the swap, so it also
+  // waits for the reader to have been still at the bottom for a while: someone
+  // who comes straight back down and up again would otherwise be scrolling
+  // when the list is replaced under them.
+  const SHRINK_AFTER_IDLE_MS = 2500;
+  let shrinkTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
     const tl = timeline;
+    clearTimeout(shrinkTimer);
     if (!tl || !stuck || tl.shrinkPending || tl.loadingOlder || ui.lightbox) return;
-    if (tl.items.length > MAX_LIVE_ITEMS) {
+    if (tl.items.length <= MAX_LIVE_ITEMS) return;
+    const attempt = () => {
+      if (!stuck || tl.shrinkPending || tl.loadingOlder || ui.lightbox) return;
+      const quietFor = performance.now() - lastInput;
+      if (quietFor < SHRINK_AFTER_IDLE_MS) {
+        shrinkTimer = setTimeout(attempt, SHRINK_AFTER_IDLE_MS - quietFor);
+        return;
+      }
       tl.shrinkPending = true;
       shrinkTimeline(roomId);
-    }
+    };
+    shrinkTimer = setTimeout(attempt, SHRINK_AFTER_IDLE_MS);
+    return () => clearTimeout(shrinkTimer);
+  });
+  onDestroy(() => clearTimeout(shrinkTimer));
+
+  // The list was replaced while someone was reading higher up (the worker's
+  // swap landed after they had already scrolled away from the bottom): the
+  // messages they were looking at are gone from it. Load back to them and put
+  // the view where it was.
+  let seenResets = 0;
+  $effect(() => {
+    const count = timeline?.resets ?? 0;
+    if (count === seenResets) return;
+    seenResets = count;
+    untrack(() => {
+      if (stuck || jumping || anchor.length === 0) return;
+      const present = anchor.some((place) => content?.querySelector(`[data-event-id="${CSS.escape(place.eventId)}"]`));
+      if (!present) void jumpTo(anchor[0]!.eventId, anchor[0]!.offset);
+    });
   });
 
   // --- jump to a quoted message ---
@@ -308,7 +340,7 @@
    * Scrolls to the quoted message and flashes it. One that is older than what
    * is loaded is fetched first, a page of history at a time.
    */
-  export async function jumpTo(eventId: string) {
+  export async function jumpTo(eventId: string, restoreOffset?: number) {
     const tl = timeline;
     if (!tl || jumping) return;
     const loaded = () => tl.items.some((item) => item.event_id === eventId);
@@ -322,7 +354,7 @@
     captureAnchor();
     try {
       if (!loaded() && !tl.startReached) {
-        ui.toast('Loading older messages to find it…', 'info', 2500);
+        if (restoreOffset === undefined) ui.toast('Loading older messages to find it…', 'info', 2500);
         try {
           for (let page = 0; page < MAX_JUMP_PAGES && !loaded() && !tl.startReached; page++) {
             await until(() => !tl.loadingOlder, 10_000);
@@ -345,17 +377,19 @@
       const target = content?.querySelector<HTMLElement>(`[data-event-id="${CSS.escape(eventId)}"]`);
       if (!target) {
         const why = loaded() ? 'Clear the search to jump to that message.' : "Couldn't find that message in the room's history.";
-        ui.toast(why, 'info', 3500);
+        if (restoreOffset === undefined) ui.toast(why, 'info', 3500);
         if (scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < BOTTOM_SLACK) stuck = true;
         return;
       }
       stuck = false;
-      target.scrollIntoView({ block: 'center', behavior: 'instant' });
+      if (restoreOffset !== undefined && scroller) scroller.scrollTop += target.getBoundingClientRect().top - scroller.getBoundingClientRect().top - restoreOffset;
+      else target.scrollIntoView({ block: 'center', behavior: 'instant' });
       if (scroller) {
         lastScrollTop = scroller.scrollTop;
         distanceFromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
       }
       captureAnchor();
+      if (restoreOffset !== undefined) return;
       ui.highlightEvent = eventId;
       setTimeout(() => ui.highlightEvent === eventId && (ui.highlightEvent = null), 1800);
     } finally {

@@ -285,6 +285,8 @@ export function createMockBackend(): Backend {
   const profileFiles = new Map<string, string>();
   const timelines = new Map<string, TimelineItem[]>();
   const pagesLoaded = new Map<string, number>();
+  // History a shrink dropped from the window: paginating serves it again, ids and all.
+  const shelf = new Map<string, TimelineItem[]>();
   const params = new URLSearchParams(location.search);
   let loggedIn = params.get('login') === null;
   const bigHistory = Number(params.get('history')) || 0;
@@ -384,6 +386,23 @@ export function createMockBackend(): Backend {
       case 'CloseRoom':
         timelines.delete(command.data.room_id);
         break;
+      case 'ShrinkTimeline': {
+        // Like the worker: the window collapses to the newest page, comes back
+        // as a Reset a beat later, and the usual backfill follows it.
+        const { room_id } = command.data;
+        const current = timelines.get(room_id);
+        if (!current) break;
+        const tail = current.slice(-24).filter((i) => i.content.type !== 'DateDivider');
+        const list = [item('', { type: 'DateDivider', data: 'Today' }, tail[0]?.timestamp_ms ?? Date.now()), ...tail];
+        timelines.set(room_id, list);
+        pagesLoaded.delete(room_id);
+        shelf.set(room_id, [...(shelf.get(room_id) ?? []), ...current.slice(0, -24).filter((i) => i.content.type !== 'DateDivider')].sort((a, b) => a.timestamp_ms - b.timestamp_ms));
+        setTimeout(() => {
+          diffs(room_id, [{ type: 'Reset', data: list }]);
+          setTimeout(() => handle({ type: 'PaginateBackwards', data: { room_id, request_id: 'backfill' } }), 100);
+        }, 300);
+        break;
+      }
       case 'PaginateBackwards': {
         const { room_id, request_id } = command.data;
         const current = timelines.get(room_id) ?? [];
@@ -391,14 +410,15 @@ export function createMockBackend(): Backend {
         const page = pagesLoaded.get(room_id) ?? 0;
         pagesLoaded.set(room_id, page + 1);
         setTimeout(() => {
-          if (page >= 6) {
+          if (page >= 6 && !shelf.get(room_id)?.length) {
             emit({ type: 'TimelineStartReached', data: { room_id } });
           } else {
             // Like matrix-sdk: the first item is always a date divider, stamped
             // with the first event after it. Older messages from that same day
             // get a fresh divider in front and the old one is removed, so the
             // row that used to be first is gone, not pushed down.
-            const older = olderHistory(first?.timestamp_ms ?? Date.now(), page, pageSize);
+            const shelved = shelf.get(room_id);
+            const older = shelved?.length ? shelved.splice(-pageSize) : olderHistory(first?.timestamp_ms ?? Date.now(), page, pageSize);
             const head = current[0];
             const sameDay = head?.content.type === 'DateDivider' && new Date(head.timestamp_ms).toDateString() === new Date(older[0]!.timestamp_ms).toDateString();
             const label = sameDay && head.content.type === 'DateDivider' ? head.content.data : new Date(older[0]!.timestamp_ms).toDateString();
