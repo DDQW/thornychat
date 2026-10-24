@@ -231,7 +231,7 @@
 
   function maybePaginate() {
     const tl = timeline;
-    if (!tl || !scroller || !tl.loaded || tl.loadingOlder || tl.startReached || rows.length === 0) return;
+    if (!tl || !scroller || !tl.loaded || tl.loadingOlder || tl.startReached || rows.length === 0 || jumping) return;
     if (scroller.scrollTop > PAGINATE_AT) return;
     // Following the live edge with a full screen of messages: nothing above
     // matters yet. (A short list that doesn't fill the screen does need more.)
@@ -340,13 +340,12 @@
   /** Clock differences between servers and out-of-order arrival: how far past its time a search goes. */
   const JUMP_SLACK_MS = 10 * 60_000;
 
-  /** A click on a quote: says so up front when the message is known to be gone, else looks for it. */
+  /** Pages a search for a quote the server called unavailable may load: that answer has been wrong for messages a page away. */
+  const GONE_JUMP_PAGES = 3;
+
+  /** A click on a quote. */
   function jumpToQuote(reply: ReplyPreview) {
-    if (reply.gone) {
-      ui.toast('That message was deleted or is no longer available.', 'info', 3500);
-      return;
-    }
-    void jumpTo(reply.event_id, { sentAt: reply.timestamp_ms });
+    void jumpTo(reply.event_id, { sentAt: reply.timestamp_ms, maxPages: reply.gone ? GONE_JUMP_PAGES : MAX_JUMP_PAGES });
   }
 
   /**
@@ -357,7 +356,10 @@
    * `restoreOffset` puts the message at that distance from the top of the view
    * instead, quietly: it is how a reader gets their place back.
    */
-  export async function jumpTo(eventId: string, { restoreOffset, sentAt }: { restoreOffset?: number; sentAt?: number | null } = {}) {
+  export async function jumpTo(
+    eventId: string,
+    { restoreOffset, sentAt, maxPages = MAX_JUMP_PAGES }: { restoreOffset?: number; sentAt?: number | null; maxPages?: number } = {},
+  ) {
     const tl = timeline;
     if (!tl || jumping) return;
     const loaded = () => tl.items.some((item) => item.event_id === eventId);
@@ -374,13 +376,16 @@
     // down there right after the jump.
     jumping = true;
     stuck = false;
+    // What the jump loads counts as a page like any other: once it is done,
+    // only the reader scrolling asks for more.
+    if (scroller) heightAtRequest = scroller.scrollHeight;
     captureAnchor();
     try {
       if (!loaded() && !tl.startReached && !pastItsTime()) {
         if (restoreOffset === undefined) ui.toast('Loading older messages to find it…', 'info', 2500);
         try {
           let page = 0;
-          for (; page < MAX_JUMP_PAGES && !loaded() && !tl.startReached && !pastItsTime(); page++) {
+          for (; page < maxPages && !loaded() && !tl.startReached && !pastItsTime(); page++) {
             await until(() => !tl.loadingOlder, 10_000);
             const before = tl.items.length;
             tl.loadingOlder = true;
@@ -392,7 +397,7 @@
             // The page's diffs can land just after the command reports success.
             await until(() => tl.items.length !== before || loaded(), 1500);
           }
-          tooFar = page === MAX_JUMP_PAGES && !loaded() && !tl.startReached && !pastItsTime();
+          tooFar = page === maxPages && !loaded() && !tl.startReached && !pastItsTime();
         } catch (error) {
           ui.error(`Couldn't load older messages: ${String(error)}`);
         }
@@ -404,7 +409,9 @@
         const why = loaded()
           ? 'Clear the search to jump to that message.'
           : tooFar
-            ? 'That message is too far back to jump to.'
+            ? maxPages === GONE_JUMP_PAGES
+              ? 'That message was deleted, or the server no longer has it.'
+              : 'That message is too far back to jump to.'
             : "That message isn't among the ones this room shows.";
         if (restoreOffset === undefined) ui.toast(why, 'info', 3500);
         if (scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < BOTTOM_SLACK) stuck = true;
