@@ -231,16 +231,16 @@ function syntheticMembers(count: number): RoomMember[] {
   ];
 }
 
-function olderHistory(before: number, page: number): TimelineItem[] {
-  return Array.from({ length: 12 }, (_, i) =>
+function olderHistory(before: number, page: number, size = 12): TimelineItem[] {
+  return Array.from({ length: size }, (_, i) =>
     item(
       i % 3 === 0 ? '@bob:thorny.chat' : '@alice:thorny.chat',
       // A page back, the video linked again in the sample history: loading
       // it while that one plays mustn't start this one.
-      page === 0 && i === 9 ? text('First time: https://www.youtube.com/watch?v=dQw4w9WgXcQ') : text(`Older message #${page * 12 + i + 1}: lorem ipsum dolor sit amet.`),
-      before - (12 - i) * 5 * 60_000 - page * 90 * 60_000,
+      page === 0 && i === 9 && size === 12 ? text('First time: https://www.youtube.com/watch?v=dQw4w9WgXcQ') : text(`Older message #${page * size + i + 1}: lorem ipsum dolor sit amet.`),
+      before - (size - i) * 5 * 60_000 - page * 90 * 60_000,
       // Two pages back: the message a reply in the sample history quotes.
-      page === 1 && i === 6 ? { event_id: '$quoted-older' } : {},
+      page === 1 && i === 6 && size === 12 ? { event_id: '$quoted-older' } : {},
     ),
   );
 }
@@ -292,6 +292,14 @@ export function createMockBackend(): Backend {
   // `?chatter=N`: someone writes in the open room every N seconds, and its
   // summary changes as the SDK's does (a new object, new preview).
   const chatter = Number(params.get('chatter')) || 0;
+  // `?page=N`: messages per back-pagination (the SDK hands over up to 128 at a
+  // time); `?split=K`: the page's diffs arrive in K batches, a frame or more apart.
+  const pageSize = Number(params.get('page')) || 12;
+  const pageSplit = Math.max(Number(params.get('split')) || 1, 1);
+  // `?overlap=K`: like a network page that overlaps loaded history, the SDK
+  // removes the K oldest loaded messages in one batch and inserts them again
+  // after the new page in a later one.
+  const pageOverlap = Number(params.get('overlap')) || 0;
   let chatterRoom: string | null = null;
   const dictionary = new Set<string>();
   const typo = (word: string) => (dictionary.has(word.toLowerCase()) ? undefined : TYPOS[word.toLowerCase()]);
@@ -390,17 +398,29 @@ export function createMockBackend(): Backend {
             // with the first event after it. Older messages from that same day
             // get a fresh divider in front and the old one is removed, so the
             // row that used to be first is gone, not pushed down.
-            const older = olderHistory(first?.timestamp_ms ?? Date.now(), page);
+            const older = olderHistory(first?.timestamp_ms ?? Date.now(), page, pageSize);
             const head = current[0];
             const sameDay = head?.content.type === 'DateDivider' && new Date(head.timestamp_ms).toDateString() === new Date(older[0]!.timestamp_ms).toDateString();
             const label = sameDay && head.content.type === 'DateDivider' ? head.content.data : new Date(older[0]!.timestamp_ms).toDateString();
             const divider = item('', { type: 'DateDivider', data: label }, older[0]!.timestamp_ms);
             const rest = sameDay ? current.slice(1) : current;
             timelines.set(room_id, [divider, ...older, ...rest]);
-            diffs(room_id, [
-              ...(sameDay ? [{ type: 'Remove', data: { index: 0 } } satisfies TimelineDiff] : []),
-              ...[divider, ...older].reverse().map((data): TimelineDiff => ({ type: 'PushFront', data })),
-            ]);
+            const removeHead: TimelineDiff[] = sameDay ? [{ type: 'Remove', data: { index: 0 } }] : [];
+            const pushed: TimelineDiff[] = [divider, ...older].reverse().map((data): TimelineDiff => ({ type: 'PushFront', data }));
+            if (pageOverlap > 0) {
+              const again = rest.slice(0, pageOverlap);
+              diffs(room_id, [...removeHead, ...again.map((): TimelineDiff => ({ type: 'Remove', data: { index: 0 } }))]);
+              setTimeout(() => diffs(room_id, pushed), 60);
+              setTimeout(() => diffs(room_id, again.map((data, i): TimelineDiff => ({ type: 'Insert', data: { index: older.length + 1 + i, item: data } }))), 120);
+            } else {
+              const batch = [...removeHead, ...pushed];
+              const size = Math.ceil(batch.length / pageSplit);
+              for (let part = 0; part < pageSplit; part++) {
+                const slice = batch.slice(part * size, (part + 1) * size);
+                if (part === 0) diffs(room_id, slice);
+                else setTimeout(() => diffs(room_id, slice), part * 60);
+              }
+            }
           }
           emit({ type: 'CommandSucceeded', data: { request_id } });
         }, 350);

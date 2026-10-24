@@ -78,7 +78,7 @@
     else if (top < lastScrollTop - 1) stuck = false;
     lastScrollTop = top;
     captureAnchor();
-    maybePaginate();
+    schedulePaginate();
   }
 
   // --- keeping the reader's place ---
@@ -90,14 +90,19 @@
   // on a message rather than on whatever row comes first matters: on every
   // back-pagination the SDK replaces the date divider at the top with a new
   // one, so the first row is never the same row twice.
-  let anchor: { eventId: string; offset: number } | null = null;
+  // Several rows from the top of the view are remembered, not one: when a
+  // back-pagination overlaps history already loaded, the SDK removes those
+  // events and inserts them again, and the one row everything hangs on can be
+  // gone for a frame. The next one down still pins the place.
+  const ANCHORS = 6;
+  let anchor: { eventId: string; offset: number }[] = [];
 
   function messageRows(): HTMLElement[] {
     return content ? [...content.querySelectorAll<HTMLElement>('[data-event-id]')] : [];
   }
 
   function captureAnchor() {
-    anchor = null;
+    anchor = [];
     if (!scroller || stuck) return;
     const viewTop = scroller.getBoundingClientRect().top;
     const elements = messageRows();
@@ -110,21 +115,25 @@
       if (elements[middle]!.getBoundingClientRect().bottom > viewTop) high = middle;
       else low = middle + 1;
     }
-    const row = elements[low];
-    if (row?.dataset.eventId) anchor = { eventId: row.dataset.eventId, offset: row.getBoundingClientRect().top - viewTop };
+    for (const row of elements.slice(low, low + ANCHORS)) {
+      if (row.dataset.eventId) anchor.push({ eventId: row.dataset.eventId, offset: row.getBoundingClientRect().top - viewTop });
+    }
   }
 
   function keepAnchor() {
-    if (!scroller || !content || !anchor) return;
-    const row = content.querySelector<HTMLElement>(`[data-event-id="${CSS.escape(anchor.eventId)}"]`);
-    if (!row) {
-      captureAnchor();
+    if (!scroller || !content || anchor.length === 0) return;
+    const viewTop = scroller.getBoundingClientRect().top;
+    for (const candidate of anchor) {
+      const row = content.querySelector<HTMLElement>(`[data-event-id="${CSS.escape(candidate.eventId)}"]`);
+      if (!row) continue;
+      const shift = row.getBoundingClientRect().top - viewTop - candidate.offset;
+      if (Math.abs(shift) < 1) return;
+      scroller.scrollTop += shift;
+      lastScrollTop = scroller.scrollTop;
       return;
     }
-    const shift = row.getBoundingClientRect().top - scroller.getBoundingClientRect().top - anchor.offset;
-    if (Math.abs(shift) < 1) return;
-    scroller.scrollTop += shift;
-    lastScrollTop = scroller.scrollTop;
+    // Every remembered row is gone (the room was reset): start over from here.
+    captureAnchor();
   }
 
   // Whenever the content or the viewport changes size — a message arrives, an
@@ -182,6 +191,43 @@
     requestAnimationFrame(() => setTimeout(check));
   }
 
+  /** The list's height when the last page was asked for; see `maybePaginate`. */
+  let heightAtRequest = Infinity;
+  /** When the reader last used the wheel, touch, keys or the scrollbar here. */
+  let lastInput = 0;
+  let paginateTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function noteInput() {
+    lastInput = performance.now();
+  }
+  $effect(() => {
+    const target = scroller;
+    if (!target) return;
+    const events = ['wheel', 'touchmove', 'keydown', 'pointerdown'] as const;
+    for (const name of events) target.addEventListener(name, noteInput, { passive: true });
+    // Dragging the scrollbar is a pointer held down.
+    const drag = (event: PointerEvent) => event.buttons && noteInput();
+    target.addEventListener('pointermove', drag, { passive: true });
+    return () => {
+      for (const name of events) target.removeEventListener(name, noteInput);
+      target.removeEventListener('pointermove', drag);
+    };
+  });
+
+  /**
+   * Checks a moment from now rather than immediately. A page can land as
+   * several batches (events removed, then inserted again further down), and
+   * for a frame or two the view sits at the top of a list that is about to be
+   * long again; reacting to that fetched a second page on top of the first.
+   */
+  function schedulePaginate() {
+    if (paginateTimer) return;
+    paginateTimer = setTimeout(() => {
+      paginateTimer = undefined;
+      afterLayout(maybePaginate);
+    }, 120);
+  }
+
   function maybePaginate() {
     const tl = timeline;
     if (!tl || !scroller || !tl.loaded || tl.loadingOlder || tl.startReached || rows.length === 0) return;
@@ -190,21 +236,29 @@
     // matters yet. (A short list that doesn't fill the screen does need more.)
     const fillsViewport = scroller.scrollHeight > scroller.clientHeight + 100;
     if (stuck && fillsViewport) return;
+    // A page that grew the list by more than the trigger distance, with the
+    // view still inside it, means the reader was not held in place. Asking for
+    // the next page by itself would pull history in page after page (the SDK
+    // hands over up to 128 events at a time); only the reader asks again.
+    if (fillsViewport && scroller.scrollHeight - heightAtRequest >= PAGINATE_AT && performance.now() - lastInput > 400) return;
     tl.loadingOlder = true;
     const before = tl.items.length;
+    heightAtRequest = scroller.scrollHeight;
+    captureAnchor();
     paginateBackwards(roomId)
       .catch((error: unknown) => ui.error(`Couldn't load older messages: ${String(error)}`))
       .finally(() => {
         tl.loadingOlder = false;
         // A short list may still not fill the viewport; ask again, but only if
         // that page actually produced something (otherwise we'd spin).
-        if (tl.items.length > before) afterLayout(maybePaginate);
+        if (tl.items.length > before) schedulePaginate();
       });
   }
   $effect(() => {
     void rows.length;
-    afterLayout(maybePaginate);
+    schedulePaginate();
   });
+  onDestroy(() => clearTimeout(paginateTimer));
 
   // --- read marker ---
   // Marked read only while scrolled to the newest message, whether or not the
