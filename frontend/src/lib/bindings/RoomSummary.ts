@@ -4,4 +4,4 @@ export type RoomSummary = { room_id: string, name: string, topic: string | null,
 /**
  * Marked as a direct message via `m.direct` account data.
  */
-is_dm: boolean, last_message_preview: string | null, };
+is_dm: boolean, };

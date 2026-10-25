@@ -46,7 +46,6 @@ pub fn to_summary(
         is_encrypted: room.encryption_state().is_encrypted(),
         is_space: room.is_space(),
         is_dm,
-        last_message_preview: None,
     }
 }
 

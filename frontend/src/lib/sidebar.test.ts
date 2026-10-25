@@ -11,7 +11,6 @@ const room = (id: string, name: string, extra: Partial<RoomSummary> = {}): RoomS
   is_encrypted: false,
   is_space: false,
   is_dm: false,
-  last_message_preview: null,
   ...extra,
 });
 

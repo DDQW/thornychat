@@ -31,20 +31,14 @@ fn cdn_url(codepoints: &str) -> String {
 pub async fn fetch(cache_dir: &Path, codepoints: &str) -> anyhow::Result<Vec<u8>> {
     anyhow::ensure!(is_valid_codepoints(codepoints), "not a twemoji codepoint sequence");
     let cache_path = cache_dir.join(format!("{codepoints}.svg"));
-
-    if let Ok(bytes) = tokio::fs::read(&cache_path).await {
-        return Ok(bytes);
-    }
-
-    let response = super::http_client().get(cdn_url(codepoints)).send().await?.error_for_status()?;
-    let bytes = response.bytes().await?.to_vec();
-
-    if let Some(parent) = cache_path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    let _ = tokio::fs::write(&cache_path, &bytes).await;
-
-    Ok(bytes)
+    // The same emoji is often asked for twice at once (in a message and in a
+    // reaction under it); the shared cache downloads it once and never lets a
+    // half-written file be read or kept.
+    client_core::media::cached(&cache_path, || async {
+        let response = super::http_client().get(cdn_url(codepoints)).send().await?.error_for_status()?;
+        Ok(response.bytes().await?.to_vec())
+    })
+    .await
 }
 
 #[cfg(test)]

@@ -41,7 +41,7 @@ describe('matchesQuery', () => {
   });
 
   it('never matches dividers, redactions or system lines', () => {
-    for (const content of [{ type: 'DateDivider', data: 'Today' }, { type: 'NewMessagesDivider' }, { type: 'Redacted' }, { type: 'MembershipChange', data: 'alice joined' }] as TimelineItemContent[]) {
+    for (const content of [{ type: 'DateDivider' }, { type: 'NewMessagesDivider' }, { type: 'Redacted' }, { type: 'MembershipChange', data: 'alice joined' }] as TimelineItemContent[]) {
       expect(matchesQuery(item(content), 'today', 'alice'), content.type).toBe(false);
     }
   });

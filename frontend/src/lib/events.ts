@@ -68,9 +68,6 @@ export function handleEvent(event: ClientEvent): void {
     case 'TimelineStartReached':
       timelines.markStartReached(event.data.room_id);
       break;
-    case 'ReceiptsUpdated':
-      // Receipts ride on the timeline items themselves (`read_by`).
-      break;
 
     // --- emoji, media, previews ---
     case 'CustomEmojiPacksUpdated':
@@ -81,11 +78,6 @@ export function handleEvent(event: ClientEvent): void {
       break;
     case 'UrlPreviewFailed':
       previews.ogFailed(event.data.url);
-      break;
-    case 'MediaFetched':
-    case 'MediaFileReady':
-    case 'MediaFetchFailed':
-      // Media goes through the `tcmedia` protocol, not events.
       break;
 
     // --- encryption ---
@@ -147,7 +139,6 @@ export function handleEvent(event: ClientEvent): void {
       break;
 
     // --- correlated results are settled above ---
-    case 'SearchResults':
     case 'UserSearchResults':
     case 'SpaceHierarchyFetched':
     case 'CommandSucceeded':

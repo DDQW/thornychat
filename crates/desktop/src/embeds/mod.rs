@@ -63,22 +63,16 @@ pub async fn fetch_web_image(cache_dir: &std::path::Path, url: &str) -> anyhow::
     anyhow::ensure!(is_allowed_web_image(url), "image host is not on the allow-list");
 
     let cache_path = cache_dir.join(format!("web-{:016x}", fnv1a(url)));
-    if let Ok(bytes) = tokio::fs::read(&cache_path).await {
-        return Ok(bytes);
-    }
-
-    let response = http_client().get(url).send().await?.error_for_status()?;
-    if response.content_length().is_some_and(|len| len as usize > MAX_WEB_IMAGE_BYTES) {
-        anyhow::bail!("image is too large");
-    }
-    let bytes = response.bytes().await?;
-    anyhow::ensure!(bytes.len() <= MAX_WEB_IMAGE_BYTES, "image is too large");
-
-    if let Some(parent) = cache_path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    let _ = tokio::fs::write(&cache_path, &bytes).await;
-    Ok(bytes.to_vec())
+    client_core::media::cached(&cache_path, || async {
+        let response = http_client().get(url).send().await?.error_for_status()?;
+        if response.content_length().is_some_and(|len| len as usize > MAX_WEB_IMAGE_BYTES) {
+            anyhow::bail!("image is too large");
+        }
+        let bytes = response.bytes().await?;
+        anyhow::ensure!(bytes.len() <= MAX_WEB_IMAGE_BYTES, "image is too large");
+        Ok(bytes.to_vec())
+    })
+    .await
 }
 
 /// FNV-1a: a stable, dependency-free hash for cache file names (not security

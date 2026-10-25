@@ -15,7 +15,6 @@ export type { ReplyPreview } from './ReplyPreview';
 export type { RoomMember } from './RoomMember';
 export type { RoomSummary } from './RoomSummary';
 export type { SasState } from './SasState';
-export type { SearchResult } from './SearchResult';
 export type { SendFailure } from './SendFailure';
 export type { SpaceChildSummary } from './SpaceChildSummary';
 export type { SpaceJoinRule } from './SpaceJoinRule';

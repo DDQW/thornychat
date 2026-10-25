@@ -19,7 +19,6 @@ pub mod media;
 mod notifications;
 pub mod push;
 pub mod rooms;
-pub mod search;
 pub mod session;
 pub mod store;
 pub mod sync;

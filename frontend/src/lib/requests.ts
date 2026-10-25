@@ -20,7 +20,7 @@ export class CommandError extends Error {
   }
 }
 
-type ResultType = 'UserSearchResults' | 'SearchResults' | 'SpaceHierarchyFetched';
+type ResultType = 'UserSearchResults' | 'SpaceHierarchyFetched';
 type EventOf<T extends ClientEvent['type']> = Extract<ClientEvent, { type: T }>;
 type ResultData<T extends ResultType> = EventOf<T> extends { data: infer D } ? D : never;
 
@@ -107,7 +107,6 @@ export function settle(event: ClientEvent): void {
       break;
     }
     case 'UserSearchResults':
-    case 'SearchResults':
     case 'SpaceHierarchyFetched': {
       const entry = pending.get(event.data.request_id);
       if (entry && entry.expect === event.type) {

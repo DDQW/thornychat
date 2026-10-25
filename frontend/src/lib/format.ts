@@ -52,6 +52,27 @@ export function formatTime(timestampMs: number): string {
   return new Date(timestampMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+/**
+ * A date divider's label, by the reader's local calendar day (the SDK splits
+ * days in local time too): "Today", "Yesterday", else the weekday and date,
+ * with the year only when it isn't this one.
+ */
+export function formatDay(timestampMs: number, now: number = Date.now()): string {
+  const day = new Date(timestampMs);
+  const today = new Date(now);
+  const midnight = (date: Date) => new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  // Rounded: a day with a DST change is 23 or 25 hours long.
+  const daysAgo = Math.round((midnight(today) - midnight(day)) / 86_400_000);
+  if (daysAgo === 0) return 'Today';
+  if (daysAgo === 1) return 'Yesterday';
+  return day.toLocaleDateString([], {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    ...(day.getFullYear() === today.getFullYear() ? {} : { year: 'numeric' }),
+  });
+}
+
 export function formatDateTime(timestampMs: number): string {
   return new Date(timestampMs).toLocaleString([], {
     weekday: 'short',

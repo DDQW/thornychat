@@ -105,10 +105,6 @@ async fn pump(bridge: Arc<Bridge>, mut events: mpsc::UnboundedReceiver<ClientEve
             ClientEvent::LoggedOut => {
                 *bridge.running.lock().expect("bridge lock poisoned") = None;
             }
-            // The page streams media through the `tcmedia` protocol; the bytes
-            // variant exists for the old in-process UI and would serialize as
-            // a giant JSON array.
-            ClientEvent::MediaFetched { .. } => continue,
             ClientEvent::Notification(notification) => notify(&app, notification),
             _ => {}
         }

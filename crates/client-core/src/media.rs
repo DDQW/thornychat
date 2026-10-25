@@ -28,6 +28,9 @@ pub async fn fetch(client: &Client, cache_dir: &Path, mxc_url: &str) -> anyhow::
 }
 
 /// The cache entry at `cache_path`, downloaded with `download` on a miss.
+/// Every disk cache that serves the page goes through here (Matrix media, and
+/// in the shell Twemoji and card images), so none of them can serve or keep
+/// a half-written file.
 ///
 /// One download per entry at a time: a caller that misses while another is
 /// already downloading the same entry waits for it, then reads the file. The
@@ -40,7 +43,7 @@ pub async fn fetch(client: &Client, cache_dir: &Path, mxc_url: &str) -> anyhow::
 /// emoji never showed this (loading a pack fetches them all up front, so the
 /// page only hits the cache); someone's personal emoji did, the first time it
 /// came on screen.
-async fn cached<F, Fut>(cache_path: &Path, download: F) -> anyhow::Result<Vec<u8>>
+pub async fn cached<F, Fut>(cache_path: &Path, download: F) -> anyhow::Result<Vec<u8>>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = anyhow::Result<Vec<u8>>>,

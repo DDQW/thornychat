@@ -15,7 +15,7 @@ use matrix_sdk::ruma::events::room::message::MessageType;
 use matrix_sdk::ruma::events::room::MediaSource;
 use matrix_sdk::ruma::events::sticker::{StickerEventContent, StickerMediaSource};
 use matrix_sdk::ruma::events::StateEventContentChange;
-use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, OwnedEventId, RoomId, UserId};
+use matrix_sdk::ruma::{OwnedEventId, RoomId, UserId};
 use matrix_sdk::{Client, Room};
 use matrix_sdk_ui::timeline::{
     MembershipChange, ReactionsByKeyBySender, RoomExt, RoomMembershipChange, Timeline,
@@ -467,8 +467,10 @@ fn convert_item(item: &SdkTimelineItem, own_user_id: Option<&UserId>) -> Option<
                 }),
             })
         }
+        // Labelled by the page: the SDK splits days in local time, so the
+        // label has to be worded in local time too.
         TimelineItemKind::Virtual(VirtualTimelineItem::DateDivider(ts)) => {
-            Some(virtual_item(TimelineItemContent::DateDivider(format_date(*ts)), u64::from(ts.get())))
+            Some(virtual_item(TimelineItemContent::DateDivider, u64::from(ts.get())))
         }
         TimelineItemKind::Virtual(VirtualTimelineItem::ReadMarker) => {
             Some(virtual_item(TimelineItemContent::NewMessagesDivider, 0))
@@ -601,7 +603,7 @@ fn summarize_content(content: &SdkTimelineItemContent, sender: &str) -> String {
         TimelineItemContent::Video { filename, .. } => format!("[video: {filename}]"),
         TimelineItemContent::Redacted => "(message removed)".to_string(),
         TimelineItemContent::MembershipChange(desc) => desc,
-        TimelineItemContent::DateDivider(_) | TimelineItemContent::NewMessagesDivider => {
+        TimelineItemContent::DateDivider | TimelineItemContent::NewMessagesDivider => {
             String::new()
         }
     }
@@ -841,30 +843,6 @@ fn convert_shield(shield: TimelineEventShieldState) -> Option<TrustShield> {
         TimelineEventShieldState::Grey { code } => Some(TrustShield::Grey(format!("{code:?}"))),
         TimelineEventShieldState::None => None,
     }
-}
-
-/// Formats a millisecond Unix timestamp as `YYYY-MM-DD` without pulling in a
-/// date/time crate, using Howard Hinnant's public-domain `civil_from_days`
-/// algorithm.
-fn format_date(ts: MilliSecondsSinceUnixEpoch) -> String {
-    let millis = u64::from(ts.get()) as i64;
-    let days = millis.div_euclid(86_400_000);
-    let (y, m, d) = civil_from_days(days);
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
 }
 
 #[cfg(test)]

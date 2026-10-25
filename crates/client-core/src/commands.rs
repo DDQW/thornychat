@@ -2,9 +2,9 @@
 //! response carries a `request_id` so the UI can match `ClientEvent::CommandFailed`
 //! / `CommandSucceeded` back to the action that triggered it.
 //!
-//! Only login/session/room-open variants are consumed by the worker today
-//! (Phase 0). The rest of the shape is sketched now so later phases extend
-//! this enum instead of redesigning the channel contract.
+//! Every variant is handled: the worker's `handle_command` matches them all
+//! without a catch-all, so a new command doesn't compile until something
+//! answers it.
 //!
 //! This enum is the *engine's* view of a command: every variant already
 //! takes resolved, structured data (room ids, user ids) — nothing here parses
@@ -12,9 +12,8 @@
 //! `/kick`, `/topic`, …) that maps onto `KickUser`/`BanUser`/`UnbanUser`/
 //! `IgnoreUser`/`UnignoreUser`/
 //! `SetRoomTopic`/`SetDisplayName`/`InviteUser`/`JoinRoom`/`LeaveRoom`/
-//! `SetRoomName`/`SendMessage`'s `emote`/`markdown` lives one layer up, in
-//! `ui::slash` — see `ui::slash::COMMANDS` for the canonical, single list of
-//! every recognised command.
+//! `SetRoomName`/`SendMessage`'s `emote`/`markdown` lives in the page, in
+//! `frontend/src/lib/slash.ts`.
 
 use uuid::Uuid;
 
@@ -40,7 +39,6 @@ pub enum ClientCommand {
     /// queued behind this one see the new timeline handles, so there is no
     /// window where sends fail with "room is not open".
     ShrinkTimeline { room_id: String },
-    LoadOlderTimelineEvents { room_id: String, request_id: RequestId },
 
     // --- Phase 2: sending ---
     SendMessage {
@@ -113,12 +111,6 @@ pub enum ClientCommand {
     /// the unfederated private one (`m.read.private`) instead, so the read
     /// position still advances server-side without telling anyone else.
     MarkRoomRead { room_id: String, public_receipt: bool },
-    FetchMedia { mxc_url: String, request_id: RequestId },
-    /// Like `FetchMedia`, but answers with the media cache's *path*
-    /// (`MediaFileReady`) instead of the bytes — what the inline video player
-    /// needs, since it streams the file off disk rather than holding it in
-    /// memory.
-    FetchMediaFile { mxc_url: String, request_id: RequestId },
 
     /// Re-resolve every MSC2545 custom emoji pack this account can use, with
     /// `room_id` as the "currently open room" for the room/space-scoped
@@ -196,7 +188,7 @@ pub enum ClientCommand {
     /// `UrlPreviewFetched`/`UrlPreviewFailed` carrying the URL back.
     FetchUrlPreview { url: String },
 
-    // --- Phase 4: notification settings, search ---
+    // --- Phase 4: notification settings, user search ---
     SetRoomNotificationMode { room_id: String, mode: crate::events::NotificationMode, request_id: RequestId },
     /// Remove the per-room override entirely, restoring the account default.
     ClearRoomNotificationMode { room_id: String, request_id: RequestId },
@@ -207,7 +199,6 @@ pub enum ClientCommand {
         mode: crate::events::NotificationMode,
         request_id: RequestId,
     },
-    Search { query: String, request_id: RequestId },
     /// Search the homeserver user directory by name/id (for starting a DM
     /// with someone you don't share a room with yet). Answered by
     /// `ClientEvent::UserSearchResults`, or `CommandFailed`.

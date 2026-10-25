@@ -5,7 +5,7 @@
 import type { TimelineItem } from '../bindings';
 
 export type Row =
-  | { kind: 'date'; key: string; label: string }
+  | { kind: 'date'; key: string; timestampMs: number }
   | { kind: 'unread'; key: string }
   | { kind: 'system'; key: string; item: TimelineItem; text: string }
   | { kind: 'message'; key: string; item: TimelineItem; continuation: boolean };
@@ -36,7 +36,8 @@ export function buildRows(items: readonly TimelineItem[], options: RowOptions): 
     const content = item.content;
     switch (content.type) {
       case 'DateDivider':
-        rows.push({ kind: 'date', key: uniqueKey(`date:${item.timestamp_ms}:${content.data}`), label: content.data });
+        // Worded when drawn (`formatDay`): "Today" stops being true at midnight.
+        rows.push({ kind: 'date', key: uniqueKey(`date:${item.timestamp_ms}`), timestampMs: item.timestamp_ms });
         previous = null;
         return;
       case 'NewMessagesDivider':
@@ -86,7 +87,7 @@ export function reuseRows(next: Row[], previous: readonly Row[]): Row[] {
 function sameRow(a: Row, b: Row): boolean {
   switch (a.kind) {
     case 'date':
-      return b.kind === 'date' && a.label === b.label;
+      return b.kind === 'date' && a.timestampMs === b.timestampMs;
     case 'unread':
       return b.kind === 'unread';
     case 'system':

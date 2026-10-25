@@ -63,7 +63,7 @@ describe('reuseRows', () => {
   });
 
   it('keeps dividers that did not move', () => {
-    const divider = item('d', '', { type: 'DateDivider', data: 'Today' }, 5);
+    const divider = item('d', '', { type: 'DateDivider' }, 5);
     const before = buildRows([divider, a], options);
     expect(reuseRows(buildRows([divider, a, b], options), before)[0]).toBe(before[0]);
   });
@@ -96,7 +96,7 @@ describe('buildRows grouping', () => {
   });
 
   it('a date divider ends a group', () => {
-    const divider = item(null, '', { type: 'DateDivider', data: 'Monday' }, 500);
+    const divider = item(null, '', { type: 'DateDivider' }, 500);
     const rows = buildRows([text('a', '@x:s', 0), divider, text('b', '@x:s', 1000)], options);
     expect(kinds(rows)).toEqual(['message', 'date', 'message']);
     expect(continuations(rows)).toEqual([false, false]);

@@ -65,12 +65,11 @@ pub enum ClientEvent {
     /// `PushFront`/`Insert` diffs when the user paginates up.
     TimelineDiffs { room_id: String, diffs: Vec<TimelineDiff> },
     TypingUpdated { room_id: String, user_ids: Vec<String> },
-    ReceiptsUpdated { room_id: String },
     /// Back-pagination hit the very first event of the room — no more
     /// history to load.
     TimelineStartReached { room_id: String },
 
-    // --- Phase 4: custom emoji, media ---
+    // --- Phase 4: custom emoji, link previews ---
     /// Every custom emoji/sticker pack this account can currently use: the
     /// personal pack (`im.ponies.user_emotes`), any packs explicitly enabled
     /// via `im.ponies.emote_rooms`, all of the currently-open room's own packs
@@ -78,14 +77,6 @@ pub enum ClientEvent {
     /// room's joined parent space(s), walked up the space chain (MSC2545's
     /// canonical-space inheritance). Refetched whenever a room is opened.
     CustomEmojiPacksUpdated(Vec<EmojiPack>),
-    MediaFetched { request_id: RequestId, bytes: Vec<u8> },
-    /// A `FetchMediaFile` finished: the media is on disk at `path` (its
-    /// entry in the persistent media cache). Videos take this route rather
-    /// than `MediaFetched` — the inline player streams the file from disk
-    /// through the webview's custom protocol, so shipping tens of megabytes
-    /// of bytes through the event channel would be pure waste.
-    MediaFileReady { request_id: RequestId, path: std::path::PathBuf },
-    MediaFetchFailed { request_id: RequestId, reason: String },
     /// OpenGraph data for a URL, resolved via the homeserver's
     /// `preview_url` proxy (the URL is never fetched directly from this
     /// machine).
@@ -119,7 +110,7 @@ pub enum ClientEvent {
     KeyBackupRestored,
     KeyBackupFailed { reason: String },
 
-    // --- Phase 4: read receipts, notification settings, search ---
+    // --- Phase 4: notifications, ignore list, user search ---
     Notification(NotificationEvent),
     RoomNotificationModeChanged { room_id: String, mode: NotificationMode },
     /// The user's per-room override was removed (back to the account
@@ -142,7 +133,6 @@ pub enum ClientEvent {
     /// *showing* the state (menu label, unignore) — the UI never has to
     /// filter the timeline with it.
     IgnoredUsersUpdated(Vec<String>),
-    SearchResults { request_id: RequestId, results: Vec<SearchResult> },
     /// Results of a user-directory search (see `ClientCommand::SearchUsers`).
     /// `limited` is the server's flag that it truncated the result set — the
     /// UI can hint that a more specific query would help.
@@ -210,7 +200,6 @@ pub struct RoomSummary {
     pub is_space: bool,
     /// Marked as a direct message via `m.direct` account data.
     pub is_dm: bool,
-    pub last_message_preview: Option<String>,
 }
 
 /// One room (or subspace) listed under a space by the space-hierarchy API.
@@ -531,7 +520,10 @@ pub enum TimelineItemContent {
     /// as a compact system line and hide it wholesale via the timeline
     /// setting, without touching real chat messages.
     MembershipChange(String),
-    DateDivider(String),
+    /// The start of a day. The SDK splits days in local time; the day is the
+    /// item's `timestamp_ms`, and the page words the label ("Today", a date)
+    /// in the reader's own locale and time zone.
+    DateDivider,
     /// Everything below this point is unread (the SDK's read-marker
     /// position, i.e. the `m.fully_read` marker).
     NewMessagesDivider,
@@ -573,15 +565,6 @@ pub struct NotificationEvent {
     pub sender: String,
     pub title: String,
     pub body: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-pub struct SearchResult {
-    pub room_id: String,
-    pub event_id: String,
-    pub sender: String,
-    pub snippet: String,
 }
 
 /// One hit from a user-directory search — enough to render a pick-a-person

@@ -73,7 +73,6 @@ const room = (id: string, name: string, extra: Partial<RoomSummary> = {}): RoomS
   is_encrypted: false,
   is_space: false,
   is_dm: false,
-  last_message_preview: null,
   ...extra,
 });
 
@@ -117,12 +116,12 @@ const text = (data: string): TimelineItemContent => ({ type: 'Text', data });
 function sampleHistory(now: number): TimelineItem[] {
   const t = (hoursAgo: number, minutes = 0) => now - hoursAgo * HOUR + minutes * 60_000;
   const items: TimelineItem[] = [
-    item('', { type: 'DateDivider', data: 'Yesterday' }, t(30)),
+    item('', { type: 'DateDivider' }, t(30)),
     item('@alice:thorny.chat', text('Morning! The tauri migration branch is green.'), t(29)),
     item('@alice:thorny.chat', text('Still need to port the composer though.'), t(29, 1)),
     item('@bob:thorny.chat', text('Nice. Did the timeline survive the move?'), t(28)),
     item('', { type: 'MembershipChange', data: 'Carol joined the room' }, t(27)),
-    item('', { type: 'DateDivider', data: 'Today' }, t(6)),
+    item('', { type: 'DateDivider' }, t(6)),
     item('@carol:thorny.chat', text('Hi all, glad to be here.'), t(5)),
     item('@irc_dave:thorny.chat', { type: 'Emote', data: 'waves from the IRC bridge' }, t(5, 2)),
     item('@bob:thorny.chat', text('Welcome Carol! Check the **pinned** message for the rules.'), t(4), {
@@ -227,7 +226,7 @@ function syntheticHistory(count: number, now: number): TimelineItem[] {
         return item(sender, text(lines[i % lines.length]!), at, i % 10 === 5 ? { in_reply_to: { event_id: '$x', sender: 'Alice', snippet: 'an earlier message', image_url: null, emoticons: [], gone: false, timestamp_ms: null } } : {});
     }
   });
-  return [item('', { type: 'DateDivider', data: 'Today' }, messages[0]?.timestamp_ms ?? now), ...messages];
+  return [item('', { type: 'DateDivider' }, messages[0]?.timestamp_ms ?? now), ...messages];
 }
 
 /** A roster of `count` people, for `?members=N`. */
@@ -298,8 +297,8 @@ export function createMockBackend(): Backend {
   let loggedIn = params.get('login') === null;
   const bigHistory = Number(params.get('history')) || 0;
   const bigRoster = Number(params.get('members')) || 0;
-  // `?chatter=N`: someone writes in the open room every N seconds, and its
-  // summary changes as the SDK's does (a new object, new preview).
+  // `?chatter=N`: someone writes in the open room every N seconds, and the
+  // room list arrives again as new objects, as the worker's deserialized lists do.
   const chatter = Number(params.get('chatter')) || 0;
   // `?page=N`: messages per back-pagination (the SDK hands over up to 128 at a
   // time); `?split=K`: the page's diffs arrive in K batches, a frame or more apart.
@@ -354,8 +353,6 @@ export function createMockBackend(): Backend {
     const said = item('@carol:thorny.chat', text(line), Date.now());
     timelines.set(id, [...(timelines.get(id) ?? []), said]);
     diffs(id, [{ type: 'PushBack', data: said }]);
-    const index = ROOMS.findIndex((r) => r.room_id === id);
-    if (index >= 0) ROOMS[index] = { ...ROOMS[index]!, last_message_preview: `Carol: ${line}` };
     emit({ type: 'RoomListUpdated', data: freshRooms() });
   }
 
@@ -400,7 +397,7 @@ export function createMockBackend(): Backend {
         const current = timelines.get(room_id);
         if (!current) break;
         const tail = current.slice(-24).filter((i) => i.content.type !== 'DateDivider');
-        const list = [item('', { type: 'DateDivider', data: 'Today' }, tail[0]?.timestamp_ms ?? Date.now()), ...tail];
+        const list = [item('', { type: 'DateDivider' }, tail[0]?.timestamp_ms ?? Date.now()), ...tail];
         timelines.set(room_id, list);
         pagesLoaded.delete(room_id);
         shelf.set(room_id, [...(shelf.get(room_id) ?? []), ...current.slice(0, -24).filter((i) => i.content.type !== 'DateDivider')].sort((a, b) => a.timestamp_ms - b.timestamp_ms));
@@ -428,8 +425,7 @@ export function createMockBackend(): Backend {
             const older = shelved?.length ? shelved.splice(-pageSize) : olderHistory(first?.timestamp_ms ?? Date.now(), page, pageSize);
             const head = current[0];
             const sameDay = head?.content.type === 'DateDivider' && new Date(head.timestamp_ms).toDateString() === new Date(older[0]!.timestamp_ms).toDateString();
-            const label = sameDay && head.content.type === 'DateDivider' ? head.content.data : new Date(older[0]!.timestamp_ms).toDateString();
-            const divider = item('', { type: 'DateDivider', data: label }, older[0]!.timestamp_ms);
+            const divider = item('', { type: 'DateDivider' }, older[0]!.timestamp_ms);
             const rest = sameDay ? current.slice(1) : current;
             timelines.set(room_id, [divider, ...older, ...rest]);
             const removeHead: TimelineDiff[] = sameDay ? [{ type: 'Remove', data: { index: 0 } }] : [];

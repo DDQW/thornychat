@@ -12,7 +12,7 @@
   import { ui } from '../stores/ui.svelte';
   import Icon from './Icon.svelte';
   import MessageRow from './MessageRow.svelte';
-  import { formatTime } from '../format';
+  import { formatDay, formatTime } from '../format';
 
   interface Props {
     roomId: string;
@@ -458,7 +458,7 @@
 
         {#each rows as row (row.key)}
           {#if row.kind === 'date'}
-            <div class="divider"><span>{row.label}</span></div>
+            <div class="divider"><span>{formatDay(row.timestampMs)}</span></div>
           {:else if row.kind === 'unread'}
             <div class="divider unread"><span>New messages</span></div>
           {:else if row.kind === 'system'}

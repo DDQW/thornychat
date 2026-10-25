@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatBytes, friendlyUserId, hashString, initialsOf, nameHue, plural, truncate } from './format';
+import { formatBytes, formatDay, friendlyUserId, hashString, initialsOf, nameHue, plural, truncate } from './format';
 
 describe('friendlyUserId', () => {
   it('strips the @ and the server', () => {
@@ -71,5 +71,27 @@ describe('small formatters', () => {
     expect(plural(1, 'file')).toBe('1 file');
     expect(plural(3, 'file')).toBe('3 files');
     expect(plural(2, 'person', 'people')).toBe('2 people');
+  });
+});
+
+describe('formatDay', () => {
+  // Local wall-clock times, so these hold in any time zone.
+  const at = (y: number, m: number, d: number, h = 12, min = 0) => new Date(y, m - 1, d, h, min).getTime();
+  const now = at(2026, 10, 25, 12);
+
+  it('names today and yesterday by the local calendar day', () => {
+    expect(formatDay(at(2026, 10, 25, 0, 30), now)).toBe('Today');
+    expect(formatDay(at(2026, 10, 24, 23, 59), now)).toBe('Yesterday');
+    expect(formatDay(at(2026, 10, 24, 0, 1), now)).toBe('Yesterday');
+  });
+
+  it('dates anything older, with the year only when it differs', () => {
+    expect(formatDay(at(2026, 10, 23), now)).not.toMatch(/Today|Yesterday|2026/);
+    expect(formatDay(at(2025, 12, 31), now)).toMatch(/2025/);
+  });
+
+  it('survives a day with a clock change in it', () => {
+    // 2026-10-25 is when Central Europe falls back an hour.
+    expect(formatDay(at(2026, 10, 24, 1), at(2026, 10, 25, 23))).toBe('Yesterday');
   });
 });
