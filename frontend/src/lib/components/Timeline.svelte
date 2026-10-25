@@ -78,6 +78,7 @@
     if (distanceFromBottom < BOTTOM_SLACK) stuck ||= !jumping;
     else if (top < lastScrollTop - 1) stuck = false;
     lastScrollTop = top;
+    lastScrolled = performance.now();
     captureAnchor();
     schedulePaginate();
   }
@@ -196,6 +197,8 @@
   let heightAtRequest = Infinity;
   /** When the reader last used the wheel, touch, keys or the scrollbar here. */
   let lastInput = 0;
+  /** Any scroll, the reader's or ours; only the shrink's idle check looks at it. */
+  let lastScrolled = 0;
   let paginateTimer: ReturnType<typeof setTimeout> | undefined;
 
   function noteInput() {
@@ -281,13 +284,12 @@
 
   // --- live growth cap ---
   // Past the cap, a timeline quietly following the live edge is reopened so it
-  // collapses to the newest page. At the bottom the swap is invisible (the tail
-  // is identical before and after); under a scrolled-up reader it would yank
-  // the view, so it waits. The worker takes a moment over the swap, so it also
-  // waits for the reader to have been still at the bottom for a while: someone
-  // who comes straight back down and up again would otherwise be scrolling
-  // when the list is replaced under them.
-  const SHRINK_AFTER_IDLE_MS = 2500;
+  // collapses to the newest page. The swap replaces the whole list a moment
+  // after it is asked for, and anything that has the reader moving at that
+  // moment gets their view yanked. So it only happens when nobody can be
+  // reading: the window is in the background, or has been left alone a while.
+  const SHRINK_AFTER_IDLE_MS = 90_000;
+  const SHRINK_RECHECK_MS = 5_000;
   let shrinkTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
     const tl = timeline;
@@ -296,15 +298,15 @@
     if (tl.items.length <= MAX_LIVE_ITEMS) return;
     const attempt = () => {
       if (!stuck || tl.shrinkPending || tl.loadingOlder || ui.lightbox) return;
-      const quietFor = performance.now() - lastInput;
-      if (quietFor < SHRINK_AFTER_IDLE_MS) {
-        shrinkTimer = setTimeout(attempt, SHRINK_AFTER_IDLE_MS - quietFor);
+      const away = document.hidden || !document.hasFocus();
+      if (!away && performance.now() - Math.max(lastInput, lastScrolled) < SHRINK_AFTER_IDLE_MS) {
+        shrinkTimer = setTimeout(attempt, SHRINK_RECHECK_MS);
         return;
       }
       tl.shrinkPending = true;
       shrinkTimeline(roomId);
     };
-    shrinkTimer = setTimeout(attempt, SHRINK_AFTER_IDLE_MS);
+    shrinkTimer = setTimeout(attempt, SHRINK_RECHECK_MS);
     return () => clearTimeout(shrinkTimer);
   });
   onDestroy(() => clearTimeout(shrinkTimer));
@@ -474,7 +476,7 @@
   </div>
 
   {#if !stuck && distanceFromBottom > 300}
-    <button class="jump btn" onclick={() => { scrollToBottom(true); stuck = true; }}>
+    <button class="jump btn" onclick={() => { noteInput(); scrollToBottom(true); stuck = true; }}>
       <Icon name="arrow-down" size={15} /> Jump to latest
     </button>
   {/if}

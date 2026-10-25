@@ -247,7 +247,7 @@ function olderHistory(before: number, page: number, size = 12): TimelineItem[] {
       page === 0 && i === 9 && size === 12 ? text('First time: https://www.youtube.com/watch?v=dQw4w9WgXcQ') : text(`Older message #${page * size + i + 1}: lorem ipsum dolor sit amet.`),
       before - (size - i) * 5 * 60_000 - page * 90 * 60_000,
       // Two pages back: the message a reply in the sample history quotes.
-      page === 1 && i === 6 && size === 12 ? { event_id: '$quoted-older' } : {},
+      page === 1 && i === 6 ? { event_id: '$quoted-older' } : {},
     ),
   );
 }
