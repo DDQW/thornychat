@@ -75,12 +75,29 @@
     distanceFromBottom = scroller.scrollHeight - top - scroller.clientHeight;
     // A quote jump loading history holds the view where it is, which can be
     // the bottom; that mustn't re-stick it and snap back down after the jump.
-    if (distanceFromBottom < BOTTOM_SLACK) stuck ||= !jumping;
+    // Nor may a list that shrank for a moment, its rows about to come back.
+    if (distanceFromBottom < BOTTOM_SLACK) stuck ||= !jumping && anchorMissingSince === null;
     else if (top < lastScrollTop - 1) stuck = false;
     lastScrollTop = top;
     lastScrolled = performance.now();
-    captureAnchor();
+    // Whatever landed since the last frame is put right before the place is
+    // taken again; see `keepAnchor`.
+    keepAnchor();
+    // A list that never got its rows back (cleared and refilled, not reset):
+    // once the reader scrolls on, where they are now is the place.
+    if (anchorMissingSince !== null && performance.now() - anchorMissingSince > 1000 && performance.now() - lastInput < 250) captureAnchor();
+    distanceFromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
     schedulePaginate();
+  }
+
+  // Scrolling up lets go of the bottom at once, not at the scroll event that
+  // follows: a message or image landing in between would otherwise snap the
+  // view back down under the wheel.
+  function onwheel(event: WheelEvent) {
+    if (event.deltaY < 0 && !event.ctrlKey && scroller && scroller.scrollTop > 0) stuck = false;
+  }
+  function onkeydown(event: KeyboardEvent) {
+    if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) && scroller && scroller.scrollTop > 0) stuck = false;
   }
 
   // --- keeping the reader's place ---
@@ -92,12 +109,25 @@
   // on a message rather than on whatever row comes first matters: on every
   // back-pagination the SDK replaces the date divider at the top with a new
   // one, so the first row is never the same row twice.
-  // Several rows from the top of the view are remembered, not one: when a
-  // back-pagination overlaps history already loaded, the SDK removes those
-  // events and inserts them again, and the one row everything hangs on can be
-  // gone for a frame. The next one down still pins the place.
-  const ANCHORS = 6;
-  let anchor: { eventId: string; offset: number }[] = [];
+  // The rows in view are remembered, not one: when a back-pagination overlaps
+  // history already loaded, the SDK removes those events and inserts them
+  // again in a later batch, and the top rows — the oldest loaded, right where
+  // someone paging up is — can be gone for a frame. One further down still
+  // pins the place.
+  //
+  // Each row is remembered by where it sits in the list, not in the view.
+  // The reader scrolling moves rows in the view but never in the list; only
+  // something above them changing size does. So the correction is the same
+  // wherever it runs. Measured in the view instead, a scroll event in the
+  // same frame as a page of history landing (the reader is scrolling up when
+  // pages land) took the place again from the already-shifted rows, and the
+  // correction that followed found nothing to correct: the view stayed on
+  // whatever older messages had just been pushed into it.
+  const ANCHORS = 20;
+  /** `inList`: the row's distance from the top of the list; `inView`: from the top of the view. */
+  let anchor: { eventId: string; inList: number; inView: number }[] = [];
+  /** Since when none of the remembered rows has been in the list, or null. */
+  let anchorMissingSince: number | null = null;
 
   function messageRows(): HTMLElement[] {
     return content ? [...content.querySelectorAll<HTMLElement>('[data-event-id]')] : [];
@@ -105,8 +135,10 @@
 
   function captureAnchor() {
     anchor = [];
-    if (!scroller || stuck) return;
-    const viewTop = scroller.getBoundingClientRect().top;
+    anchorMissingSince = null;
+    if (!scroller || !content || stuck) return;
+    const view = scroller.getBoundingClientRect();
+    const listTop = content.getBoundingClientRect().top;
     const elements = messageRows();
     // Rows are in document order, so the first one reaching into the view is
     // found by bisection.
@@ -114,28 +146,43 @@
     let high = elements.length;
     while (low < high) {
       const middle = (low + high) >> 1;
-      if (elements[middle]!.getBoundingClientRect().bottom > viewTop) high = middle;
+      if (elements[middle]!.getBoundingClientRect().bottom > view.top) high = middle;
       else low = middle + 1;
     }
-    for (const row of elements.slice(low, low + ANCHORS)) {
-      if (row.dataset.eventId) anchor.push({ eventId: row.dataset.eventId, offset: row.getBoundingClientRect().top - viewTop });
+    // The rows from the top of the view down, then every tenth row further on:
+    // an overlap removes the oldest loaded events, and someone at the top of
+    // the list can have every row in view among them.
+    const picked = [...elements.slice(low, low + ANCHORS)];
+    for (let index = low + ANCHORS; index < Math.min(elements.length, low + ANCHORS * 10); index += 10) picked.push(elements[index]!);
+    for (const row of picked) {
+      const top = row.getBoundingClientRect().top;
+      if (row.dataset.eventId) anchor.push({ eventId: row.dataset.eventId, inList: top - listTop, inView: top - view.top });
     }
   }
 
+  /**
+   * Moves scrollTop by however far the remembered rows moved within the list
+   * (something above them grew or shrank), then remembers the rows now in view.
+   * When none of them is in the list, they are kept rather than replaced: they
+   * are usually about to be inserted again.
+   */
   function keepAnchor() {
     if (!scroller || !content || anchor.length === 0) return;
-    const viewTop = scroller.getBoundingClientRect().top;
+    const listTop = content.getBoundingClientRect().top;
     for (const candidate of anchor) {
       const row = content.querySelector<HTMLElement>(`[data-event-id="${CSS.escape(candidate.eventId)}"]`);
       if (!row) continue;
-      const shift = row.getBoundingClientRect().top - viewTop - candidate.offset;
-      if (Math.abs(shift) < 1) return;
-      scroller.scrollTop += shift;
+      const inList = row.getBoundingClientRect().top - listTop;
+      // Back from being gone: while the list was shorter the view may have
+      // been clamped, so put the row back where it was in the view, rather
+      // than moving by a difference.
+      if (anchorMissingSince !== null) scroller.scrollTop = inList - candidate.inView;
+      else if (Math.abs(inList - candidate.inList) >= 1) scroller.scrollTop += inList - candidate.inList;
       lastScrollTop = scroller.scrollTop;
+      captureAnchor();
       return;
     }
-    // Every remembered row is gone (the room was reset): start over from here.
-    captureAnchor();
+    anchorMissingSince ??= performance.now();
   }
 
   // Whenever the content or the viewport changes size — a message arrives, an
@@ -212,9 +259,13 @@
     // Dragging the scrollbar is a pointer held down.
     const drag = (event: PointerEvent) => event.buttons && noteInput();
     target.addEventListener('pointermove', drag, { passive: true });
+    target.addEventListener('wheel', onwheel, { passive: true });
+    target.addEventListener('keydown', onkeydown);
     return () => {
       for (const name of events) target.removeEventListener(name, noteInput);
       target.removeEventListener('pointermove', drag);
+      target.removeEventListener('wheel', onwheel);
+      target.removeEventListener('keydown', onkeydown);
     };
   });
 
@@ -323,7 +374,7 @@
     untrack(() => {
       if (stuck || jumping || anchor.length === 0) return;
       const present = anchor.some((place) => content?.querySelector(`[data-event-id="${CSS.escape(place.eventId)}"]`));
-      if (!present) void jumpTo(anchor[0]!.eventId, { restoreOffset: anchor[0]!.offset });
+      if (!present) void jumpTo(anchor[0]!.eventId, { restoreOffset: anchor[0]!.inView });
     });
   });
 
