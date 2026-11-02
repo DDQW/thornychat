@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseHex, themeVariables, withAlpha } from './theme';
+import { contrastRatio, parseHex, themeVariables, withAlpha } from './theme';
 import type { ThemeConfig } from './types';
 
 const dark: ThemeConfig = {
@@ -41,8 +41,16 @@ describe('theme variables', () => {
   });
 
   it('brightens sender names on dark themes and darkens them on light ones', () => {
-    expect(themeVariables(dark)['--name-light']).toBe('72%');
-    expect(themeVariables({ ...dark, dark: false })['--name-light']).toBe('34%');
+    expect(themeVariables(dark)['--name-l']).toBe('80%');
+    expect(themeVariables({ ...dark, dark: false })['--name-l']).toBe('44%');
+  });
+
+  it('measures contrast the way WCAG does', () => {
+    expect(contrastRatio('#000000', '#FFFFFF')).toBeCloseTo(21, 5);
+    expect(contrastRatio('#777777', '#FFFFFF')).toBeCloseTo(4.48, 2);
+    expect(contrastRatio('#A3A3A3', '#333333')).toBeGreaterThan(4.5);
+    expect(contrastRatio('#999999', '#333333')).toBeLessThan(4.5);
+    expect(contrastRatio('nope', '#FFFFFF')).toBeNull();
   });
 
   it('quotes a custom font family and strips quote characters from it', () => {

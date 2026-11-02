@@ -3,6 +3,7 @@
   import { backend } from '../api';
   import type { ReactionGroup } from '../bindings';
   import { isUnicodeEmoji } from '../emoji';
+  import { plural } from '../format';
   import { nameOf } from '../people';
   import { emoji } from '../stores/emoji.svelte';
   import { ui } from '../stores/ui.svelte';
@@ -47,7 +48,14 @@
   <div class="reactions">
     {#each reactions as group (group.key)}
       {@const look = visual(group.key)}
-      <button class="pill" class:mine={group.reacted_by_me} title={look.kind === 'image' ? `${look.name}: ${who(group)}` : who(group)} onclick={() => toggle(group.key)} aria-pressed={group.reacted_by_me}>
+      <button
+        class="pill"
+        class:mine={group.reacted_by_me}
+        title={look.kind === 'image' ? `${look.name}: ${who(group)}` : who(group)}
+        aria-label="{look.kind === 'image' ? look.name : group.key}, {plural(group.count, 'reaction')} from {who(group)}"
+        onclick={() => toggle(group.key)}
+        aria-pressed={group.reacted_by_me}
+      >
         {#if look.kind === 'image'}
           <img src={look.src} alt={look.name} loading="lazy" draggable="false" />
         {:else if look.kind === 'unicode'}
@@ -86,6 +94,14 @@
   .pill.mine {
     border-color: var(--accent);
     background: var(--accent-wash);
+  }
+  @media (forced-colors: active) {
+    .pill {
+      border-color: ButtonText;
+    }
+    .pill.mine {
+      border: 2px solid Highlight;
+    }
   }
   /* Holds an 18 px square while loading; a wide emoji then keeps its shape. */
   .pill img {

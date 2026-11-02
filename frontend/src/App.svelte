@@ -49,6 +49,20 @@
 
   function onkeydown(event: KeyboardEvent) {
     if (event.key === 'Escape' && ui.closeTopmost()) event.preventDefault();
+    else if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) openMenuFromKeyboard(event);
+  }
+
+  /**
+   * The Menu key and Shift+F10 open the focused thing's own menu, under it.
+   * Chromium's own keyboard context menu doesn't reliably reach the page, so
+   * the event is made here. Text fields keep the native menu (spelling).
+   */
+  function openMenuFromKeyboard(event: KeyboardEvent) {
+    const target = document.activeElement;
+    if (!(target instanceof HTMLElement) || target === document.body || target.closest('input, textarea, [contenteditable="true"]')) return;
+    event.preventDefault();
+    const rect = target.getBoundingClientRect();
+    target.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: rect.left + 8, clientY: Math.min(rect.bottom, window.innerHeight - 8) }));
   }
 
   /**

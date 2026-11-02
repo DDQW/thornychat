@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { joinCall } from '../actions';
   import type { RoomSummary } from '../bindings';
   import { nameOf } from '../people';
@@ -40,9 +41,26 @@
     query = '';
   });
 
+  let searchInput = $state<HTMLInputElement>();
+
   function closeSearch() {
     searchOpen = false;
     query = '';
+  }
+
+  // Opening the bar puts the caret in it. (Its `autofocus` alone doesn't: Svelte
+  // skips that while something — the search button that was just clicked — has focus.)
+  $effect(() => {
+    if (searchOpen) void tick().then(() => searchInput?.focus());
+  });
+
+  /** Ctrl+F searches the open room (again, when the bar is already open). */
+  function onwindowkeydown(event: KeyboardEvent) {
+    if (ui.modalOpen || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== 'f') return;
+    event.preventDefault();
+    searchOpen = true;
+    searchInput?.focus();
+    searchInput?.select();
   }
 
   const typingText = $derived.by(() => {
@@ -86,7 +104,9 @@
   }
 </script>
 
-<section class="room" {ondragenter} {ondragover} {ondragleave} {ondrop} role="presentation">
+<svelte:window onkeydown={onwindowkeydown} />
+
+<section class="room" aria-label={room.name} {ondragenter} {ondragover} {ondragleave} {ondrop} role="presentation">
   <div class="main">
     <header>
       {#if room.is_dm}
@@ -103,28 +123,27 @@
       {#if !hasCall && !room.is_space}
         <button class="icon-btn" onclick={startCall} title="Start a call (signaling only)" aria-label="Start a call"><Icon name="phone" /></button>
       {/if}
-      <button class="icon-btn" class:active={searchOpen} onclick={() => (searchOpen ? closeSearch() : (searchOpen = true))} title="Search this conversation" aria-label="Search messages" aria-pressed={searchOpen}>
+      <button class="icon-btn" class:active={searchOpen} onclick={() => (searchOpen ? closeSearch() : (searchOpen = true))} title="Search this conversation (Ctrl+F)" aria-label="Search messages" aria-pressed={searchOpen} aria-keyshortcuts="Control+F">
         <Icon name="search" />
       </button>
-      <button class="icon-btn" class:active={showMembers} onclick={toggleMembers} title={showMembers ? 'Hide members' : 'Show members'} aria-label="Toggle member list" aria-pressed={showMembers}>
+      <button class="icon-btn" class:active={showMembers} onclick={toggleMembers} title={showMembers ? 'Hide members' : 'Show members'} aria-label="Member list" aria-pressed={showMembers}>
         <Icon name="users" />
       </button>
     </header>
 
     {#if searchOpen}
-      <div class="search">
+      <div class="search" role="search">
         <Icon name="search" size={15} />
-        <!-- svelte-ignore a11y_autofocus -->
         <input
           class="input"
           placeholder="Search the messages loaded here…"
+          bind:this={searchInput}
           bind:value={query}
-          autofocus
           spellcheck="false"
           aria-label="Search messages"
           onkeydown={(event) => event.key === 'Escape' && (event.stopPropagation(), closeSearch())}
         />
-        {#if query.trim()}<span class="muted small nowrap">{matches === 1 ? '1 match' : `${matches} matches`}</span>{/if}
+        <span class="muted small nowrap" role="status">{query.trim() ? (matches === 1 ? '1 match' : `${matches} matches`) : ''}</span>
         <button class="icon-btn" onclick={closeSearch} aria-label="Close search"><Icon name="x" size={14} /></button>
       </div>
     {/if}

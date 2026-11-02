@@ -48,6 +48,11 @@
   let previewing = $state(false);
   let pickerAnchor = $state<DOMRect | null>(null);
   let selected = $state(0);
+  let autocomplete = $state<HTMLUListElement>();
+  // The highlighted suggestion stays in view as the arrows move it.
+  $effect(() => {
+    autocomplete?.querySelector(`[aria-selected="true"]`)?.scrollIntoView({ block: 'nearest' });
+  });
   let emojiData = $state<EmojiData | null>(null);
 
   const editing = $derived(composer.editing);
@@ -590,22 +595,20 @@
   {/if}
 
   {#if menuOpen}
-    <ul class="autocomplete" role="listbox">
+    <!-- The textarea keeps focus; the highlighted option is announced through
+         aria-activedescendant, as in any combobox. -->
+    <ul class="autocomplete" role="listbox" id="autocomplete-{roomId}" aria-label={mentionMatches.length ? 'People' : 'Emoji'} bind:this={autocomplete}>
       {#if mentionMatches.length}
         {#each mentionMatches as member, index (member.user_id)}
-          <li role="option" aria-selected={index === selected}>
-            <button class:on={index === selected} onmousedown={(e) => { e.preventDefault(); pickMention(member); }}>
-              <strong>{member.display_name || nameOf(member.user_id, roomId)}</strong> <span class="muted small">{member.user_id}</span>
-            </button>
+          <li id="autocomplete-{roomId}-{index}" role="option" aria-selected={index === selected} class:on={index === selected} onmousedown={(e) => { e.preventDefault(); pickMention(member); }}>
+            <strong>{member.display_name || nameOf(member.user_id, roomId)}</strong> <span class="muted small">{member.user_id}</span>
           </li>
         {/each}
       {:else}
         {#each emojiMatches as match, index (match.key)}
-          <li role="option" aria-selected={index === selected}>
-            <button class:on={index === selected} onmousedown={(e) => { e.preventDefault(); pickEmojiMatch(match); }}>
-              {#if match.kind === 'custom'}<img class="em" src={backend.mediaUrl(match.mxc)} alt="" />{:else}<span class="em">{match.char}</span>{/if}
-              {match.label}
-            </button>
+          <li id="autocomplete-{roomId}-{index}" role="option" aria-selected={index === selected} class:on={index === selected} onmousedown={(e) => { e.preventDefault(); pickEmojiMatch(match); }}>
+            {#if match.kind === 'custom'}<img class="em" src={backend.mediaUrl(match.mxc)} alt="" />{:else}<span class="em" aria-hidden="true">{match.char}</span>{/if}
+            {match.label}
           </li>
         {/each}
       {/if}
@@ -627,6 +630,11 @@
         placeholder={staged.length ? 'Add a caption…' : 'Message… (@mention, markdown supported, / for commands)'}
         spellcheck={spellOn && spelling.status?.available === false}
         aria-label="Message"
+        aria-autocomplete="list"
+        aria-controls={menuOpen ? `autocomplete-${roomId}` : undefined}
+        aria-activedescendant={menuOpen ? `autocomplete-${roomId}-${selected}` : undefined}
+        aria-describedby={inlineError ? `composer-error-${roomId}` : undefined}
+        aria-invalid={inlineError ? true : undefined}
         {onkeydown}
         {onpaste}
         {oncontextmenu}
@@ -639,11 +647,11 @@
     </div>
 
     <button class="icon-btn" class:active={previewing} onclick={() => (previewing = !previewing)} aria-label="Preview markdown" aria-pressed={previewing} title="Preview markdown"><Icon name="eye" /></button>
-    <button class="icon-btn" onclick={(e) => (pickerAnchor = e.currentTarget.getBoundingClientRect())} aria-label="Emoji and stickers" title="Emoji and stickers"><Icon name="smile" /></button>
-    <button class="btn primary send" onclick={submit} disabled={!canSend} aria-label="Send"><Icon name="send" size={16} /></button>
+    <button class="icon-btn" onclick={(e) => (pickerAnchor = pickerAnchor ? null : e.currentTarget.getBoundingClientRect())} aria-label="Emoji and stickers" aria-haspopup="dialog" aria-expanded={pickerAnchor !== null} title="Emoji and stickers"><Icon name="smile" /></button>
+    <button class="btn primary send" onclick={submit} disabled={!canSend} aria-label={editing ? 'Save edit' : 'Send'} title={editing ? 'Save (Enter)' : 'Send (Enter)'}><Icon name={editing ? 'check' : 'send'} size={16} /></button>
   </div>
 
-  {#if inlineError}<p class="error-text small err" role="alert">{inlineError}</p>{/if}
+  {#if inlineError}<p class="error-text small err" id="composer-error-{roomId}" role="alert">{inlineError}</p>{/if}
 </div>
 
 {#if pickerAnchor}
@@ -731,6 +739,7 @@
   }
   .bar:focus-within {
     border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
   }
   .context + .bar,
   .chips + .bar,
@@ -805,20 +814,27 @@
     list-style: none;
     overflow-y: auto;
   }
-  .autocomplete button {
+  .autocomplete li {
     display: flex;
     align-items: center;
     gap: 8px;
-    width: 100%;
     padding: 6px 8px;
-    border: 0;
     border-radius: var(--radius-sm);
-    background: transparent;
-    text-align: left;
+    cursor: pointer;
   }
-  .autocomplete button.on,
-  .autocomplete button:hover {
+  .autocomplete li:hover {
     background: var(--hover);
+  }
+  /* The keyboard's pick is marked more strongly than the pointer's. */
+  .autocomplete li.on {
+    background: var(--accent-wash);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  @media (forced-colors: active) {
+    .autocomplete li.on {
+      outline: 2px solid Highlight;
+      outline-offset: -2px;
+    }
   }
   .em {
     width: 22px;

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { settings } from '../../stores/settings.svelte';
-  import { parseHex } from '../../theme';
+  import { contrastRatio, parseHex } from '../../theme';
   import type { ThemeConfig } from '../../types';
 
   type ColorRole = 'background' | 'surface' | 'surface_strong' | 'text' | 'muted_text' | 'accent' | 'accent_text' | 'success' | 'danger' | 'emote';
@@ -18,6 +18,28 @@
   ];
 
   const theme = $derived(settings.value?.theme);
+  let importInput = $state<HTMLInputElement>();
+
+  /**
+   * The pairs the app actually draws text in, checked against WCAG's 4.5:1
+   * for body text (3:1 for the accent, which is mostly large or bold).
+   */
+  const CONTRAST_PAIRS: { fg: ColorRole; bg: ColorRole; min: number; what: string }[] = [
+    { fg: 'text', bg: 'background', min: 4.5, what: 'Text on the background' },
+    { fg: 'text', bg: 'surface', min: 4.5, what: 'Text on panels' },
+    { fg: 'muted_text', bg: 'surface', min: 4.5, what: 'Muted text on panels' },
+    { fg: 'muted_text', bg: 'surface_strong', min: 4.5, what: 'Muted text on menus and selected rows' },
+    { fg: 'accent_text', bg: 'accent', min: 4.5, what: 'Text on the accent' },
+    { fg: 'accent', bg: 'background', min: 3, what: 'Accent (links, focus) on the background' },
+    { fg: 'danger', bg: 'surface', min: 4.5, what: 'Error text on panels' },
+  ];
+  const weakPairs = $derived(
+    theme
+      ? CONTRAST_PAIRS.map((pair) => ({ ...pair, ratio: contrastRatio(theme[pair.fg], theme[pair.bg]) })).filter(
+          (pair): pair is typeof pair & { ratio: number } => pair.ratio !== null && pair.ratio < pair.min,
+        )
+      : [],
+  );
   let importError = $state('');
   let fontDraft = $state('');
 
@@ -88,6 +110,17 @@
     {/each}
   </div>
 
+  {#if weakPairs.length > 0}
+    <div class="contrast" role="status">
+      <strong>Some text may be hard to read with these colours</strong>
+      <ul>
+        {#each weakPairs as pair (pair.what)}
+          <li>{pair.what}: {pair.ratio.toFixed(1)}:1 (aim for {pair.min}:1)</li>
+        {/each}
+      </ul>
+    </div>
+  {/if}
+
   <h2>Type and density</h2>
   <div class="setting">
     <div class="what"><label for="font">Font family</label><div class="hint">Leave empty for the system font. Use a font installed on this PC.</div></div>
@@ -102,19 +135,18 @@
   </div>
   <div class="setting">
     <div class="what"><label for="scale">UI scale: {Math.round(theme.ui_scale * 100)}%</label></div>
-    <input id="scale" type="range" min="0.8" max="1.5" step="0.05" value={theme.ui_scale} oninput={(e) => settings.update((d) => (d.theme.ui_scale = Number(e.currentTarget.value)))} />
+    <input id="scale" type="range" min="0.8" max="1.5" step="0.05" value={theme.ui_scale} aria-valuetext="{Math.round(theme.ui_scale * 100)}%" oninput={(e) => settings.update((d) => (d.theme.ui_scale = Number(e.currentTarget.value)))} />
   </div>
   <div class="setting">
     <div class="what"><label for="radius">Corner radius: {Math.round(theme.corner_radius)}px</label></div>
-    <input id="radius" type="range" min="0" max="16" step="1" value={theme.corner_radius} oninput={(e) => settings.update((d) => (d.theme.corner_radius = Number(e.currentTarget.value)))} />
+    <input id="radius" type="range" min="0" max="16" step="1" value={theme.corner_radius} aria-valuetext="{Math.round(theme.corner_radius)} pixels" oninput={(e) => settings.update((d) => (d.theme.corner_radius = Number(e.currentTarget.value)))} />
   </div>
 
   <h2>Share</h2>
   <div class="row wrap">
-    <label class="btn small">
-      Import theme…
-      <input type="file" accept=".json,application/json" hidden onchange={(e) => { void importTheme(e.currentTarget.files?.[0]); e.currentTarget.value = ''; }} />
-    </label>
+    <!-- A real button, so it can be reached with Tab (a label wrapping a hidden input can't). -->
+    <button class="btn small" onclick={() => importInput?.click()}>Import theme…</button>
+    <input bind:this={importInput} type="file" accept=".json,application/json" hidden onchange={(e) => { void importTheme(e.currentTarget.files?.[0]); e.currentTarget.value = ''; }} />
     <button class="btn small" onclick={exportTheme}>Export theme…</button>
     <button class="btn small ghost" onclick={resetToDefault}>Reset to default</button>
   </div>
@@ -124,6 +156,17 @@
 <style>
   .wrap {
     flex-wrap: wrap;
+  }
+  .contrast {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-left: 3px solid var(--danger);
+    border-radius: var(--radius-sm);
+    background: var(--danger-wash);
+  }
+  .contrast ul {
+    margin: 4px 0 0;
+    padding-left: 18px;
   }
   .colors {
     display: grid;

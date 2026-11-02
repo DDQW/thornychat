@@ -128,7 +128,9 @@ impl ThemeConfig {
             surface: ThemeColor::new(0x26, 0x26, 0x26),
             surface_strong: ThemeColor::new(0x33, 0x33, 0x33),
             text: ThemeColor::new(0xF2, 0xF2, 0xF2),
-            muted_text: ThemeColor::new(0x99, 0x99, 0x99),
+            // #A3A3A3, not the old #999999: that was 4.4:1 on surface_strong
+            // (menus, the selected room), just under WCAG's 4.5:1.
+            muted_text: ThemeColor::new(0xA3, 0xA3, 0xA3),
             accent: ThemeColor::new(0xBD, 0xB6, 0xEC),
             accent_text: ThemeColor::new(0x2C, 0x28, 0x43),
             success: ThemeColor::new(0x85, 0xE0, 0xBA),
@@ -182,6 +184,10 @@ impl ThemeConfig {
             self.corner_radius = 6.0;
         }
         self.corner_radius = self.corner_radius.clamp(0.0, 16.0);
+        // The dark preset as saved before its muted text was lightened.
+        if self.name == "ThornyChat Dark" && self.muted_text == ThemeColor::new(0x99, 0x99, 0x99) {
+            self.muted_text = Self::thornychat_dark().muted_text;
+        }
         self
     }
 
@@ -218,6 +224,15 @@ mod tests {
             let json = serde_json::to_string(&theme).unwrap();
             assert_eq!(serde_json::from_str::<ThemeConfig>(&json).unwrap(), theme);
         }
+    }
+
+    #[test]
+    fn the_old_dark_preset_gets_the_readable_muted_text() {
+        let old = ThemeConfig { muted_text: ThemeColor::new(0x99, 0x99, 0x99), ..ThemeConfig::thornychat_dark() };
+        assert_eq!(old.sanitized().muted_text, ThemeConfig::thornychat_dark().muted_text);
+        // A custom theme that happens to use the same grey is left alone.
+        let custom = ThemeConfig { name: "Mine".into(), muted_text: ThemeColor::new(0x99, 0x99, 0x99), ..ThemeConfig::thornychat_dark() };
+        assert_eq!(custom.sanitized().muted_text, ThemeColor::new(0x99, 0x99, 0x99));
     }
 
     #[test]

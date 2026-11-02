@@ -12,10 +12,10 @@
 
 <div class="setting">
   <div class="what">
-    <label for={id}>{title}</label>
-    {#if hint}<div class="hint">{hint}</div>{/if}
+    <label for={id} id="{id}-label">{title}</label>
+    {#if hint}<div class="hint" id="{id}-hint">{hint}</div>{/if}
   </div>
-  <button {id} class="switch" role="switch" aria-checked={checked} {disabled} onclick={() => onchange(!checked)} aria-label={title}></button>
+  <button {id} class="switch" role="switch" aria-checked={checked} {disabled} onclick={() => onchange(!checked)} aria-labelledby="{id}-label" aria-describedby={hint ? `${id}-hint` : undefined}></button>
 </div>
 
 <style>

@@ -96,11 +96,11 @@
 
 {#if rootId}
   <Modal title="Explore {trail[0]?.name ?? 'space'}" onclose={() => (ui.spaceExplorer = null)} width="620px">
-    <nav class="crumbs">
+    <nav class="crumbs" aria-label="Where you are in the space">
       <button class="icon-btn" onclick={back} disabled={trail.length < 2} aria-label="Back"><Icon name="chevron-left" /></button>
       {#each trail as crumb, index (crumb.id)}
         {#if index > 0}<Icon name="chevron-right" size={14} />{/if}
-        <span class:muted={index < trail.length - 1} class="truncate">{crumb.name}</span>
+        <span class:muted={index < trail.length - 1} class="truncate" aria-current={index === trail.length - 1 ? 'location' : undefined}>{crumb.name}</span>
       {/each}
     </nav>
 
@@ -137,7 +137,7 @@
       {/each}
     </ul>
 
-    {#if loading}<p class="center"><span class="spinner"></span></p>{/if}
+    {#if loading}<p class="center" role="status"><span class="spinner"></span><span class="sr-only">Loading…</span></p>{/if}
     {#if nextBatch && !loading}
       <p class="center"><button class="btn" onclick={() => current && loadPage(current.id, nextBatch)}>Load more</button></p>
     {/if}

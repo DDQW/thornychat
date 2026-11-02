@@ -30,7 +30,7 @@ const dark: ThemeConfig = {
   surface: '#262626',
   surface_strong: '#333333',
   text: '#F2F2F2',
-  muted_text: '#999999',
+  muted_text: '#A3A3A3',
   accent: '#BDB6EC',
   accent_text: '#2C2843',
   success: '#85E0BA',

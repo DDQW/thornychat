@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { createRoom } from '../actions';
   import { friendlyUserId } from '../format';
   import { buildSidebar } from '../sidebar';
@@ -17,6 +18,49 @@
   );
   const syncTone = $derived(session.sync.type === 'Syncing' ? 'ok' : session.sync.type === 'Connecting' ? 'wait' : 'bad');
 
+  let filterInput = $state<HTMLInputElement>();
+  let lists = $state<HTMLElement>();
+
+  /** The sidebar's rows that take focus, top to bottom (collapsed spaces hide theirs). */
+  const rows = () => (lists ? [...lists.querySelectorAll<HTMLButtonElement>('button.item, button.title')] : []);
+
+  /** Enter opens the first match, Down moves into the list, Escape clears the filter. */
+  function onfilterkeydown(event: KeyboardEvent) {
+    if (event.key === 'Enter') {
+      const first = lists?.querySelector<HTMLButtonElement>('button.item');
+      if (!first) return;
+      event.preventDefault();
+      first.click();
+      rooms.filter = '';
+      // Picked to talk in: straight on to the message box.
+      void tick().then(() => document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus());
+    } else if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      rows()[0]?.focus();
+    } else if (event.key === 'Escape' && rooms.filter) {
+      event.stopPropagation();
+      rooms.filter = '';
+    }
+  }
+
+  /** Up and Down walk the list; Up from the first row goes back to the filter. */
+  function onlistkeydown(event: KeyboardEvent) {
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    const list = rows();
+    const index = list.indexOf(document.activeElement as HTMLButtonElement);
+    if (index < 0) return;
+    const next = event.key === 'ArrowDown' ? index + 1 : event.key === 'ArrowUp' ? index - 1 : event.key === 'Home' ? 0 : event.key === 'End' ? list.length - 1 : null;
+    if (next === null) return;
+    event.preventDefault();
+    if (next < 0) filterInput?.focus();
+    else list[Math.min(next, list.length - 1)]?.focus();
+  }
+
+  export function focusFilter() {
+    filterInput?.focus();
+    filterInput?.select();
+  }
+
   function openNewMenu(event: MouseEvent) {
     ui.showMenu(event, [
       { label: 'Direct message…', onselect: () => (ui.dmSearchOpen = true) },
@@ -31,22 +75,35 @@
     <Avatar src={session.profile?.avatar_url} name={name || '?'} seed={session.info?.user_id} size={34} />
     <div class="who grow">
       <div class="truncate display">{name}</div>
-      <div class="truncate muted small" title={syncLabel}>
-        <span class="dot {syncTone}"></span>{syncLabel}
+      <div class="truncate muted small" title={syncLabel} role="status">
+        <span class="dot {syncTone}" aria-hidden="true"></span>{syncLabel}
       </div>
     </div>
-    <button class="icon-btn" onclick={openNewMenu} aria-label="New conversation" title="New conversation"><Icon name="plus" /></button>
-    <button class="icon-btn" onclick={() => ui.openSettings()} aria-label="Settings" title="Settings"><Icon name="settings" /></button>
+    <button class="icon-btn" onclick={openNewMenu} aria-label="New conversation" aria-haspopup="menu" title="New conversation"><Icon name="plus" /></button>
+    <button class="icon-btn" onclick={() => ui.openSettings()} aria-label="Settings" title="Settings (Ctrl+,)"><Icon name="settings" /></button>
   </div>
 
   <div class="filter">
     <Icon name="search" size={14} />
-    <input class="input" placeholder="Filter rooms" bind:value={rooms.filter} aria-label="Filter rooms" spellcheck="false" />
+    <input
+      class="input"
+      type="search"
+      placeholder="Filter rooms"
+      bind:this={filterInput}
+      bind:value={rooms.filter}
+      aria-label="Filter rooms"
+      aria-keyshortcuts="Control+K"
+      title="Filter rooms (Ctrl+K)"
+      spellcheck="false"
+      autocomplete="off"
+      onkeydown={onfilterkeydown}
+    />
   </div>
 
-  <nav class="lists" aria-label="Rooms">
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <nav class="lists" aria-label="Rooms" bind:this={lists} onkeydown={onlistkeydown}>
     {#if !rooms.listLoaded}
-      <p class="muted pad"><span class="spinner"></span></p>
+      <p class="muted pad" role="status"><span class="spinner"></span><span class="sr-only">Loading rooms…</span></p>
     {:else}
       {#if model.spaces.length > 0}
         <section>
@@ -78,7 +135,7 @@
       {#if rooms.list.length === 0}
         <p class="muted pad">You're not in any rooms yet. Use <strong>+</strong> to start a conversation or join a room.</p>
       {:else if model.filtered && model.spaces.length + model.directMessages.length + model.rooms.length === 0}
-        <p class="muted pad">Nothing matches “{rooms.filter}”.</p>
+        <p class="muted pad" role="status">Nothing matches “{rooms.filter}”.</p>
       {/if}
     {/if}
   </nav>
@@ -138,6 +195,11 @@
   }
   .filter .input {
     padding-left: 30px;
+  }
+  /* The search field's own clear button: Escape does the same. */
+  .filter .input::-webkit-search-cancel-button {
+    filter: grayscale(1);
+    cursor: pointer;
   }
   .lists {
     flex: 1 1 auto;

@@ -11,6 +11,25 @@ export function parseHex(hex: string): [number, number, number] | null {
   return [parseInt(match[1]!, 16), parseInt(match[2]!, 16), parseInt(match[3]!, 16)];
 }
 
+/** WCAG relative luminance (0-1) of a `#RRGGBB` colour, or null. */
+export function luminance(hex: string): number | null {
+  const rgb = parseHex(hex);
+  if (!rgb) return null;
+  const [r, g, b] = rgb.map((channel) => {
+    const c = channel / 255;
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  }) as [number, number, number];
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/** WCAG contrast ratio (1-21) between two colours, or null if either isn't one. */
+export function contrastRatio(a: string, b: string): number | null {
+  const la = luminance(a);
+  const lb = luminance(b);
+  if (la === null || lb === null) return null;
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+
 /** A translucent version of a theme color, for hover washes and focus rings. */
 export function withAlpha(hex: string, alpha: number): string {
   const rgb = parseHex(hex);
@@ -37,8 +56,9 @@ export function themeVariables(theme: ThemeConfig): Record<string, string> {
     '--radius': `${theme.corner_radius}px`,
     '--radius-sm': `${Math.max(2, theme.corner_radius * 0.6)}px`,
     // Sender names are drawn in a per-user hue; the theme decides how bright.
-    '--name-sat': theme.dark ? '62%' : '70%',
-    '--name-light': theme.dark ? '72%' : '34%',
+    // OKLCH lightness, so every hue clears 4.5:1 on the theme's own ground.
+    '--name-l': theme.dark ? '80%' : '44%',
+    '--name-c': theme.dark ? '0.11' : '0.13',
     '--font': `${theme.font_family ? `"${theme.font_family.replace(/"/g, '')}", ` : ''}system-ui, "Segoe UI Variable", "Segoe UI", "ThornyChat CJK Fallback", sans-serif`,
   };
 }

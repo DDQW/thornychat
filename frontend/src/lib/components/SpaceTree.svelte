@@ -25,15 +25,15 @@
 
 <div class="space">
   <div class="header" style:padding-left="{4 + depth * 14}px">
-    <button class="icon-btn small-btn" onclick={toggle} aria-label={collapsed ? 'Expand space' : 'Collapse space'} aria-expanded={!collapsed}>
+    <button class="icon-btn small-btn" onclick={toggle} aria-label="{collapsed ? 'Expand' : 'Collapse'} {node.space.name}" aria-expanded={!collapsed} tabindex="-1">
       <Icon name={collapsed ? 'chevron-right' : 'chevron-down'} size={14} />
     </button>
-    <button class="title grow" onclick={toggle} oncontextmenu={(event) => ui.showMenu(event, [{ label: 'Explore space…', onselect: () => (ui.spaceExplorer = node.space.room_id) }])}>
+    <button class="title grow" onclick={toggle} aria-expanded={!collapsed} oncontextmenu={(event) => ui.showMenu(event, [{ label: 'Explore space…', onselect: () => (ui.spaceExplorer = node.space.room_id) }])}>
       <Avatar src={node.space.avatar_url} name={node.space.name} size={20} square />
       <span class="truncate">{node.space.name}</span>
-      {#if collapsed && unread > 0}<span class="badge">{unread > 99 ? '99+' : unread}</span>{/if}
+      {#if collapsed && unread > 0}<span class="badge"><span class="sr-only">, </span>{unread > 99 ? '99+' : unread}<span class="sr-only"> unread</span></span>{/if}
     </button>
-    <button class="icon-btn small-btn" onclick={() => (ui.spaceExplorer = node.space.room_id)} title="Explore this space" aria-label="Explore space">
+    <button class="icon-btn small-btn" onclick={() => (ui.spaceExplorer = node.space.room_id)} title="Explore this space" aria-label="Explore {node.space.name}">
       <Icon name="globe" size={14} />
     </button>
   </div>

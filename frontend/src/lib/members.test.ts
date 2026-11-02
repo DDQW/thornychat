@@ -108,13 +108,13 @@ describe('safeColor', () => {
 
 describe('tagColor', () => {
   it('keeps the hue and takes the rest from the theme', () => {
-    expect(tagColor('#0000ff')).toBe('hsl(240 var(--name-sat) var(--name-light))');
-    expect(tagColor('#ff0000')).toBe('hsl(0 var(--name-sat) var(--name-light))');
-    expect(tagColor('#00ff00')).toBe('hsl(120 var(--name-sat) var(--name-light))');
-    expect(tagColor('#ff00ff')).toBe('hsl(300 var(--name-sat) var(--name-light))');
+    expect(tagColor('#0000ff')).toBe('oklch(var(--name-l) var(--name-c) 264)');
+    expect(tagColor('#ff0000')).toBe('oklch(var(--name-l) var(--name-c) 29)');
+    expect(tagColor('#00ff00')).toBe('oklch(var(--name-l) var(--name-c) 142)');
+    expect(tagColor('#ff00ff')).toBe('oklch(var(--name-l) var(--name-c) 328)');
   });
   it('leaves grey tags grey and drops unsafe ones', () => {
-    expect(tagColor('#808080')).toBe('hsl(0 0% var(--name-light))');
+    expect(tagColor('#808080')).toBe('oklch(var(--name-l) 0 0)');
     expect(tagColor('url(x)')).toBeNull();
     expect(tagColor(null)).toBeNull();
   });

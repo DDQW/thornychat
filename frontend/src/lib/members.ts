@@ -123,7 +123,7 @@ export function safeColor(color: string | null): string | null {
 
 /**
  * A tag colour as the roster draws it: the room's hue, with the theme's name
- * saturation and lightness (the same as per-user name colours), so a room's
+ * lightness and chroma (the same as per-user name colours), so a room's
  * pure `#0000ff` doesn't come out unreadable on the dark theme. A grey tag
  * stays grey. Null for a missing or unsafe colour.
  */
@@ -131,9 +131,18 @@ export function tagColor(color: string | null): string | null {
   const hex = safeColor(color);
   if (!hex) return null;
   const [r, g, b] = [1, 3, 5].map((at) => parseInt(hex.slice(at, at + 2), 16) / 255) as [number, number, number];
-  const max = Math.max(r, g, b);
-  const chroma = max - Math.min(r, g, b);
-  if (chroma < 0.08) return 'hsl(0 0% var(--name-light))';
-  const sector = max === r ? ((g - b) / chroma + 6) % 6 : max === g ? (b - r) / chroma + 2 : (r - g) / chroma + 4;
-  return `hsl(${Math.round(sector * 60)} var(--name-sat) var(--name-light))`;
+  if (Math.max(r, g, b) - Math.min(r, g, b) < 0.08) return 'oklch(var(--name-l) 0 0)';
+  return `oklch(var(--name-l) var(--name-c) ${Math.round(oklchHue(r, g, b))})`;
+}
+
+/** The OKLCH hue (0-360) of an sRGB colour with 0-1 channels. */
+export function oklchHue(r: number, g: number, b: number): number {
+  const linear = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const [lr, lg, lb] = [linear(r), linear(g), linear(b)];
+  const l = Math.cbrt(0.4122214708 * lr + 0.5363325363 * lg + 0.0514459929 * lb);
+  const m = Math.cbrt(0.2119034982 * lr + 0.6806995451 * lg + 0.1073969566 * lb);
+  const s = Math.cbrt(0.0883024619 * lr + 0.2817188376 * lg + 0.6299787005 * lb);
+  const a = 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s;
+  const bb = 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s;
+  return ((Math.atan2(bb, a) * 180) / Math.PI + 360) % 360;
 }

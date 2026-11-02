@@ -18,6 +18,7 @@
     zoomAround,
     type Size,
   } from '../zoom';
+  import { trapFocus } from '../focus';
   import { ui } from '../stores/ui.svelte';
   import Icon from './Icon.svelte';
 
@@ -190,7 +191,7 @@
 <svelte:window {onkeydown} />
 
 {#if target}
-  <div class="lightbox" role="dialog" aria-modal="true" aria-label="Image viewer: {target.name}">
+  <div class="lightbox" role="dialog" aria-modal="true" aria-label="Image viewer: {target.name}" use:trapFocus={{ initial: '.close' }}>
     <div class="toolbar">
       <span class="grow truncate">{target.name}</span>
       {#if natural.width > 0}
@@ -199,9 +200,11 @@
         </span>
         <span class="info small dims">{natural.width} × {natural.height}</span>
       {/if}
-      <button class="icon-btn" onclick={reset} title="Fit to window (0)" aria-label="Fit to window"><Icon name="expand" /></button>
+      <button class="icon-btn" onclick={() => zoomTo(scale / 1.25)} disabled={scale <= 1} title="Zoom out (−)" aria-label="Zoom out"><Icon name="zoom-out" /></button>
+      <button class="icon-btn" onclick={() => zoomTo(scale * 1.25)} disabled={scale >= maxScale} title="Zoom in (+)" aria-label="Zoom in"><Icon name="zoom" /></button>
+      <button class="icon-btn" onclick={reset} disabled={scale === 1} title="Fit to window (0)" aria-label="Fit to window"><Icon name="expand" /></button>
       <button class="icon-btn" onclick={save} title="Save to disk" aria-label="Save to disk"><Icon name="download" /></button>
-      <button class="icon-btn" onclick={() => (ui.lightbox = null)} title="Close (Esc)" aria-label="Close"><Icon name="x" /></button>
+      <button class="icon-btn close" onclick={() => (ui.lightbox = null)} title="Close (Esc)" aria-label="Close"><Icon name="x" /></button>
     </div>
     <div class="stage" bind:this={stage} role="presentation" use:nonPassiveWheel={onwheel} onclick={onbackdrop}>
       <img

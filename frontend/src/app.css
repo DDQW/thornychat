@@ -24,7 +24,7 @@
   --surface: #262626;
   --surface-strong: #333333;
   --text: #f2f2f2;
-  --muted: #999999;
+  --muted: #a3a3a3;
   --accent: #bdb6ec;
   --accent-text: #2c2843;
   --success: #85e0ba;
@@ -36,8 +36,8 @@
   --border: rgb(242 242 242 / 0.12);
   --radius: 10px;
   --radius-sm: 6px;
-  --name-sat: 62%;
-  --name-light: 72%;
+  --name-l: 80%;
+  --name-c: 0.11;
   --font: system-ui, 'Segoe UI Variable', 'Segoe UI', 'ThornyChat CJK Fallback', sans-serif;
   --sidebar-width: 280px;
   --members-width: 240px;
@@ -178,10 +178,11 @@ a {
   background: var(--bg);
   outline: none;
 }
-.input:focus,
-.textarea:focus,
-.select:focus {
+.input:focus-visible,
+.textarea:focus-visible,
+.select:focus-visible {
   border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 .input::placeholder,
 .textarea::placeholder {
@@ -229,8 +230,12 @@ a {
   position: absolute;
   width: 1px;
   height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
   overflow: hidden;
-  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 /* --- overlays --- */
@@ -405,10 +410,23 @@ a {
   corner-shape: squircle;
 }
 
-/* Per-user name colours: the hue comes from the user id, the rest from the theme. */
+/* Per-user name colours: the hue comes from the user id, lightness and chroma
+   from the theme. OKLCH, not HSL: its lightness is perceptual, so every hue
+   gets the same contrast (in HSL a yellow name at 34% was 2.9:1 on the light
+   theme, a blue one 9:1). */
 .name {
-  color: hsl(var(--hue, 0) var(--name-sat) var(--name-light));
+  color: oklch(var(--name-l) var(--name-c) var(--hue, 0));
   font-weight: 600;
+}
+
+kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--bg);
+  font: 0.88em ui-monospace, Consolas, monospace;
+  white-space: nowrap;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -417,5 +435,57 @@ a {
   *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  /* Spinning is how a spinner says "working"; slowed rather than stopped. */
+  .spinner {
+    animation-duration: 2.4s !important;
+  }
+}
+
+/* Windows high-contrast themes replace every colour with a handful of system
+   ones and drop backgrounds and shadows, so whatever was told apart only by a
+   tint needs a border or a system colour of its own. */
+@media (forced-colors: active) {
+  :focus-visible {
+    outline-color: Highlight;
+  }
+  .btn,
+  .icon-btn,
+  .menu,
+  .dialog,
+  .card,
+  .badge {
+    border: 1px solid ButtonText;
+  }
+  .icon-btn.active,
+  .btn.primary {
+    border-color: Highlight;
+    color: Highlight;
+  }
+  .switch {
+    border: 1px solid ButtonText;
+  }
+  .switch::after {
+    background: ButtonText;
+  }
+  .switch[aria-checked='true'] {
+    background: Highlight;
+  }
+  .switch[aria-checked='true']::after {
+    background: HighlightText;
+  }
+  .switch:disabled::after {
+    background: GrayText;
+  }
+  .spinner {
+    border-color: GrayText;
+    border-top-color: Highlight;
+  }
+  .menu [role^='menuitem']:focus,
+  .menu [role^='menuitem']:hover:not(:disabled) {
+    background: Highlight;
+    color: HighlightText;
+    forced-color-adjust: none;
   }
 }

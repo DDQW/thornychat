@@ -12,7 +12,7 @@
   import { ui } from '../stores/ui.svelte';
   import Icon from './Icon.svelte';
   import MessageRow from './MessageRow.svelte';
-  import { formatDay, formatTime } from '../format';
+  import { formatDateTime, formatDay } from '../format';
 
   interface Props {
     roomId: string;
@@ -60,7 +60,8 @@
   const PAGINATE_AT = 600;
 
   function scrollToBottom(smooth = false) {
-    scroller?.scrollTo({ top: scroller.scrollHeight, behavior: smooth ? 'smooth' : 'instant' });
+    const still = smooth && matchMedia('(prefers-reduced-motion: reduce)').matches;
+    scroller?.scrollTo({ top: scroller.scrollHeight, behavior: smooth && !still ? 'smooth' : 'instant' });
   }
 
   // Only the reader moving up lets go of the bottom. Deciding it from the
@@ -98,6 +99,73 @@
   }
   function onkeydown(event: KeyboardEvent) {
     if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) && scroller && scroller.scrollTop > 0) stuck = false;
+    moveFocus(event);
+  }
+
+  // --- moving through messages with the keyboard ---
+  // One message is the timeline's tab stop (the last one focused, else the
+  // newest); the arrow keys move between messages from there, Page Up/Down
+  // ten at a time, Home/End to the oldest/newest loaded, Escape back to the
+  // composer. Every row's tabindex is -1 in the markup; only the tab stop is
+  // switched to 0 here, so a new page of history costs nothing.
+  let focusedRow: string | null = null;
+  const messageElements = () => (content ? [...content.querySelectorAll<HTMLElement>('[data-message]')] : []);
+
+  function setTabStop(row: HTMLElement | null) {
+    for (const old of content?.querySelectorAll<HTMLElement>('[data-message][tabindex="0"]') ?? []) if (old !== row) old.tabIndex = -1;
+    if (row) row.tabIndex = 0;
+  }
+
+  $effect(() => {
+    void rows;
+    void tick().then(() => {
+      if (!content) return;
+      const kept = focusedRow ? content.querySelector<HTMLElement>(`[data-message="${CSS.escape(focusedRow)}"]`) : null;
+      setTabStop(kept ?? messageElements().at(-1) ?? null);
+    });
+  });
+
+  function onfocusin(event: FocusEvent) {
+    const row = (event.target as Element).closest?.<HTMLElement>('[data-message]');
+    if (!row) return;
+    focusedRow = row.dataset.message ?? null;
+    setTabStop(row);
+  }
+
+  function moveFocus(event: KeyboardEvent) {
+    // From the message itself or a button or link in it; video, text fields
+    // and embeds use the arrow keys themselves.
+    const from = event.target as HTMLElement;
+    const row = from.closest?.<HTMLElement>('[data-message]');
+    if (!row || from.closest('video, input, textarea, select, iframe, [contenteditable="true"]') || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (from !== row && (event.key === 'Home' || event.key === 'End' || event.key.startsWith('Page'))) return;
+    if (event.key === 'Escape') {
+      const composer = document.querySelector<HTMLTextAreaElement>('.composer textarea');
+      if (composer) {
+        event.preventDefault();
+        composer.focus();
+      }
+      return;
+    }
+    const list = messageElements();
+    const index = list.indexOf(row);
+    const delta = { ArrowUp: -1, ArrowDown: 1, PageUp: -10, PageDown: 10 }[event.key];
+    // From a button inside a message, Up/Down first go to that message itself.
+    if (from !== row && delta !== undefined && Math.abs(delta) === 1 && delta < 0) {
+      event.preventDefault();
+      row.focus({ preventScroll: true });
+      row.scrollIntoView({ block: 'nearest' });
+      return;
+    }
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? list.length - 1 : delta !== undefined ? Math.max(0, Math.min(list.length - 1, index + delta)) : null;
+    if (next === null || index < 0) return;
+    event.preventDefault();
+    noteInput();
+    const target = list[next]!;
+    target.focus({ preventScroll: true });
+    target.scrollIntoView({ block: 'nearest' });
+    // Reaching the newest message follows the live edge again, as scrolling there would.
+    if (next === list.length - 1 && scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < BOTTOM_SLACK) stuck = true;
   }
 
   // --- keeping the reader's place ---
@@ -481,6 +549,8 @@
       if (restoreOffset !== undefined) return;
       ui.highlightEvent = eventId;
       setTimeout(() => ui.highlightEvent === eventId && (ui.highlightEvent = null), 1800);
+      // Keyboard and screen-reader users land on it too, not just see it flash.
+      target.focus({ preventScroll: true });
     } finally {
       // Held until the jump's own scroll event and resize callbacks are through.
       afterLayout(() => (jumping = false));
@@ -491,10 +561,20 @@
 </script>
 
 <div class="timeline">
-  <div class="scroller" bind:this={scroller} {onscroll} role="log" aria-live="polite" aria-label="Messages in {room?.name ?? 'this room'}">
+  <!-- aria-busy while history loads: a page of old messages is not news to announce. -->
+  <div
+    class="scroller"
+    bind:this={scroller}
+    {onscroll}
+    {onfocusin}
+    role="log"
+    aria-live="polite"
+    aria-busy={!timeline?.loaded || timeline.loadingOlder || timeline.shrinkPending}
+    aria-label="Messages in {room?.name ?? 'this room'}"
+  >
     <div class="content" bind:this={content}>
       {#if !timeline?.loaded}
-        <div class="state"><span class="spinner"></span></div>
+        <div class="state"><span class="spinner"></span><span class="sr-only">Loading messages…</span></div>
       {:else}
         <div class="top">
           {#if timeline.loadingOlder}
@@ -502,7 +582,7 @@
           {:else if timeline.startReached}
             <div class="start">
               <h2>{room?.name ?? 'This room'}</h2>
-              <p class="muted">This is the start of the conversation{startedAt ? ` (${formatTime(startedAt)})` : ''}.</p>
+              <p class="muted">This is the start of the conversation{startedAt ? ` (${formatDateTime(startedAt)})` : ''}.</p>
             </div>
           {/if}
         </div>

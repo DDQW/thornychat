@@ -56,6 +56,8 @@
   onclick={() => (room.is_space ? (ui.spaceExplorer = room.room_id) : rooms.select(room.room_id))}
   oncontextmenu={openMenu}
   aria-current={active ? 'page' : undefined}
+  data-room-id={room.is_space ? undefined : room.room_id}
+  data-unread={room.unread_count > 0 && !muted ? '' : undefined}
 >
   {#if room.is_dm}
     <Avatar src={room.avatar_url} name={room.name} size={26} />
@@ -63,11 +65,12 @@
     <Avatar src={room.avatar_url} name={room.name} size={26} square />
   {/if}
   <span class="name grow truncate" class:unread={room.unread_count > 0 && !muted}>{room.name}</span>
-  {#if room.is_encrypted}<span class="meta" title="End-to-end encrypted"><Icon name="lock" size={13} /></span>{/if}
-  {#if muted}<span class="meta" title="Muted"><Icon name="bell-off" size={13} /></span>{/if}
-  {#if inCall}<span class="meta call" title="Call in progress"><Icon name="phone" size={13} /></span>{/if}
+  <!-- Icons carry their meaning as hidden text too: a title alone isn't read out. -->
+  {#if room.is_encrypted}<span class="meta" title="End-to-end encrypted"><Icon name="lock" size={13} /><span class="sr-only">, encrypted</span></span>{/if}
+  {#if muted}<span class="meta" title="Muted"><Icon name="bell-off" size={13} /><span class="sr-only">, muted</span></span>{/if}
+  {#if inCall}<span class="meta call" title="Call in progress"><Icon name="phone" size={13} /><span class="sr-only">, call in progress</span></span>{/if}
   {#if room.unread_count > 0}
-    <span class="badge" class:muted-badge={muted}>{room.unread_count > 99 ? '99+' : room.unread_count}</span>
+    <span class="badge" class:muted-badge={muted}><span class="sr-only">, </span>{room.unread_count > 99 ? '99+' : room.unread_count}<span class="sr-only"> unread</span></span>
   {/if}
 </button>
 
@@ -88,6 +91,15 @@
   }
   .item.active {
     background: var(--surface-strong);
+  }
+  .item:focus-visible {
+    outline-offset: -2px;
+  }
+  @media (forced-colors: active) {
+    .item.active {
+      outline: 2px solid Highlight;
+      outline-offset: -2px;
+    }
   }
   .item.muted .name {
     color: var(--muted);

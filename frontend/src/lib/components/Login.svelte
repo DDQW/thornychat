@@ -62,36 +62,36 @@
 
 <main class="login">
   <div class="panel card">
-    <h1>ThornyChat</h1>
+    <h1>Sign in to ThornyChat</h1>
 
     {#if session.note}
-      <p class="muted status"><span class="spinner"></span> {session.note}</p>
+      <p class="muted status" role="status"><span class="spinner"></span> {session.note}</p>
     {/if}
 
     {#if !flows}
       <p class="muted">Enter your homeserver to sign in</p>
       <form onsubmit={discover}>
         <div class="field">
-          <label for="homeserver" class="sr-only">Homeserver</label>
+          <label for="homeserver">Homeserver</label>
           <!-- svelte-ignore a11y_autofocus -->
-          <input id="homeserver" class="input" placeholder="Homeserver (e.g. matrix.org)" bind:value={homeserver} autofocus autocomplete="url" spellcheck="false" disabled={busy} />
+          <input id="homeserver" class="input" placeholder="matrix.org" bind:value={homeserver} autofocus autocomplete="url" inputmode="url" spellcheck="false" disabled={busy} aria-invalid={error ? true : undefined} aria-describedby={shownError ? 'login-error' : undefined} />
         </div>
         <button class="btn primary wide" type="submit" disabled={busy}>Continue</button>
       </form>
-      {#if discovering}<p class="muted status"><span class="spinner"></span> Checking homeserver…</p>{/if}
+      {#if discovering}<p class="muted status" role="status"><span class="spinner"></span> Checking homeserver…</p>{/if}
     {:else}
       <p class="muted">Signing in to <strong>{homeserver.trim()}</strong></p>
 
       {#if flows.supports_password}
         <form onsubmit={signIn}>
           <div class="field">
-            <label for="username" class="sr-only">Username</label>
+            <label for="username">Username</label>
             <!-- svelte-ignore a11y_autofocus -->
-            <input id="username" class="input" placeholder="Username" bind:value={username} autofocus autocomplete="username" spellcheck="false" disabled={busy} />
+            <input id="username" class="input" bind:value={username} autofocus autocomplete="username" autocapitalize="none" spellcheck="false" disabled={busy} aria-describedby={shownError ? 'login-error' : undefined} />
           </div>
           <div class="field">
-            <label for="password" class="sr-only">Password</label>
-            <input id="password" class="input" type="password" placeholder="Password" bind:value={password} autocomplete="current-password" disabled={busy} />
+            <label for="password">Password</label>
+            <input id="password" class="input" type="password" bind:value={password} autocomplete="current-password" disabled={busy} aria-describedby={shownError ? 'login-error' : undefined} />
           </div>
           <button class="btn primary wide" type="submit" disabled={busy}>Sign in</button>
         </form>
@@ -108,13 +108,13 @@
             {/each}
           {/if}
         </div>
-        {#if session.loginBusy}<p class="muted status">Finish signing in in your browser…</p>{/if}
+        {#if session.loginBusy}<p class="muted status" role="status">Finish signing in in your browser…</p>{/if}
       {/if}
 
       <button class="btn ghost back" onclick={back} disabled={busy}>Back</button>
     {/if}
 
-    {#if shownError}<p class="error-text" role="alert">{shownError}</p>{/if}
+    {#if shownError}<p class="error-text" id="login-error" role="alert">{shownError}</p>{/if}
   </div>
 </main>
 
@@ -131,7 +131,7 @@
   }
   h1 {
     margin: 0 0 4px;
-    font-size: 28px;
+    font-size: 22px;
   }
   .wide {
     width: 100%;

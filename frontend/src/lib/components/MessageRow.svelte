@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { redactMessage, retrySend, toggleReaction } from '../actions';
   import { backend } from '../api';
   import type { ReplyPreview, TimelineItem } from '../bindings';
@@ -70,6 +71,7 @@
       plainText !== null &&
       ((!!item.formatted_body && item.formatted_body.includes(myId)) || plainText.includes(myId) || (!!session.profile?.display_name && plainText.includes(`@${session.profile.display_name}`))),
   );
+  const when = $derived(formatDateTime(item.timestamp_ms));
   const flash = $derived(ui.highlightEvent !== null && ui.highlightEvent === eventId);
   const readers = $derived(item.read_by.filter((id) => id !== myId).slice(0, 6));
 
@@ -96,9 +98,27 @@
   let active = $state(false);
   const showActions = $derived(eventId !== null && content.type !== 'Redacted' && (active || confirmingDelete || pickerAnchor !== null));
 
+  // Keyboard focus shows the action bar; a mouse click that happens to focus
+  // the row (it is focusable, for the arrow keys) leaves it to hover.
+  function onfocusin(event: FocusEvent) {
+    if ((event.target as Element).matches(':focus-visible')) active = true;
+  }
+
   function onfocusout(event: FocusEvent) {
     if (!(event.currentTarget as Element).contains(event.relatedTarget as Node | null)) active = false;
   }
+
+  let cancelDelete = $state<HTMLButtonElement>();
+  let rowElement = $state<HTMLDivElement>();
+  /** Backing out of the question puts focus back on the message, not on <body>. */
+  function keepMessage() {
+    confirmingDelete = false;
+    rowElement?.focus({ preventScroll: true });
+  }
+  // Asking "delete?" moves focus onto the question, so a keyboard user can answer it.
+  $effect(() => {
+    if (confirmingDelete) void tick().then(() => cancelDelete?.focus());
+  });
 
   function react(pick: Pick) {
     pickerAnchor = null;
@@ -118,7 +138,11 @@
   }
 
   function copyText() {
-    if (plainText !== null) void navigator.clipboard.writeText(plainText).then(() => ui.toast('Copied', 'success', 1500));
+    if (plainText !== null)
+      navigator.clipboard.writeText(plainText).then(
+        () => ui.toast('Copied', 'success', 1500),
+        (error: unknown) => ui.error(`Couldn't copy: ${String(error)}`),
+      );
   }
 
   function openMenu(event: MouseEvent) {
@@ -143,27 +167,32 @@
   class:highlighted
   class:flash
   data-event-id={eventId}
+  data-message={owner}
+  bind:this={rowElement}
+  tabindex="-1"
   style:--hue={nameHue(item.sender)}
   oncontextmenu={openMenu}
   onmouseenter={() => (active = true)}
-  onmouseleave={() => (active = false)}
-  onfocusin={() => (active = true)}
+  onmouseleave={(event) => !(event.currentTarget as Element).matches(':has(:focus-visible), :focus-visible') && (active = false)}
+  {onfocusin}
   {onfocusout}
   role="article"
+  aria-label="{name}, {when}"
+  aria-describedby="body-{owner}"
 >
   <div class="gutter">
     {#if !continuation && content.type !== 'Emote'}
       <button class="plain" onclick={openSender} aria-label="{name}: user menu"><Avatar src={avatar} {name} seed={item.sender} size={36} /></button>
     {:else}
-      <time class="stamp" title={formatDateTime(item.timestamp_ms)}>{formatTime(item.timestamp_ms)}</time>
+      <time class="stamp" title={when}>{formatTime(item.timestamp_ms)}</time>
     {/if}
   </div>
 
-  <div class="main">
+  <div class="main" id="body-{owner}">
     {#if !continuation && content.type !== 'Emote'}
       <div class="head">
         <button class="plain name" onclick={openSender}>{name}</button>
-        <time class="muted small" title={formatDateTime(item.timestamp_ms)}>{formatTime(item.timestamp_ms)}</time>
+        <time class="muted small" title={when}>{formatTime(item.timestamp_ms)}</time>
         {#if item.shield}
           <span class="shield {item.shield.type.toLowerCase()}" title={item.shield.data}><Icon name={item.shield.type === 'Red' ? 'shield-alert' : 'shield'} size={14} /></span>
         {/if}
@@ -254,15 +283,18 @@
   {#if showActions}
     <div class="actions">
       {#if confirmingDelete}
-        <span class="small">Delete this message?</span>
-        <button class="btn danger small" onclick={remove}>Delete</button>
-        <button class="btn small" onclick={() => (confirmingDelete = false)}>Cancel</button>
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <div class="confirm" role="group" aria-label="Delete this message?" onkeydown={(event) => event.key === 'Escape' && (event.stopPropagation(), keepMessage())}>
+          <span class="small">Delete this message?</span>
+          <button class="btn danger small" onclick={remove}>Delete</button>
+          <button class="btn small" bind:this={cancelDelete} onclick={keepMessage}>Cancel</button>
+        </div>
       {:else}
         <button class="icon-btn" title="Add reaction" aria-label="Add reaction" onclick={(e) => (pickerAnchor = e.currentTarget.getBoundingClientRect())}><Icon name="smile" size={16} /></button>
         <button class="icon-btn" title="Reply" aria-label="Reply" onclick={() => composer.reply(item)}><Icon name="reply" size={16} /></button>
         {#if canEdit}<button class="icon-btn" title="Edit" aria-label="Edit" onclick={() => composer.edit(item)}><Icon name="edit" size={16} /></button>{/if}
         {#if canDelete}<button class="icon-btn" title="Delete" aria-label="Delete" onclick={() => (confirmingDelete = true)}><Icon name="trash" size={16} /></button>{/if}
-        <button class="icon-btn" title="More" aria-label="More" onclick={(e) => { const r = e.currentTarget.getBoundingClientRect(); openMenu(new MouseEvent('contextmenu', { clientX: r.left, clientY: r.bottom })); }}><Icon name="more" size={16} /></button>
+        <button class="icon-btn" title="More" aria-label="More" aria-haspopup="menu" onclick={(e) => { const r = e.currentTarget.getBoundingClientRect(); openMenu(new MouseEvent('contextmenu', { clientX: r.left, clientY: r.bottom })); }}><Icon name="more" size={16} /></button>
       {/if}
     </div>
   {/if}
@@ -283,8 +315,12 @@
     margin-top: 8px;
   }
   .msg:hover,
-  .msg:focus-within {
+  .msg:focus-visible,
+  .msg:has(:focus-visible) {
     background: var(--hover);
+  }
+  .msg:focus-visible {
+    outline-offset: -2px;
   }
   .msg.pending {
     opacity: 0.6;
@@ -301,6 +337,20 @@
       background: var(--accent-wash);
     }
   }
+  /* Without the fade the jump target still needs marking, for as long as the flash lasts. */
+  @media (prefers-reduced-motion: reduce) {
+    .msg.flash {
+      animation: none;
+      background: var(--accent-wash);
+    }
+  }
+  @media (forced-colors: active) {
+    .msg.highlighted,
+    .msg.flash {
+      outline: 2px solid Highlight;
+      outline-offset: -2px;
+    }
+  }
   .gutter {
     display: flex;
     flex: 0 0 40px;
@@ -314,7 +364,9 @@
     line-height: 20px;
     white-space: nowrap;
   }
-  .msg:hover .stamp {
+  .msg:hover .stamp,
+  .msg:focus-visible .stamp,
+  .msg:has(:focus-visible) .stamp {
     visibility: visible;
   }
   .main {
@@ -437,6 +489,11 @@
     justify-content: flex-end;
     gap: 2px;
     margin-top: 2px;
+  }
+  .confirm {
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
   .actions {
     position: absolute;

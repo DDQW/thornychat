@@ -19,6 +19,20 @@
   <li>Start a line with <code>//</code> to send a literal single <code>/</code>. An unknown <code>/word</code> is sent as ordinary text.</li>
 </ul>
 
+<h2>Keyboard shortcuts</h2>
+<dl class="keys">
+  <dt><kbd>Ctrl</kbd>+<kbd>K</kbd></dt><dd>Find a room (Enter opens the first match, ↓ moves into the list)</dd>
+  <dt><kbd>Alt</kbd>+<kbd>↑</kbd> / <kbd>↓</kbd></dt><dd>Previous / next room</dd>
+  <dt><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>↑</kbd> / <kbd>↓</kbd></dt><dd>Previous / next room with unread messages</dd>
+  <dt><kbd>Ctrl</kbd>+<kbd>F</kbd></dt><dd>Search the open room</dd>
+  <dt><kbd>Ctrl</kbd>+<kbd>,</kbd></dt><dd>Settings</dd>
+  <dt><kbd>Ctrl</kbd>+<kbd>/</kbd></dt><dd>This manual</dd>
+  <dt><kbd>Esc</kbd></dt><dd>Close the topmost menu or dialog; cancel a reply or edit</dd>
+  <dt><kbd>Tab</kbd> into the messages, then <kbd>↑</kbd> / <kbd>↓</kbd></dt><dd>Move between messages (<kbd>Page Up</kbd>/<kbd>Page Down</kbd> ten at a time, <kbd>Home</kbd>/<kbd>End</kbd> to the oldest/newest loaded, <kbd>Esc</kbd> back to the message box); the menu key opens a message's menu</dd>
+  <dt>In the emoji picker</dt><dd><kbd>Enter</kbd> picks the best match, <kbd>↓</kbd> and the arrows move through the grid</dd>
+  <dt>In the image viewer</dt><dd><kbd>+</kbd> / <kbd>−</kbd> zoom, <kbd>0</kbd> fits, <kbd>1</kbd> shows actual pixels</dd>
+</dl>
+
 <h2>Slash commands</h2>
 {#each CATEGORIES as category (category.id)}
   <h3>{category.label}</h3>
@@ -71,11 +85,24 @@
     margin-left: 6px;
     opacity: 0.7;
   }
-  code,
-  kbd {
+  code {
     padding: 1px 5px;
     border-radius: 4px;
     background: var(--bg);
     font: 0.92em ui-monospace, Consolas, monospace;
+  }
+  .keys {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 6px 16px;
+    align-items: baseline;
+  }
+  .keys dt,
+  .keys dd {
+    margin: 0;
+  }
+  .keys dt {
+    font-weight: 400;
+    white-space: nowrap;
   }
 </style>
