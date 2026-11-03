@@ -2,7 +2,7 @@
 // roster. Reads reactive store state, so calling these in a component keeps it
 // up to date as the roster changes.
 
-import type { RoomMember } from './bindings';
+import type { ReplyPreview, RoomMember } from './bindings';
 import { friendlyUserId } from './format';
 import { rooms } from './stores/rooms.svelte';
 
@@ -29,6 +29,16 @@ export function memberMap(roomId: string | null): Map<string, RoomMember> | unde
 export function nameOf(userId: string, roomId: string | null = rooms.selectedId, fallback?: string | null): string {
   const member = memberMap(roomId)?.get(userId);
   return member?.display_name || fallback || friendlyUserId(userId);
+}
+
+/**
+ * Who wrote a quote the server won't hand over, when that is someone this
+ * account ignores: the server hides their messages as if never sent, and the
+ * reply mentions whoever it quotes. Null for every other quote.
+ */
+export function ignoredAuthor(reply: ReplyPreview): string | null {
+  if (!reply.gone) return null;
+  return reply.mentions.find((userId) => rooms.ignored.includes(userId)) ?? null;
 }
 
 export function avatarOf(userId: string, roomId: string | null = rooms.selectedId): string | null {

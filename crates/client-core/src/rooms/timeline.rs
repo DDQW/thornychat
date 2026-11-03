@@ -427,7 +427,7 @@ fn convert_item(item: &SdkTimelineItem, own_user_id: Option<&UserId>) -> Option<
                 SdkTimelineItemContent::MsgLike(msg_like) => (
                     msg_like.thread_root.as_ref().map(|id| id.to_string()),
                     msg_like.thread_summary.as_ref().map(|s| s.num_replies),
-                    msg_like.in_reply_to.as_ref().map(convert_reply_preview),
+                    msg_like.in_reply_to.as_ref().map(|details| convert_reply_preview(details, &msg_like.kind)),
                 ),
                 _ => (None, None, None),
             };
@@ -538,7 +538,15 @@ fn content_is_edited(content: &SdkTimelineItemContent) -> bool {
 /// Flattens the SDK's replied-to details into the small preview the UI
 /// quotes above a reply. Details may legitimately be unavailable (the SDK
 /// lazily loads replied-to events); the UI shows just "↩" + ellipsis then.
-fn convert_reply_preview(details: &InReplyToDetails) -> ReplyPreview {
+/// `reply` is the replying message itself, for the users it mentions.
+fn convert_reply_preview(details: &InReplyToDetails, reply: &MsgLikeKind) -> ReplyPreview {
+    let mentions = match reply {
+        MsgLikeKind::Message(message) => message
+            .mentions()
+            .map(|mentions| mentions.user_ids.iter().map(|id| id.to_string()).collect())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
     let (sender, snippet, image_url, emoticons, timestamp_ms, gone) = match &details.event {
         TimelineDetails::Ready(embedded) => {
             let sender = match &embedded.sender_profile {
@@ -568,7 +576,8 @@ fn convert_reply_preview(details: &InReplyToDetails) -> ReplyPreview {
             )
         }
         // The quoted event is gone for good — redacted or purged server-side,
-        // so the fetch 404s and no amount of waiting will fill this in. Say so,
+        // or from an ignored user (the page names them, from `mentions`), so
+        // the fetch 404s and no amount of waiting will fill this in. Say so,
         // rather than showing the same "…" as a pending fetch and leaving a
         // reply banner that looks like it's loading forever.
         TimelineDetails::Error(error) if quoted_event_is_gone(error) => {
@@ -579,7 +588,7 @@ fn convert_reply_preview(details: &InReplyToDetails) -> ReplyPreview {
         TimelineDetails::Error(_) => (String::new(), "Couldn't load message".to_string(), None, Vec::new(), None, false),
         _ => (String::new(), "…".to_string(), None, Vec::new(), None, false),
     };
-    ReplyPreview { event_id: details.event_id.to_string(), sender, snippet, image_url, emoticons, gone, timestamp_ms }
+    ReplyPreview { event_id: details.event_id.to_string(), sender, snippet, image_url, emoticons, gone, mentions, timestamp_ms }
 }
 
 fn summarize_content(content: &SdkTimelineItemContent, sender: &str) -> String {

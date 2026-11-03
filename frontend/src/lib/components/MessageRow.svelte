@@ -7,7 +7,7 @@
   import { formatDateTime, formatTime, nameHue, plural, truncate } from '../format';
   import { memberMenu } from '../memberMenu';
   import { emojiLoadFailed, plainTextToHtml } from '../richtext';
-  import { avatarOf, memberMap, nameOf } from '../people';
+  import { avatarOf, ignoredAuthor, memberMap, nameOf } from '../people';
   import { composer } from '../stores/composer.svelte';
   import { emoji } from '../stores/emoji.svelte';
   import { settings } from '../stores/settings.svelte';
@@ -62,6 +62,8 @@
       links: false,
     });
   }
+  /** The quote is from someone this account ignores, so it can only name them. */
+  const quotedIgnored = $derived(item.in_reply_to ? ignoredAuthor(item.in_reply_to) : null);
   const canDelete = $derived(eventId !== null && content.type !== 'Redacted' && (mine || canModerate));
 
   const plainText = $derived(content.type === 'Text' || content.type === 'Emote' ? content.data : null);
@@ -158,6 +160,11 @@
   function openSender(event: MouseEvent) {
     ui.showMenu(event, memberMenu(item.sender, name));
   }
+
+  /** On a quote from an ignored user, the menu for that user: it is where "Stop ignoring" is. */
+  function openQuoteMenu(event: MouseEvent) {
+    if (quotedIgnored) ui.showMenu(event, memberMenu(quotedIgnored, nameOf(quotedIgnored, roomId)));
+  }
 </script>
 
 <div
@@ -201,14 +208,23 @@
 
     {#if item.in_reply_to}
       {@const reply = item.in_reply_to}
-      <button class="reply plain" onclick={() => onjump(reply)} title="Jump to the quoted message">
-        {#if reply.image_url}<img class="thumb" src={backend.mediaUrl(reply.image_url)} alt="" loading="lazy" />{/if}
-        <span class="reply-text">
-          <span class="reply-name"><Icon name="reply" size={12} /> {reply.sender || '…'}</span>
-          <!-- eslint-disable-next-line svelte/no-at-html-tags -- escaped text plus images built with DOM APIs (richtext.ts) -->
-          <span class="reply-snippet truncate" onerrorcapture={emojiLoadFailed}>{@html snippetHtml(reply)}</span>
-        </span>
-      </button>
+      {#if quotedIgnored}
+        <button class="reply plain" onclick={() => onjump(reply)} oncontextmenu={openQuoteMenu} title="Right-click to stop ignoring them">
+          <span class="reply-text">
+            <span class="reply-name"><Icon name="reply" size={12} /> {nameOf(quotedIgnored, roomId)}</span>
+            <span class="reply-snippet truncate">Hidden — you're ignoring them</span>
+          </span>
+        </button>
+      {:else}
+        <button class="reply plain" onclick={() => onjump(reply)} title="Jump to the quoted message">
+          {#if reply.image_url}<img class="thumb" src={backend.mediaUrl(reply.image_url)} alt="" loading="lazy" />{/if}
+          <span class="reply-text">
+            <span class="reply-name"><Icon name="reply" size={12} /> {reply.sender || '…'}</span>
+            <!-- eslint-disable-next-line svelte/no-at-html-tags -- escaped text plus images built with DOM APIs (richtext.ts) -->
+            <span class="reply-snippet truncate" onerrorcapture={emojiLoadFailed}>{@html snippetHtml(reply)}</span>
+          </span>
+        </button>
+      {/if}
     {/if}
 
     {#if content.type === 'Text'}

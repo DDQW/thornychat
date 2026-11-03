@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, tick, untrack } from 'svelte';
   import { markRoomRead, paginateBackwards, shrinkTimeline } from '../actions';
-  import { nameOf } from '../people';
+  import { ignoredAuthor, nameOf } from '../people';
   import { buildRows, reuseRows, type Row } from '../timeline/rows';
   import type { ReplyPreview } from '../bindings';
   import { matchesQuery } from '../timeline/search';
@@ -466,6 +466,11 @@
 
   /** A click on a quote. */
   function jumpToQuote(reply: ReplyPreview) {
+    const ignored = ignoredAuthor(reply);
+    if (ignored) {
+      ui.toast(`You're ignoring ${nameOf(ignored)}, so the server hides their messages. Right-click the quote to stop.`, 'info', 4500);
+      return;
+    }
     void jumpTo(reply.event_id, { sentAt: reply.timestamp_ms, maxPages: reply.gone ? GONE_JUMP_PAGES : MAX_JUMP_PAGES });
   }
 

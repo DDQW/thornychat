@@ -18,10 +18,17 @@ image_url: string | null,
  */
 emoticons: Array<InlineEmoticon>, 
 /**
- * The server has no such event (redacted and purged, or never visible to
- * this account): searching the room's history for it can never succeed.
+ * The server has no such event (redacted and purged, never visible to
+ * this account, or sent by someone this account ignores): searching the
+ * room's history for it can never succeed.
  */
 gone: boolean, 
+/**
+ * The users the *reply* mentions (`m.mentions`). Clients mention whoever
+ * they quote, so for a quote that is `gone` this is the only clue to who
+ * wrote it — the server answers 404 for an ignored user's messages.
+ */
+mentions: Array<string>, 
 /**
  * When the quoted message was sent, once its details have loaded — how a
  * jump to it knows it has paged back past where it would be.

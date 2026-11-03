@@ -86,6 +86,9 @@ const ROOMS: RoomSummary[] = [
   room('!lonely:thorny.chat', 'Lonely room'),
 ];
 
+/** The account's ignore list; a reply in General quotes someone on it. */
+const ignored = new Set(['@irc_troll:thorny.chat']);
+
 let counter = 0;
 const nextId = () => `$mock${++counter}:thorny.chat`;
 
@@ -137,7 +140,7 @@ function sampleHistory(now: number): TimelineItem[] {
       '@carol:thorny.chat',
       text('Thanks! That looks lovely.'),
       t(3, 3),
-      { in_reply_to: { event_id: '$img', sender: 'Alice', snippet: '[image: Sunset from the office]', image_url: 'mxc://mock/sunset', emoticons: [], gone: false, timestamp_ms: null } },
+      { in_reply_to: { event_id: '$img', sender: 'Alice', snippet: '[image: Sunset from the office]', image_url: 'mxc://mock/sunset', emoticons: [], gone: false, mentions: [], timestamp_ms: null } },
     ),
     item('@bob:thorny.chat', { type: 'File', data: { url: 'mxc://mock/report', filename: 'quarterly-report.pdf', caption: null } }, t(2)),
     item('@bob:thorny.chat', { type: 'Video', data: { url: 'mxc://mock/clip', filename: 'demo.mp4', caption: 'Demo of the new build', mimetype: 'video/mp4', thumbnail_url: 'mxc://mock/clipthumb' } }, t(2, 1)),
@@ -168,7 +171,7 @@ function sampleHistory(now: number): TimelineItem[] {
     }),
     item('@carol:thorny.chat', text(':thorn_heart:'), t(0, 52), {
       formatted_body: '<img src="mxc://mock/emoji2" alt="thorn_heart" title="thorn_heart" height="32" />',
-      in_reply_to: { event_id: '$notsure', sender: 'Bob Builder', snippet: 'So wait, you guys are gonna play WoW Forever? :NotSure:', image_url: null, emoticons: [{ shortcode: 'NotSure', mxc_url: 'mxc://mock/notsure' }], gone: false, timestamp_ms: null },
+      in_reply_to: { event_id: '$notsure', sender: 'Bob Builder', snippet: 'So wait, you guys are gonna play WoW Forever? :NotSure:', image_url: null, emoticons: [{ shortcode: 'NotSure', mxc_url: 'mxc://mock/notsure' }], gone: false, mentions: [], timestamp_ms: null },
     }),
     // Someone's personal emoji: in no pack this account has, so only the
     // message's own HTML says what :peon_boi: looks like, and the quote of it
@@ -178,19 +181,23 @@ function sampleHistory(now: number): TimelineItem[] {
       formatted_body: 'zug zug <img src="mxc://mock/peon" alt="peon_boi" title="peon_boi" height="32" />',
     }),
     item('@alice:thorny.chat', text('lmao'), t(0, 50), {
-      in_reply_to: { event_id: '$peon', sender: 'Bob Builder', snippet: 'zug zug :peon_boi:', image_url: null, emoticons: [{ shortcode: 'peon_boi', mxc_url: 'mxc://mock/peon' }], gone: false, timestamp_ms: null },
+      in_reply_to: { event_id: '$peon', sender: 'Bob Builder', snippet: 'zug zug :peon_boi:', image_url: null, emoticons: [{ shortcode: 'peon_boi', mxc_url: 'mxc://mock/peon' }], gone: false, mentions: [], timestamp_ms: null },
     }),
     // How this client used to send them: the bare shortcode, no HTML.
     item(ME, text('we could all play a mud :thorn_wave:'), t(0, 50)),
     item('@alice:thorny.chat', text('🫡'), t(0, 48), {
-      in_reply_to: { event_id: '$quoted-older', sender: 'Alice', snippet: 'Older message #19: lorem ipsum dolor sit amet.', image_url: null, emoticons: [], gone: false, timestamp_ms: null },
+      in_reply_to: { event_id: '$quoted-older', sender: 'Alice', snippet: 'Older message #19: lorem ipsum dolor sit amet.', image_url: null, emoticons: [], gone: false, mentions: [], timestamp_ms: null },
     }),
     // A quote the server no longer has, and one whose message the room doesn't show (hours back).
     item('@bob:thorny.chat', text('Anyone remember what that was?'), t(0, 47), {
-      in_reply_to: { event_id: '$deleted', sender: '', snippet: 'Message unavailable', image_url: null, emoticons: [], gone: true, timestamp_ms: null },
+      in_reply_to: { event_id: '$deleted', sender: '', snippet: 'Message unavailable', image_url: null, emoticons: [], gone: true, mentions: [], timestamp_ms: null },
+    }),
+    // A reply to someone this account ignores: the server 404s their messages, and the reply mentions them.
+    item('@carol:thorny.chat', text('15 bucks a month'), t(0, 47), {
+      in_reply_to: { event_id: '$from-ignored', sender: '', snippet: 'Message unavailable', image_url: null, emoticons: [], gone: true, mentions: ['@irc_troll:thorny.chat'], timestamp_ms: null },
     }),
     item('@alice:thorny.chat', text('It was in the other thread.'), t(0, 46), {
-      in_reply_to: { event_id: '$hidden-far', sender: 'Carol', snippet: 'a state change nobody sees', image_url: null, emoticons: [], gone: false, timestamp_ms: now - 5 * 3_600_000 },
+      in_reply_to: { event_id: '$hidden-far', sender: 'Carol', snippet: 'a state change nobody sees', image_url: null, emoticons: [], gone: false, mentions: [], timestamp_ms: now - 5 * 3_600_000 },
     }),
     item('@bob:thorny.chat', { type: 'Sticker', data: { url: 'mxc://mock/goblin', body: 'happy_goblin_merchant', width: 512, height: 489 } }, t(0, 45)),
     item('@carol:thorny.chat', { type: 'Redacted' }, t(0, 40)),
@@ -223,7 +230,7 @@ function syntheticHistory(count: number, now: number): TimelineItem[] {
       case 8:
         return item(sender, text(lines[i % lines.length]!), at, { reactions: [{ key: '👍', count: 2, reacted_by_me: false, senders: senders.slice(0, 2) }], read_by: [senders[2]!] });
       default:
-        return item(sender, text(lines[i % lines.length]!), at, i % 10 === 5 ? { in_reply_to: { event_id: '$x', sender: 'Alice', snippet: 'an earlier message', image_url: null, emoticons: [], gone: false, timestamp_ms: null } } : {});
+        return item(sender, text(lines[i % lines.length]!), at, i % 10 === 5 ? { in_reply_to: { event_id: '$x', sender: 'Alice', snippet: 'an earlier message', image_url: null, emoticons: [], gone: false, mentions: [], timestamp_ms: null } } : {});
     }
   });
   return [item('', { type: 'DateDivider' }, messages[0]?.timestamp_ms ?? now), ...messages];
@@ -326,7 +333,7 @@ export function createMockBackend(): Backend {
       emit({ type: 'SpaceChildrenFetched', data: { space_id: '!hq:thorny.chat', children: ['!general:thorny.chat', '!dev:thorny.chat', '!random:thorny.chat'] } });
       emit({ type: 'RoomNotificationModesUpdated', data: [['!random:thorny.chat', 'Mute']] });
       emit({ type: 'DefaultNotificationModesUpdated', data: { direct_messages: 'AllMessages', group_chats: 'MentionsAndKeywordsOnly' } });
-      emit({ type: 'IgnoredUsersUpdated', data: [] });
+      emit({ type: 'IgnoredUsersUpdated', data: [...ignored] });
       emit({
         type: 'CustomEmojiPacksUpdated',
         data: [
@@ -453,7 +460,7 @@ export function createMockBackend(): Backend {
         const { room_id, body, request_id, emote, reply_to_event_id } = command.data;
         const echo = item(ME, emote ? { type: 'Emote', data: body } : text(body), Date.now(), {
           event_id: null,
-          in_reply_to: reply_to_event_id ? { event_id: reply_to_event_id, sender: 'Someone', snippet: 'a message', image_url: null, emoticons: [], gone: false, timestamp_ms: null } : null,
+          in_reply_to: reply_to_event_id ? { event_id: reply_to_event_id, sender: 'Someone', snippet: 'a message', image_url: null, emoticons: [], gone: false, mentions: [], timestamp_ms: null } : null,
         });
         const list = timelines.get(room_id) ?? [];
         timelines.set(room_id, [...list, echo]);
@@ -587,8 +594,6 @@ export function createMockBackend(): Backend {
       case 'KickUser':
       case 'BanUser':
       case 'UnbanUser':
-      case 'IgnoreUser':
-      case 'UnignoreUser':
       case 'SetRoomTopic':
       case 'SetDisplayName':
       case 'SetRoomNotificationMode':
@@ -597,6 +602,16 @@ export function createMockBackend(): Backend {
       case 'JoinCall':
       case 'LeaveCall':
       case 'SendSticker':
+        ok(command.data.request_id);
+        break;
+      case 'IgnoreUser':
+        ignored.add(command.data.user_id);
+        emit({ type: 'IgnoredUsersUpdated', data: [...ignored] });
+        ok(command.data.request_id);
+        break;
+      case 'UnignoreUser':
+        ignored.delete(command.data.user_id);
+        emit({ type: 'IgnoredUsersUpdated', data: [...ignored] });
         ok(command.data.request_id);
         break;
       case 'OpenDirectMessage':
