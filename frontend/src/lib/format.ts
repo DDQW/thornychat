@@ -40,12 +40,18 @@ export function hashString(text: string): number {
 }
 
 /**
- * The hue (0-359) a user's name is drawn in. The same id always gets the same
- * hue, on every device; lightness/saturation come from the theme so the result
- * stays legible on dark and light backgrounds alike.
+ * OKLCH hues a user can be given. Yellow-green (roughly 80-130) is left out:
+ * at an avatar's middle lightness it comes out olive and mustard.
+ */
+const NAME_HUES = [0, 20, 40, 145, 165, 190, 215, 240, 265, 290, 315, 340] as const;
+
+/**
+ * The OKLCH hue a user's name and avatar are drawn in. The same id always gets
+ * the same hue, on every device; lightness/chroma come from the theme so the
+ * result stays legible on dark and light backgrounds alike.
  */
 export function nameHue(userId: string): number {
-  return hashString(userId) % 360;
+  return NAME_HUES[hashString(userId) % NAME_HUES.length]!;
 }
 
 export function formatTime(timestampMs: number): string {

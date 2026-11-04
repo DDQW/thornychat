@@ -107,7 +107,7 @@
     {:else}
       {#if model.spaces.length > 0}
         <section>
-          <h2>Spaces</h2>
+          <h2 class="eyebrow">Spaces</h2>
           {#each model.spaces as node (node.space.room_id)}
             {#if model.filtered}
               <RoomItem room={node.space} />
@@ -120,14 +120,14 @@
 
       {#if model.directMessages.length > 0}
         <section>
-          <h2>Direct messages</h2>
+          <h2 class="eyebrow">Direct messages</h2>
           {#each model.directMessages as room (room.room_id)}<RoomItem {room} />{/each}
         </section>
       {/if}
 
       {#if model.rooms.length > 0}
         <section>
-          <h2>Rooms</h2>
+          <h2 class="eyebrow">Rooms</h2>
           {#each model.rooms as room (room.room_id)}<RoomItem {room} />{/each}
         </section>
       {/if}
@@ -144,18 +144,18 @@
 <style>
   .sidebar {
     display: flex;
+    flex: none;
     flex-direction: column;
     width: var(--sidebar-width);
     min-height: 0;
-    border-right: 1px solid var(--border);
     background: var(--surface);
   }
   .profile {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-2);
     height: var(--header-height);
-    padding: 0 8px 0 12px;
+    padding: 0 var(--space-2) 0 var(--space-3);
     border-bottom: 1px solid var(--border);
   }
   .who {
@@ -163,6 +163,10 @@
   }
   .display {
     font-weight: 600;
+  }
+  .who .small {
+    display: flex;
+    align-items: center;
   }
   .dot {
     display: inline-block;
@@ -185,7 +189,7 @@
     position: relative;
     display: flex;
     align-items: center;
-    margin: 8px;
+    margin: var(--space-3) var(--space-2) var(--space-1);
     color: var(--muted);
   }
   .filter :global(svg) {
@@ -195,6 +199,8 @@
   }
   .filter .input {
     padding-left: 30px;
+    border-color: transparent;
+    background: var(--surface-strong);
   }
   /* The search field's own clear button: Escape does the same. */
   .filter .input::-webkit-search-cancel-button {
@@ -203,16 +209,11 @@
   }
   .lists {
     flex: 1 1 auto;
-    padding: 0 6px 12px;
+    padding: 0 var(--space-2) var(--space-3);
     overflow-y: auto;
   }
   h2 {
-    margin: 12px 6px 4px;
-    color: var(--muted);
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+    padding: var(--space-4) var(--space-2) 6px;
   }
   .pad {
     padding: 12px 8px;

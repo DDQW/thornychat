@@ -43,9 +43,10 @@ describe('nameHue', () => {
     }
   });
 
-  it('spreads different users across the wheel', () => {
+  it('spreads different users across the wheel, past the olive tones', () => {
     const hues = new Set(Array.from({ length: 40 }, (_, i) => nameHue(`@user${i}:server`)));
-    expect(hues.size).toBeGreaterThan(20);
+    expect(hues.size).toBeGreaterThanOrEqual(10);
+    for (const hue of hues) expect(hue < 80 || hue > 130).toBe(true);
   });
 
   it('matches the reference FNV-1a values', () => {

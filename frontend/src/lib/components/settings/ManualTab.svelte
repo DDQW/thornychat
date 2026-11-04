@@ -35,7 +35,7 @@
 
 <h2>Slash commands</h2>
 {#each CATEGORIES as category (category.id)}
-  <h3>{category.label}</h3>
+  <h3 class="eyebrow">{category.label}</h3>
   <dl>
     {#each COMMANDS.filter((command) => command.category === category.id) as command (command.name)}
       <dt>
@@ -52,11 +52,7 @@
 
 <style>
   h3 {
-    margin: 14px 0 4px;
-    color: var(--muted);
-    font-size: 11px;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
+    margin: var(--space-4) 0 var(--space-1);
   }
   .tips {
     margin: 4px 0;

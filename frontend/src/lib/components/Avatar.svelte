@@ -37,13 +37,16 @@
 </span>
 
 <style>
+  /* The placeholder: the person's hue at one lightness for every hue
+     (OKLCH), with white initials that read on all of them. */
   .avatar {
     display: inline-grid;
     flex: 0 0 auto;
     place-items: center;
-    background: hsl(var(--hue) 35% 32%);
-    color: hsl(var(--hue) 70% 90%);
+    background: oklch(56% 0.12 var(--hue));
+    color: #fff;
     font-weight: 600;
+    letter-spacing: 0.01em;
     overflow: hidden;
     user-select: none;
   }
@@ -54,5 +57,9 @@
     width: 100%;
     height: 100%;
     object-fit: cover;
+  }
+  /* A picture with a white or black edge still has an outline on either theme. */
+  .avatar:has(img) {
+    box-shadow: inset 0 0 0 1px rgb(127 127 127 / 0.2);
   }
 </style>

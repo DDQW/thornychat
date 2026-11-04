@@ -78,12 +78,14 @@
   .item {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     width: 100%;
-    padding: 5px 10px;
+    min-height: 36px;
+    padding: 4px 8px;
     border: 0;
     border-radius: var(--radius-sm);
     background: transparent;
+    color: color-mix(in srgb, var(--text), var(--muted) 35%);
     text-align: left;
   }
   .item:hover {
@@ -91,6 +93,10 @@
   }
   .item.active {
     background: var(--surface-strong);
+    color: var(--text);
+  }
+  .item.active .name {
+    font-weight: 600;
   }
   .item:focus-visible {
     outline-offset: -2px;
@@ -110,7 +116,8 @@
     font-weight: 400;
   }
   .name.unread {
-    font-weight: 700;
+    color: var(--text);
+    font-weight: 650;
   }
   .meta {
     display: inline-flex;

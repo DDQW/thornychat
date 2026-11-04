@@ -186,19 +186,23 @@
   }
   header {
     display: flex;
+    flex: none;
     align-items: center;
-    gap: 10px;
+    gap: var(--space-3);
     height: var(--header-height);
-    padding: 0 12px 0 16px;
+    padding: 0 var(--space-3) 0 var(--space-5);
     border-bottom: 1px solid var(--border);
-    background: var(--surface);
   }
   .titles {
     line-height: 1.25;
   }
   h1 {
     margin: 0;
-    font-size: 15px;
+    font-size: var(--text-lg);
+    font-weight: 650;
+  }
+  .topic {
+    margin-top: 1px;
   }
   .lock {
     margin-right: 5px;
@@ -207,10 +211,9 @@
   .search {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 6px 16px;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-5);
     border-bottom: 1px solid var(--border);
-    background: var(--surface);
     color: var(--muted);
   }
   .nowrap {
@@ -218,7 +221,8 @@
   }
   .typing {
     min-height: 20px;
-    padding: 0 20px;
+    padding: 0 var(--space-5);
+    font-style: italic;
   }
   .drop {
     position: absolute;

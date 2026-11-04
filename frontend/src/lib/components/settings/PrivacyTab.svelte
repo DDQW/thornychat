@@ -7,8 +7,8 @@
 
 {#if value}
   <h2>Privacy</h2>
-  <p class="muted small">A fresh install tells other people nothing about you until you opt in.</p>
-  <div class="divided">
+  <p class="section-hint">A fresh install tells other people nothing about you until you opt in.</p>
+  <div class="group">
     <SettingToggle
       title="Send read receipts"
       hint="Let others see which message you've read, and when. When off, your read position still advances on your own devices (so unread badges clear) but is never shared."

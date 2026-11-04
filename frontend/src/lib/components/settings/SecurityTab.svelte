@@ -26,8 +26,8 @@
 
 {#if value}
   <h2>New conversations</h2>
-  <p class="muted small">Encryption is fixed when a room is created, so these only affect conversations you start from now on.</p>
-  <div class="divided">
+  <p class="section-hint">Encryption is fixed when a room is created, so these only affect conversations you start from now on.</p>
+  <div class="group">
     <SettingToggle title="Encrypt new direct messages" hint="End-to-end encrypt DMs this client creates." checked={value.encryption.encrypt_direct_messages} onchange={(on) => settings.update((d) => (d.encryption.encrypt_direct_messages = on))} />
     <SettingToggle title="Encrypt new rooms" hint="End-to-end encrypt rooms this client creates." checked={value.encryption.encrypt_rooms} onchange={(on) => settings.update((d) => (d.encryption.encrypt_rooms = on))} />
   </div>
@@ -37,7 +37,7 @@
     <p class="muted small">A verification is in progress — see the banner at the top of the window.</p>
   {:else}
     <p class="muted small">Verify another session or a contact so they show as trusted. Leave the field blank to verify this device.</p>
-    <form class="row" onsubmit={(e) => { e.preventDefault(); security.startVerification(verifyId); }}>
+    <form class="row card" onsubmit={(e) => { e.preventDefault(); security.startVerification(verifyId); }}>
       <input class="input" placeholder="@user:server (blank = verify this device)" bind:value={verifyId} spellcheck="false" aria-label="User to verify" />
       <button class="btn primary" type="submit">Verify</button>
     </form>
@@ -59,7 +59,7 @@
       ThornyChat never prompts for a recovery key on its own. Enter yours here when you want to read older encrypted messages on this device.
       {#if security.needsRecovery}<strong>This device is missing some keys — your recovery key would restore them.</strong>{/if}
     </p>
-    <form class="row" onsubmit={unlock}>
+    <form class="row card" onsubmit={unlock}>
       <input class="input" type="password" placeholder="Recovery key or passphrase" bind:value={recoveryInput} autocomplete="off" aria-label="Recovery key or passphrase" />
       <button class="btn primary" type="submit" disabled={security.restoreBusy || !recoveryInput.trim()}>Unlock</button>
     </form>
@@ -99,5 +99,11 @@
   }
   .success {
     color: var(--success);
+  }
+  form.card {
+    margin: var(--space-2) 0;
+  }
+  .card p {
+    margin: 0;
   }
 </style>

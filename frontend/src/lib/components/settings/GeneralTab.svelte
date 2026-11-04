@@ -75,34 +75,41 @@
 
 {#if value}
   <h2>Account</h2>
-  <dl class="info">
-    <dt>User ID</dt><dd>{session.info?.user_id ?? '—'}</dd>
-    <dt>Homeserver</dt><dd>{session.info?.homeserver ?? '—'}</dd>
-    <dt>Device ID</dt><dd>{session.info?.device_id ?? '—'}</dd>
-  </dl>
-  {#if confirmSignOut}
-    <div class="row">
-      <span>Sign out of {session.info?.user_id ?? 'this account'}?</span>
-      <button class="btn danger small" onclick={() => session.logout()} disabled={session.signingOut}>Yes, sign out</button>
-      <button class="btn small" onclick={() => (confirmSignOut = false)}>No</button>
-    </div>
-  {:else}
-    <button class="btn small" onclick={() => (confirmSignOut = true)}>Sign out</button>
-  {/if}
+  <div class="group">
+    <dl class="info">
+      <dt>User ID</dt><dd>{session.info?.user_id ?? '—'}</dd>
+      <dt>Homeserver</dt><dd>{session.info?.homeserver ?? '—'}</dd>
+      <dt>Device ID</dt><dd>{session.info?.device_id ?? '—'}</dd>
+    </dl>
+    {#if confirmSignOut}
+      <div class="row wrap">
+        <span class="grow">Sign out of {session.info?.user_id ?? 'this account'}?</span>
+        <button class="btn small" onclick={() => (confirmSignOut = false)}>Cancel</button>
+        <button class="btn danger small" onclick={() => session.logout()} disabled={session.signingOut}>Sign out</button>
+      </div>
+    {:else}
+      <div class="row"><button class="btn small danger" onclick={() => (confirmSignOut = true)}>Sign out…</button></div>
+    {/if}
+  </div>
 
   <h2>Startup</h2>
+  <div class="group">
   <SettingToggle title="Start with Windows" hint="Launch ThornyChat minimized when you sign in to Windows." checked={autostart} onchange={setAutostart} />
+  </div>
   {#if autostartError}<p class="error-text small">{autostartError}</p>{/if}
 
   <h2>Timeline</h2>
+  <div class="group">
   <SettingToggle
     title="Show join, leave and invite messages"
     hint="Membership changes as compact lines in the timeline. Turn off in rooms bridged to IRC, where join/leave churn is constant."
     checked={value.chat.show_membership_events}
     onchange={(on) => settings.update((d) => (d.chat.show_membership_events = on))}
   />
+  </div>
 
   <h2>Spelling</h2>
+  <div class="group">
   <SettingToggle
     title="Check spelling"
     hint="Underline misspelled words as you type, using the Windows speller and your personal dictionary. Click into a marked word, or right-click it, for suggestions."
@@ -121,8 +128,10 @@
       {spelling.status.available ? `Dictionary: ${spelling.status.language ?? 'the Windows default'}, from your Windows language settings.` : "The Windows speller isn't available on this PC, so nothing is checked."}
     </p>
   {/if}
+  </div>
 
   <h2>Diagnostics</h2>
+  <div class="group">
   <div class="setting">
     <div class="what">
       <label for="log-level">How much to log</label>
@@ -143,9 +152,10 @@
     {/if}
   </div>
   {#if logNote}<p class="muted small" role="status">{logNote}</p>{/if}
+  </div>
 
   <h2>About</h2>
-  <p class="muted small">ThornyChat {session.app?.version ?? ''}{session.app?.profile && session.app.profile !== 'default' ? ` — profile “${session.app.profile}”` : ''}. Licensed GPL-3.0-or-later.</p>
+  <p class="section-hint">ThornyChat {session.app?.version ?? ''}{session.app?.profile && session.app.profile !== 'default' ? ` — profile “${session.app.profile}”` : ''}. Licensed GPL-3.0-or-later.</p>
   <button class="btn small ghost" onclick={() => ui.openSettings('manual')}>Read the manual</button>
 {/if}
 
@@ -153,12 +163,11 @@
   .info {
     display: grid;
     grid-template-columns: 110px 1fr;
-    gap: 4px 12px;
-    margin: 8px 0 12px;
+    gap: 6px 12px;
   }
   dt {
     color: var(--muted);
-    font-size: 12px;
+    font-size: var(--text-md);
   }
   dd {
     margin: 0;

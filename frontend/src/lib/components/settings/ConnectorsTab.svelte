@@ -7,11 +7,11 @@
 
 {#if value}
   <h2>Connectors</h2>
-  <p class="muted small">
+  <p class="section-hint">
     Watch your game launchers and post an action line like <code>* you plays Half-Life</code> into the room you're looking at when the game you're playing changes.
     Everything is off until you turn it on, because this shares what you're doing with other people.
   </p>
-  <div class="divided">
+  <div class="group">
     <SettingToggle title="Steam" hint="Detects the running Steam game." checked={value.connectors.steam_enabled} onchange={(on) => settings.update((d) => (d.connectors.steam_enabled = on))} />
     <SettingToggle title="GOG Galaxy" hint="Matches running processes against your installed GOG games." checked={value.connectors.gog_enabled} onchange={(on) => settings.update((d) => (d.connectors.gog_enabled = on))} />
     <SettingToggle title="Epic Games" hint="Matches running processes against your installed Epic games." checked={value.connectors.epic_enabled} onchange={(on) => settings.update((d) => (d.connectors.epic_enabled = on))} />

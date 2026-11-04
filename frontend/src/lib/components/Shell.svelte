@@ -63,6 +63,7 @@
       <RoomView room={rooms.selected} />
     {:else}
       <div class="empty">
+        <img class="mark" src="/logo.svg" alt="" width="88" height="88" />
         <h1>ThornyChat</h1>
         <p class="muted">
           {#if rooms.listLoaded && rooms.list.length === 0}
@@ -105,8 +106,16 @@
     padding: 24px;
     text-align: center;
   }
+  .mark {
+    margin-bottom: var(--space-4);
+    opacity: 0.9;
+  }
   h1 {
-    margin: 0 0 8px;
-    font-size: 28px;
+    margin: 0 0 var(--space-2);
+    font-size: var(--text-2xl);
+  }
+  .empty p {
+    max-width: 420px;
+    margin: 0 0 var(--space-2);
   }
 </style>

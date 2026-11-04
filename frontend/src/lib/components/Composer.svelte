@@ -546,6 +546,12 @@
     });
   });
 
+  const roomLabel = $derived.by(() => {
+    const room = rooms.byId.get(roomId);
+    if (!room) return '…';
+    return room.is_dm ? room.name : `#${room.name}`;
+  });
+
   const canSend = $derived(!busy && (text.trim().length > 0 || staged.length > 0));
 </script>
 
@@ -627,7 +633,7 @@
         bind:this={textarea}
         bind:value={text}
         rows="1"
-        placeholder={staged.length ? 'Add a caption…' : 'Message… (@mention, markdown supported, / for commands)'}
+        placeholder={staged.length ? 'Add a caption…' : `Message ${roomLabel}`}
         spellcheck={spellOn && spelling.status?.available === false}
         aria-label="Message"
         aria-autocomplete="list"
@@ -661,29 +667,29 @@
 <style>
   .composer {
     position: relative;
-    padding: 0 16px 14px;
+    padding: 0 var(--space-5) var(--space-4);
   }
   .context {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 6px 10px;
+    gap: var(--space-2);
+    padding: 4px 6px 4px 12px;
     border: 1px solid var(--border);
     border-bottom: 0;
-    border-radius: var(--radius) var(--radius) 0 0;
-    background: var(--surface);
-    font-size: 12px;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    background: var(--surface-raised);
+    font-size: var(--text-md);
   }
   .chips {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 8px;
-    padding: 8px;
+    gap: var(--space-2);
+    padding: var(--space-2);
     border: 1px solid var(--border);
     border-bottom: 0;
-    border-radius: var(--radius) var(--radius) 0 0;
-    background: var(--surface);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    background: var(--surface-raised);
   }
   .chip {
     display: flex;
@@ -731,11 +737,13 @@
   .bar {
     display: flex;
     align-items: flex-end;
-    gap: 4px;
+    gap: var(--space-1);
     padding: 6px;
     border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border-radius: var(--radius-lg);
     background: var(--surface);
+    box-shadow: var(--shadow-sm);
+    transition: border-color 0.12s var(--ease), box-shadow 0.12s var(--ease);
   }
   .bar:focus-within {
     border-color: var(--accent);
@@ -744,7 +752,7 @@
   .context + .bar,
   .chips + .bar,
   .preview + .bar {
-    border-radius: 0 0 var(--radius) var(--radius);
+    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
   }
   .spell {
     flex-wrap: wrap;
@@ -759,6 +767,7 @@
     top: 0;
     left: 0;
     padding: 6px 4px;
+    font-size: var(--text-message);
     overflow: hidden;
     color: transparent;
     line-height: 1.4;
@@ -784,6 +793,7 @@
     max-height: 40vh;
     min-height: 32px;
     padding: 6px 4px;
+    font-size: var(--text-message);
     border: 0;
     background: transparent;
     outline: none;

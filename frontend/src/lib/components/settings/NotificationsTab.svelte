@@ -20,8 +20,9 @@
 </script>
 
 <h2>Default notifications</h2>
-<p class="muted small">What a room follows when you haven't chosen anything for it. Changes sync with your other devices.</p>
+<p class="section-hint">What a room follows when you haven't chosen anything for it. Changes sync with your other devices.</p>
 
+<div class="group">
 <div class="setting">
   <div class="what"><label for="dm-default">Direct messages</label></div>
   <select id="dm-default" class="select fit" value={rooms.defaultModes.direct_messages} onchange={(e) => change('DirectMessages', e.currentTarget.value as NotificationMode)}>
@@ -34,9 +35,10 @@
     {#each MODES as mode (mode.id)}<option value={mode.id}>{mode.label}</option>{/each}
   </select>
 </div>
+</div>
 
 <h2>Per room</h2>
-<p class="muted small">Right-click a room in the sidebar to mute it or change how it notifies you.</p>
+<p class="section-hint">Right-click a room in the sidebar to mute it or change how it notifies you.</p>
 
 <style>
   .fit {

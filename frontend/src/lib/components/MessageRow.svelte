@@ -191,7 +191,7 @@
 >
   <div class="gutter">
     {#if !continuation && content.type !== 'Emote'}
-      <button class="plain" onclick={openSender} aria-label="{name}: user menu"><Avatar src={avatar} {name} seed={item.sender} size={36} /></button>
+      <button class="plain" onclick={openSender} aria-label="{name}: user menu"><Avatar src={avatar} {name} seed={item.sender} size={40} /></button>
     {:else}
       <time class="stamp" title={when}>{formatTime(item.timestamp_ms)}</time>
     {/if}
@@ -326,11 +326,12 @@
   .msg {
     position: relative;
     display: flex;
-    gap: 12px;
-    padding: 6px 16px 6px 12px;
+    gap: var(--space-3);
+    padding: 2px var(--space-5) 2px var(--space-4);
   }
   .msg:not(.continuation) {
-    margin-top: 8px;
+    margin-top: var(--space-3);
+    padding-top: 6px;
   }
   .msg:hover,
   .msg:focus-visible,
@@ -378,8 +379,9 @@
   .stamp {
     visibility: hidden;
     color: var(--muted);
-    font-size: 10px;
-    line-height: 20px;
+    font-size: var(--text-xs);
+    line-height: 22px;
+    font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
   .msg:hover .stamp,
@@ -394,7 +396,15 @@
   .head {
     display: flex;
     align-items: baseline;
-    gap: 8px;
+    gap: var(--space-2);
+    line-height: 1.35;
+  }
+  .head .name {
+    font-size: var(--text-message);
+  }
+  .head time {
+    font-size: var(--text-sm);
+    font-variant-numeric: tabular-nums;
   }
   .plain {
     padding: 0;
@@ -416,7 +426,8 @@
     color: var(--muted);
   }
   .content {
-    line-height: 1.45;
+    font-size: var(--text-message);
+    line-height: 1.5;
   }
   .content.emote {
     display: flex;
@@ -515,15 +526,15 @@
   }
   .actions {
     position: absolute;
-    top: -14px;
-    right: 16px;
+    top: -16px;
+    right: var(--space-5);
     display: flex;
     align-items: center;
     gap: 2px;
-    padding: 2px 4px;
+    padding: 2px;
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     background: var(--surface-strong);
-    box-shadow: 0 4px 14px rgb(0 0 0 / 0.3);
+    box-shadow: var(--shadow-md);
   }
 </style>

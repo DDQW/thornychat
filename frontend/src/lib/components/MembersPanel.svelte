@@ -6,7 +6,6 @@
   import { settings } from '../stores/settings.svelte';
   import { session } from '../stores/session.svelte';
   import { ui } from '../stores/ui.svelte';
-  import { plural } from '../format';
   import Avatar from './Avatar.svelte';
 
   interface Props {
@@ -47,7 +46,8 @@
 
 <aside class="members" aria-label="Members">
   <header>
-    <span class="grow">{plural(members.length, 'member')}</span>
+    <span class="grow">Members</span>
+    <span class="count">{members.length.toLocaleString()}</span>
   </header>
   {#if members.length > 12}
     <input class="input filter" placeholder="Find a member" bind:value={filter} spellcheck="false" aria-label="Find a member" />
@@ -56,7 +56,7 @@
     <div class="list" style:height="{roster.height}px">
       {#each visible as row (row.key)}
         {#if row.kind === 'header'}
-          <h3 style:top="{row.top}px" style:color={tagColor(row.group.color, dark)}>{row.group.name} — {row.group.members.length}</h3>
+          <h3 class="eyebrow" style:top="{row.top}px" style:color={tagColor(row.group.color, dark)}>{row.group.name} — {row.group.members.length}</h3>
         {:else}
           {@const member = row.member}
           <button
@@ -80,27 +80,38 @@
 <style>
   .members {
     display: flex;
+    flex: none;
     flex-direction: column;
     width: var(--members-width);
     min-height: 0;
-    border-left: 1px solid var(--border);
     background: var(--surface);
   }
   header {
     display: flex;
     align-items: center;
+    gap: var(--space-2);
     height: var(--header-height);
-    padding: 0 14px;
+    padding: 0 var(--space-4);
     border-bottom: 1px solid var(--border);
     font-weight: 600;
   }
+  .count {
+    padding: 1px 7px;
+    border-radius: 9px;
+    background: var(--surface-strong);
+    color: var(--muted);
+    font-size: var(--text-sm);
+    font-variant-numeric: tabular-nums;
+  }
   .filter {
     width: auto;
-    margin: 8px 8px 0;
+    margin: var(--space-3) var(--space-2) 0;
+    border-color: transparent;
+    background: var(--surface-strong);
   }
   .scroll {
     flex: 1 1 auto;
-    padding: 0 6px 12px;
+    padding: 0 var(--space-2) var(--space-3);
     overflow-y: auto;
   }
   .list {
@@ -115,22 +126,16 @@
   }
   h3 {
     height: 32px;
-    margin: 0;
-    padding: 14px 6px 4px;
+    padding: 14px var(--space-2) 4px;
     overflow: hidden;
-    color: var(--muted);
     white-space: nowrap;
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
   }
   .member {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     height: 36px;
-    padding: 4px 8px;
+    padding: 4px var(--space-2);
     border: 0;
     border-radius: var(--radius-sm);
     background: transparent;

@@ -100,7 +100,7 @@
   </div>
 
   <h2>Colours</h2>
-  <div class="colors">
+  <div class="colors group">
     {#each ROLES as role (role.id)}
       <div class="color">
         <input id="color-{role.id}" type="color" value={theme[role.id].slice(0, 7)} oninput={(e) => setColor(role.id, e.currentTarget.value)} />
@@ -122,6 +122,7 @@
   {/if}
 
   <h2>Type and density</h2>
+  <div class="group">
   <div class="setting">
     <div class="what"><label for="font">Font family</label><div class="hint">Leave empty for the system font. Use a font installed on this PC.</div></div>
     <input
@@ -140,6 +141,8 @@
   <div class="setting">
     <div class="what"><label for="radius">Corner radius: {Math.round(theme.corner_radius)}px</label></div>
     <input id="radius" type="range" min="0" max="16" step="1" value={theme.corner_radius} aria-valuetext="{Math.round(theme.corner_radius)} pixels" oninput={(e) => settings.update((d) => (d.theme.corner_radius = Number(e.currentTarget.value)))} />
+  </div>
+
   </div>
 
   <h2>Share</h2>
@@ -171,7 +174,13 @@
   .colors {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-    gap: 8px 16px;
+    gap: var(--space-2) var(--space-4);
+    padding: var(--space-3) var(--space-4);
+  }
+  /* A grid, not a list of rows: no hairlines between its cells. */
+  .colors.group.group > * {
+    padding: 0;
+    border-top: 0;
   }
   .color {
     display: flex;

@@ -53,6 +53,7 @@
     display: flex;
     align-items: center;
     gap: 2px;
+    min-height: 36px;
     padding-right: 2px;
   }
   .small-btn {

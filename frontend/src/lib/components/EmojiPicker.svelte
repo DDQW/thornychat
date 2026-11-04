@@ -212,7 +212,7 @@
   <div class="scroll" id="picker-panel" role={stickers ? 'tabpanel' : 'group'} aria-label={stickers ? undefined : 'Emoji'} bind:this={scroll} onkeydown={ongridkeydown}>
     {#if tab === 'stickers'}
       {#each stickerPacks as pack (pack.name)}
-        <h3>{pack.name}</h3>
+        <h3 class="eyebrow">{pack.name}</h3>
         <div class="grid stickers">
           {#each pack.emojis as sticker (sticker.mxc_url)}
             <button tabindex="-1" class="cell sticker" title={sticker.shortcode} onclick={() => pickSticker({ url: sticker.mxc_url, body: sticker.shortcode, width: sticker.width, height: sticker.height })}>
@@ -222,7 +222,7 @@
         </div>
       {/each}
       {#if emojiStore.stickers.length > 0}
-        <h3>Your collection</h3>
+        <h3 class="eyebrow">Your collection</h3>
         <div class="grid stickers">
           {#each emojiStore.stickers as sticker (sticker.url)}
             <button tabindex="-1" class="cell sticker" title={sticker.body} onclick={() => pickSticker(sticker)}>
@@ -236,7 +236,7 @@
       {/if}
     {:else if query.trim()}
       {#if customResults.length > 0}
-        <h3>Custom</h3>
+        <h3 class="eyebrow">Custom</h3>
         <div class="grid">
           {#each customResults as custom (custom.mxc_url)}
             <button tabindex="-1" class="cell" title=":{custom.shortcode}:" onclick={() => pickCustom(custom)}><img class="custom" src={backend.mediaUrl(custom.mxc_url)} alt={custom.shortcode} loading="lazy" /></button>
@@ -254,7 +254,7 @@
       {/if}
     {:else}
       {#if frequent.length > 0}
-        <h3>Frequently used</h3>
+        <h3 class="eyebrow">Frequently used</h3>
         <div class="grid">
           {#each frequent as pick (pick.kind === 'unicode' ? pick.char : pick.kind === 'custom' ? pick.emoji.mxc_url : '')}
             {#if pick.kind === 'unicode'}
@@ -266,7 +266,7 @@
         </div>
       {/if}
       {#each customEmoji as pack (pack.name)}
-        <h3>{pack.name}</h3>
+        <h3 class="eyebrow">{pack.name}</h3>
         <div class="grid">
           {#each pack.emojis as custom (custom.mxc_url)}
             <button tabindex="-1" class="cell" title=":{custom.shortcode}:" onclick={() => pickCustom(custom)}><img class="custom" src={backend.mediaUrl(custom.mxc_url)} alt={custom.shortcode} loading="lazy" /></button>
@@ -275,7 +275,7 @@
       {/each}
       {#if data}
         {#each data.categories as category (category.key)}
-          <h3>{category.label}</h3>
+          <h3 class="eyebrow">{category.label}</h3>
           <div class="grid section">
             {#each category.emojis as unicode (unicode.hexcode)}
               <button tabindex="-1" class="cell" title={unicode.label} onclick={() => pickUnicode(unicode.char)}><Twemoji char={unicode.char} size={26} /></button>
@@ -298,9 +298,11 @@
     display: flex;
     flex-direction: column;
     border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border-radius: var(--radius-lg);
     background: var(--surface);
-    box-shadow: 0 16px 48px rgb(0 0 0 / 0.5);
+    box-shadow: var(--shadow-lg);
+    overflow: hidden;
+    animation: fade 0.1s var(--ease);
   }
   .top {
     display: grid;
@@ -337,14 +339,8 @@
     position: sticky;
     top: 0;
     z-index: 1;
-    margin: 0;
     padding: 8px 2px 4px;
     background: var(--surface);
-    color: var(--muted);
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
   }
   .grid {
     display: grid;

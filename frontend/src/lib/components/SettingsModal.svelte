@@ -90,21 +90,22 @@
   }
   .tabs {
     display: flex;
-    flex: 0 0 180px;
+    flex: 0 0 196px;
     flex-direction: column;
     gap: 2px;
-    padding: 8px;
-    border-right: 1px solid var(--border);
+    padding: var(--space-1) var(--space-3) var(--space-3);
     overflow-y: auto;
   }
   .tabs button {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 8px 10px;
+    gap: 10px;
+    min-height: 34px;
+    padding: 0 10px;
     border: 0;
     border-radius: var(--radius-sm);
     background: transparent;
+    color: color-mix(in srgb, var(--text), var(--muted) 35%);
     text-align: left;
   }
   .tabs button:hover {
@@ -112,22 +113,21 @@
   }
   .tabs button.on {
     background: var(--surface-strong);
+    color: var(--text);
     font-weight: 600;
   }
   .content {
     flex: 1 1 auto;
-    padding: 8px 20px 20px;
+    padding: 0 var(--space-6) var(--space-6) var(--space-3);
     overflow-y: auto;
   }
-  :global(.content h2) {
-    margin: 20px 0 4px;
-    font-size: 14px;
+  .content :global(h2) {
+    margin: var(--space-6) 0 var(--space-1);
+    font-size: var(--text-base);
+    font-weight: 600;
   }
-  :global(.content h2:first-child) {
-    margin-top: 12px;
-  }
-  :global(.content .divided > * + *) {
-    border-top: 1px solid var(--border);
+  .content :global(h2:first-child) {
+    margin-top: var(--space-2);
   }
   /* Narrow windows: the section list shrinks to its icons (named by their titles). */
   @media (max-width: 640px) {

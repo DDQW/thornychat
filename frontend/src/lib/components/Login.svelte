@@ -61,7 +61,8 @@
 </script>
 
 <main class="login">
-  <div class="panel card">
+  <div class="panel">
+    <img class="mark" src="/logo.svg" alt="" width="64" height="64" />
     <h1>Sign in to ThornyChat</h1>
 
     {#if session.note}
@@ -126,12 +127,23 @@
     padding: 24px;
   }
   .panel {
-    width: min(380px, 100%);
-    padding: 28px;
+    width: min(400px, 100%);
+    padding: var(--space-8);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+    box-shadow: var(--shadow-lg);
+  }
+  .mark {
+    display: block;
+    margin-bottom: var(--space-4);
   }
   h1 {
-    margin: 0 0 4px;
-    font-size: 22px;
+    margin: 0 0 var(--space-1);
+    font-size: var(--text-xl);
+  }
+  .panel > p.muted {
+    margin: 0 0 var(--space-5);
   }
   .wide {
     width: 100%;
