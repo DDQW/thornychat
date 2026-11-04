@@ -36,8 +36,8 @@
   --border: rgb(242 242 242 / 0.12);
   --radius: 10px;
   --radius-sm: 6px;
-  --name-l: 80%;
-  --name-c: 0.11;
+  --name-l: 75%;
+  --name-c: 0.16;
   --font: system-ui, 'Segoe UI Variable', 'Segoe UI', 'ThornyChat CJK Fallback', sans-serif;
   --sidebar-width: 280px;
   --members-width: 240px;

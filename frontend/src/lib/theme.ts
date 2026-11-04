@@ -57,8 +57,8 @@ export function themeVariables(theme: ThemeConfig): Record<string, string> {
     '--radius-sm': `${Math.max(2, theme.corner_radius * 0.6)}px`,
     // Sender names are drawn in a per-user hue; the theme decides how bright.
     // OKLCH lightness, so every hue clears 4.5:1 on the theme's own ground.
-    '--name-l': theme.dark ? '80%' : '44%',
-    '--name-c': theme.dark ? '0.11' : '0.13',
+    '--name-l': theme.dark ? '75%' : '42%',
+    '--name-c': theme.dark ? '0.16' : '0.17',
     '--font': `${theme.font_family ? `"${theme.font_family.replace(/"/g, '')}", ` : ''}system-ui, "Segoe UI Variable", "Segoe UI", "ThornyChat CJK Fallback", sans-serif`,
   };
 }

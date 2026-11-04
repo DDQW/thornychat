@@ -41,8 +41,8 @@ describe('theme variables', () => {
   });
 
   it('brightens sender names on dark themes and darkens them on light ones', () => {
-    expect(themeVariables(dark)['--name-l']).toBe('80%');
-    expect(themeVariables({ ...dark, dark: false })['--name-l']).toBe('44%');
+    expect(themeVariables(dark)['--name-l']).toBe('75%');
+    expect(themeVariables({ ...dark, dark: false })['--name-l']).toBe('42%');
   });
 
   it('measures contrast the way WCAG does', () => {

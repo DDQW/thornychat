@@ -3,6 +3,7 @@
   import { groupMembers, layoutRoster, searchMembers, tagColor, visibleRows } from '../members';
   import { memberMenu } from '../memberMenu';
   import { rooms } from '../stores/rooms.svelte';
+  import { settings } from '../stores/settings.svelte';
   import { session } from '../stores/session.svelte';
   import { ui } from '../stores/ui.svelte';
   import { plural } from '../format';
@@ -17,6 +18,7 @@
   const members = $derived(rooms.members[roomId] ?? []);
   const groups = $derived(groupMembers(searchMembers(members, filter), rooms.powerTags[roomId] ?? []));
   const roster = $derived(layoutRoster(groups));
+  const dark = $derived(settings.value?.theme.dark ?? true);
 
   // Only the rows on screen exist (see `layoutRoster`).
   let scroller = $state<HTMLDivElement>();
@@ -54,7 +56,7 @@
     <div class="list" style:height="{roster.height}px">
       {#each visible as row (row.key)}
         {#if row.kind === 'header'}
-          <h3 style:top="{row.top}px" style:color={tagColor(row.group.color)}>{row.group.name} — {row.group.members.length}</h3>
+          <h3 style:top="{row.top}px" style:color={tagColor(row.group.color, dark)}>{row.group.name} — {row.group.members.length}</h3>
         {:else}
           {@const member = row.member}
           <button
@@ -65,7 +67,7 @@
             title={member.user_id}
           >
             <Avatar src={member.avatar_url} name={member.display_name || member.user_id} seed={member.user_id} size={28} />
-            <span class="truncate grow" style:color={tagColor(row.group.color)}>{member.display_name || member.user_id}</span>
+            <span class="truncate grow" style:color={tagColor(row.group.color, dark)}>{member.display_name || member.user_id}</span>
             {#if rooms.ignored.includes(member.user_id)}<span class="muted small">ignored</span>{/if}
           </button>
         {/if}

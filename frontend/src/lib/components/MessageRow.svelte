@@ -7,7 +7,7 @@
   import { formatDateTime, formatTime, nameHue, plural, truncate } from '../format';
   import { memberMenu } from '../memberMenu';
   import { emojiLoadFailed, plainTextToHtml } from '../richtext';
-  import { avatarOf, ignoredAuthor, memberMap, nameOf } from '../people';
+  import { avatarOf, ignoredAuthor, memberMap, nameOf, teamColor } from '../people';
   import { composer } from '../stores/composer.svelte';
   import { emoji } from '../stores/emoji.svelte';
   import { settings } from '../stores/settings.svelte';
@@ -39,6 +39,8 @@
   const owner = $derived(eventId ?? `local:${item.timestamp_ms}`);
   const pending = $derived(eventId === null && mine);
   const name = $derived(nameOf(item.sender, roomId, item.sender_display_name));
+  /** The sender's team colour (red team, purple team…), as in the members panel. */
+  const team = $derived(teamColor(item.sender, roomId));
   const avatar = $derived(avatarOf(item.sender, roomId) ?? item.sender_avatar_url);
   const content = $derived(item.content);
   const canModerate = $derived((memberMap(roomId)?.get(myId)?.power_level ?? 0) >= 50);
@@ -198,7 +200,7 @@
   <div class="main" id="body-{owner}">
     {#if !continuation && content.type !== 'Emote'}
       <div class="head">
-        <button class="plain name" onclick={openSender}>{name}</button>
+        <button class="plain name" style:color={team} onclick={openSender}>{name}</button>
         <time class="muted small" title={when}>{formatTime(item.timestamp_ms)}</time>
         {#if item.shield}
           <span class="shield {item.shield.type.toLowerCase()}" title={item.shield.data}><Icon name={item.shield.type === 'Red' ? 'shield-alert' : 'shield'} size={14} /></span>
@@ -236,7 +238,7 @@
     {:else if content.type === 'Emote'}
       <div class="content emote">
         <span class="star">*</span>
-        <button class="plain name" onclick={openSender}>{name}</button>
+        <button class="plain name" style:color={team} onclick={openSender}>{name}</button>
         <MessageBody text={content.data} formatted={item.formatted_body} />
         {#if item.edited}<span class="edited muted small">(edited)</span>{/if}
       </div>

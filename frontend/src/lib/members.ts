@@ -121,28 +121,73 @@ export function safeColor(color: string | null): string | null {
   return color && /^#[0-9a-f]{6}$/i.test(color) ? color : null;
 }
 
+/** The tag a member at `level` belongs to: the highest one at or below it, else null. */
+export function tagFor(level: number, tags: readonly PowerLevelTag[]): PowerLevelTag | null {
+  let best: PowerLevelTag | null = null;
+  for (const tag of tags) if (level >= tag.level && (!best || tag.level > best.level)) best = tag;
+  return best;
+}
+
 /**
- * A tag colour as the roster draws it: the room's hue, with the theme's name
- * lightness and chroma (the same as per-user name colours), so a room's
- * pure `#0000ff` doesn't come out unreadable on the dark theme. A grey tag
- * stays grey. Null for a missing or unsafe colour.
+ * A tag colour as it is drawn, in the roster and on names in the timeline:
+ * the room's own hue and saturation, so a red team reads as red and a purple
+ * team as purple, with only the lightness moved as far as text needs to stay
+ * readable on the theme (a pure `#0000ff` is 2.4:1 on the dark theme). A grey
+ * tag stays grey. Null for a missing or unsafe colour.
  */
-export function tagColor(color: string | null): string | null {
+export function tagColor(color: string | null, dark = true): string | null {
   const hex = safeColor(color);
   if (!hex) return null;
   const [r, g, b] = [1, 3, 5].map((at) => parseInt(hex.slice(at, at + 2), 16) / 255) as [number, number, number];
-  if (Math.max(r, g, b) - Math.min(r, g, b) < 0.08) return 'oklch(var(--name-l) 0 0)';
-  return `oklch(var(--name-l) var(--name-c) ${Math.round(oklchHue(r, g, b))})`;
+  const [lightness, rawChroma, rawHue] = toOklch(r, g, b);
+  const [chroma, hue] = rawChroma < 0.03 ? [0, 0] : [rawChroma, rawHue];
+  // Lighter (dark theme) or darker (light theme) in small steps until it
+  // clears 4.5:1 on the theme's background, where names sit; a colour that
+  // already does stays exactly as the room chose it. (Held to the hover grey
+  // instead, a red team came out salmon.)
+  const ground = dark ? 0.0103 : 0.8879; // #1A1A1A, #F2F2F2
+  const step = dark ? 0.01 : -0.01;
+  let l = lightness;
+  while (l > 0 && l < 1 && contrast(relativeLuminance(oklchToSrgb(l, chroma, hue)), ground) < 4.5) l += step;
+  l = Math.min(1, Math.max(0, l));
+  return chroma === 0 ? `oklch(${Math.round(l * 100)}% 0 0)` : `oklch(${Math.round(l * 100)}% ${chroma.toFixed(3)} ${Math.round(hue)})`;
 }
 
-/** The OKLCH hue (0-360) of an sRGB colour with 0-1 channels. */
-export function oklchHue(r: number, g: number, b: number): number {
+function contrast(a: number, b: number): number {
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+
+/** WCAG relative luminance of 0-1 sRGB channels. */
+function relativeLuminance([r, g, b]: [number, number, number]): number {
+  const linear = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+}
+
+/** OKLCH to 0-1 sRGB, clipped into gamut per channel (as Chromium draws an out-of-gamut oklch()). */
+export function oklchToSrgb(lightness: number, chroma: number, hue: number): [number, number, number] {
+  const a = chroma * Math.cos((hue * Math.PI) / 180);
+  const b = chroma * Math.sin((hue * Math.PI) / 180);
+  const l = (lightness + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m = (lightness - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s = (lightness - 0.0894841775 * a - 1.291485548 * b) ** 3;
+  const linear = [
+    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+    -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
+  ];
+  const gamma = (c: number) => (c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055);
+  return linear.map((c) => Math.min(1, Math.max(0, gamma(Math.min(1, Math.max(0, c)))))) as [number, number, number];
+}
+
+/** OKLCH lightness (0-1), chroma and hue (0-360) of an sRGB colour with 0-1 channels. */
+export function toOklch(r: number, g: number, b: number): [number, number, number] {
   const linear = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
   const [lr, lg, lb] = [linear(r), linear(g), linear(b)];
   const l = Math.cbrt(0.4122214708 * lr + 0.5363325363 * lg + 0.0514459929 * lb);
   const m = Math.cbrt(0.2119034982 * lr + 0.6806995451 * lg + 0.1073969566 * lb);
   const s = Math.cbrt(0.0883024619 * lr + 0.2817188376 * lg + 0.6299787005 * lb);
+  const lightness = 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s;
   const a = 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s;
   const bb = 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s;
-  return ((Math.atan2(bb, a) * 180) / Math.PI + 360) % 360;
+  return [lightness, Math.hypot(a, bb), ((Math.atan2(bb, a) * 180) / Math.PI + 360) % 360];
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PowerLevelTag, RoomMember } from './bindings';
-import { groupMembers, HEADER_HEIGHT, layoutRoster, MEMBER_HEIGHT, safeColor, searchMembers, tagColor, visibleRows } from './members';
+import { groupMembers, HEADER_HEIGHT, layoutRoster, MEMBER_HEIGHT, safeColor, searchMembers, tagColor, tagFor, visibleRows } from './members';
 
 const member = (id: string, name: string, power_level: number): RoomMember => ({ user_id: id, display_name: name, avatar_url: null, power_level });
 
@@ -107,15 +107,34 @@ describe('safeColor', () => {
 });
 
 describe('tagColor', () => {
-  it('keeps the hue and takes the rest from the theme', () => {
-    expect(tagColor('#0000ff')).toBe('oklch(var(--name-l) var(--name-c) 264)');
-    expect(tagColor('#ff0000')).toBe('oklch(var(--name-l) var(--name-c) 29)');
-    expect(tagColor('#00ff00')).toBe('oklch(var(--name-l) var(--name-c) 142)');
-    expect(tagColor('#ff00ff')).toBe('oklch(var(--name-l) var(--name-c) 328)');
+  it('keeps the hue and saturation the room chose', () => {
+    expect(tagColor('#ff0000')).toBe('oklch(66% 0.258 29)');
+    expect(tagColor('#800080')).toBe('oklch(63% 0.193 328)');
+    expect(tagColor('#ffc0cb')).toBe('oklch(87% 0.074 7)');
+  });
+  it('moves only the lightness, as far as it takes to read on the theme', () => {
+    expect(tagColor('#0000ff')).toBe('oklch(69% 0.313 264)');
+    expect(tagColor('#ff0000', false)).toBe('oklch(54% 0.258 29)');
+    expect(tagColor('#800080', false)).toBe('oklch(42% 0.193 328)');
   });
   it('leaves grey tags grey and drops unsafe ones', () => {
-    expect(tagColor('#808080')).toBe('oklch(var(--name-l) 0 0)');
+    expect(tagColor('#808080')).toBe('oklch(61% 0 0)');
     expect(tagColor('url(x)')).toBeNull();
     expect(tagColor(null)).toBeNull();
+  });
+});
+
+describe('tagFor', () => {
+  const tags = [
+    { level: 100, name: 'Admins', color: null },
+    { level: 50, name: 'Red team', color: '#ff0000' },
+    { level: 1, name: 'Purple team', color: '#800080' },
+  ];
+  it('picks the highest tag at or below the level', () => {
+    expect(tagFor(50, tags)?.name).toBe('Red team');
+    expect(tagFor(75, tags)?.name).toBe('Red team');
+    expect(tagFor(1, tags)?.name).toBe('Purple team');
+    expect(tagFor(101, tags)?.name).toBe('Admins');
+    expect(tagFor(0, tags)).toBeNull();
   });
 });

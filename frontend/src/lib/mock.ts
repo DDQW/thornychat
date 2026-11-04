@@ -382,8 +382,8 @@ export function createMockBackend(): Backend {
               room_id: id,
               tags: [
                 { level: 100, name: 'Admins', color: '#0000ff' },
-                { level: 50, name: 'Moderators', color: '#00ff00' },
-                { level: 0, name: 'Red team', color: '#ff0000' },
+                { level: 50, name: 'Red team', color: '#ff0000' },
+                { level: 0, name: 'Purple team', color: '#800080' },
               ],
             },
           });

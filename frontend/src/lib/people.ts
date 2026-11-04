@@ -4,7 +4,9 @@
 
 import type { ReplyPreview, RoomMember } from './bindings';
 import { friendlyUserId } from './format';
+import { tagColor, tagFor } from './members';
 import { rooms } from './stores/rooms.svelte';
+import { settings } from './stores/settings.svelte';
 
 const lookups = new WeakMap<RoomMember[], Map<string, RoomMember>>();
 
@@ -43,4 +45,17 @@ export function ignoredAuthor(reply: ReplyPreview): string | null {
 
 export function avatarOf(userId: string, roomId: string | null = rooms.selectedId): string | null {
   return memberMap(roomId)?.get(userId)?.avatar_url ?? null;
+}
+
+/**
+ * The colour of the team (MSC3949 power-level tag) `userId` is on in `roomId`,
+ * as the members panel draws it, or null when the room gives their level no
+ * coloured tag: then the name keeps its own per-user colour.
+ */
+export function teamColor(userId: string, roomId: string): string | null {
+  const tags = rooms.powerTags[roomId];
+  if (!tags?.length) return null;
+  const level = memberMap(roomId)?.get(userId)?.power_level;
+  if (level === undefined) return null;
+  return tagColor(tagFor(level, tags)?.color ?? null, settings.value?.theme.dark ?? true);
 }
